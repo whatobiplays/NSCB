@@ -28,6 +28,10 @@ _Avoid_: advanced mode
 Reconstructing original content, when sufficient evidence exists, from content that was previously transformed in a reversible way.
 _Avoid_: undo
 
+**Operation Plan**:
+A fully resolved, read-only description of the work NSCB intends to perform before a mutating job begins, including its selected inputs, outputs, and required operations.
+_Avoid_: dry run, preview
+
 **Job**:
 A user-requested unit of work containing one or more content operations that can be tracked as a whole.
 _Avoid_: work list, queued text list
