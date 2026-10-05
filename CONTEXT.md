@@ -36,6 +36,10 @@ _Avoid_: dry run, preview
 A user-requested unit of work containing one or more content operations that can be tracked as a whole.
 _Avoid_: work list, queued text list
 
+**Interrupted Job**:
+A prior job run that was active when its owning process ended and therefore reached a terminal state without completing, failing, or being cancelled normally.
+_Avoid_: paused job, resumable job
+
 **Device transfer**:
 Moving supported content from the host to a connected Nintendo Switch for installation or storage without broad device administration.
 _Avoid_: MTP mode
