@@ -40,6 +40,14 @@ _Avoid_: executable plan, immutable extraction hash list
 Reconstructing original content, when sufficient evidence exists, from content that was previously transformed in a reversible way.
 _Avoid_: undo
 
+**Output directory**:
+The user-visible directory where standalone NSCB publishes validated results. The standalone configuration field is `output_dir`; its default is `NSCB_output` under the current user's platform Documents directory.
+_Avoid_: workspace, temp directory, output root
+
+**Workspace**:
+Disposable storage used for intermediate execution artifacts before validated publication. Workspace data is not user output and may be cleaned when NSCB can prove it owns the abandoned artifacts.
+_Avoid_: output directory, published results
+
 **Operation Plan**:
 A fully resolved, immutable specification of a Job's work that contains the decisions and context needed to execute without further user input or prompting, including selected inputs, outputs, operations, providers, prerequisites, and conflict policy.
 _Avoid_: dry run, preview, interactive execution recipe
