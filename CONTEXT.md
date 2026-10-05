@@ -48,6 +48,10 @@ _Avoid_: saved executable plan
 A user-requested unit of work containing one or more content operations that can be tracked as a whole.
 _Avoid_: work list, queued text list
 
+**Completed with issues**:
+A terminal Job outcome for independent-item work where at least one item completed successfully and at least one item failed. It is not an overall success outcome.
+_Avoid_: partial success
+
 **Interrupted Job**:
 A prior job run that was active when its owning process ended and therefore reached a terminal state without completing, failing, or being cancelled normally.
 _Avoid_: paused job, resumable job
@@ -60,13 +64,17 @@ _Avoid_: authoritative metadata, required metadata service
 The operations a currently connected Switch and its compatible responder can demonstrably support for the active connection, such as installation, storage transfer, inventory, or dumping. Planning relies on capabilities rather than assuming features from a responder name or version alone.
 _Avoid_: device mode, assumed responder features
 
-**Device transfer**:
-Moving supported content from the host to a connected Nintendo Switch for installation or storage without broad device administration.
-_Avoid_: MTP mode
+**Installation**:
+Sending supported content to a connected Switch through the responder's installation pathway.
+_Avoid_: device transfer, send
+
+**Storage transfer**:
+Copying supported content to an exposed destination on connected Switch storage without implying installation.
+_Avoid_: install, generic send
 
 **Dump**:
-Copying supported content from a connected Nintendo Switch to host storage.
-_Avoid_: backup, export
+Copying responder-exposed device data from a connected Switch to host storage through a qualified NSCB dump/backup capability. Dump may include supported content and non-content data such as save data when that capability is modeled and qualified by NSCB.
+_Avoid_: generic device export
 
 **Legacy implementation**:
 The whatobiplays/NSC_BUILDER codebase used as behavioral evidence and reference material, not as an architectural or compatibility contract.
