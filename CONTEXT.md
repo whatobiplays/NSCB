@@ -44,6 +44,10 @@ _Avoid_: paused job, resumable job
 Optional external catalog information layered onto metadata derived from the content itself, such as regional descriptions, images, release data, or update/DLC availability. Enrichment can improve the experience but is never required for core local operations.
 _Avoid_: authoritative metadata, required metadata service
 
+**Device capability set**:
+The operations a currently connected Switch and its compatible responder can demonstrably support for the active connection, such as installation, storage transfer, inventory, or dumping. Planning relies on capabilities rather than assuming features from a responder name or version alone.
+_Avoid_: device mode, assumed responder features
+
 **Device transfer**:
 Moving supported content from the host to a connected Nintendo Switch for installation or storage without broad device administration.
 _Avoid_: MTP mode
