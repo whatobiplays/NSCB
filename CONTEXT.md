@@ -60,6 +60,14 @@ _Avoid_: partial success
 A prior job run that was active when its owning process ended and therefore reached a terminal state without completing, failing, or being cancelled normally.
 _Avoid_: paused job, resumable job
 
+**No changes required**:
+A successful outcome for an explicitly requested transformation whose preconditions are satisfied but whose target change is already unnecessary. It does not imply that a replacement artifact was created.
+_Avoid_: skipped, failed eligibility
+
+**Already up to date**:
+A successful outcome when an existing destination is positively proven identical to the artifact the operation intends to publish, so rewriting it is unnecessary.
+_Avoid_: overwrite skipped, assumed identical
+
 **Metadata enrichment**:
 Optional external catalog information layered onto metadata derived from the content itself, such as regional descriptions, images, release data, or update/DLC availability. Enrichment can improve the experience but is never required for core local operations.
 _Avoid_: authoritative metadata, required metadata service
@@ -67,6 +75,10 @@ _Avoid_: authoritative metadata, required metadata service
 **Device responder**:
 Switch-side software that exposes host-accessible device capabilities such as installation, storage transfer, inventory, or dumping. The responder is a user-owned prerequisite rather than software managed by NSCB.
 _Avoid_: device driver, NSCB service
+
+**Device transport**:
+The host-side mechanism used to communicate with a Device responder. Different supported platforms may use different transport adapters while exposing the same NSCB device semantics.
+_Avoid_: device protocol, responder
 
 **Device protocol**:
 The host-to-responder communication contract NSCB depends on, including its transport and responder-specific capability semantics.
