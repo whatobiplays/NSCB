@@ -1,0 +1,3 @@
+# Version configuration and migrate durable state transactionally
+
+NSCB versions its standalone TOML configuration and durable SQLite state independently. Compatible older configuration is migrated in memory, while rewriting a hand-edited TOML file is an explicit save/migration action with backup rather than an automatic launch-time rewrite; unsupported future/incompatible configuration fails clearly. SQLite Job/history state uses automatic versioned transactional migrations, preserves prior state on migration failure, and takes a recovery copy before migrations that cannot be trivially rolled back rather than silently recreating or discarding history.
