@@ -1,0 +1,3 @@
+# Use stable extracted-content manifests for repacking workflows
+
+Extraction emits a versioned extracted-content manifest by default, describing the logical source structure, content roles/identities, and relative extracted paths; selective extraction records that the manifest is incomplete. The manifest is a stable interchange format intended to cross process and time boundaries, so breaking changes require a new manifest version with explicit migration or rejection behavior. Users may intentionally edit extracted files before repacking: the manifest describes structure and intent rather than hash-locking payloads, while `pack` validates the current files and resulting structure; exact-original reconstruction remains the separate Restoration capability.
