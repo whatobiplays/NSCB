@@ -1,0 +1,3 @@
+# Govern the explicit 1.x public compatibility surface
+
+NSCB treats its supported Rust facade, explicit CLI commands/flags and exit classes, normal JSON/JSONL schemas, extracted-content manifest schemas, configuration keys and migration expectations, stable machine-readable error semantics, and documented supported-platform floors as compatibility-governed public surfaces for the 1.x line. Breaking any of those requires a breaking release, while TUI layout/copy, diagnostics formatting, provider internals, and Plan snapshot structure are intentionally not stable APIs. Once a stable error code ships, its semantic meaning is never reassigned during 1.x; compatible releases may add new codes, and consumers must tolerate unknown newer codes within the documented error class.
