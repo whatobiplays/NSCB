@@ -1,3 +1,5 @@
 # Keep the embedded engine runtime-neutral and host-configured
 
 The supported NSCB embedding facade does not require callers to adopt Tokio, standalone NSCB filesystem state, or an NSCB database. A reusable NSCB engine owns the executor resources needed by its implementation and is constructed through an explicit builder from narrow host-provided capabilities such as key access, workspace location, managed-tool storage/provisioning, and diagnostics; hosts observe work through typed execution handles with completion, cancellation, and authoritative state rather than hidden globals or standalone persistence.
+
+One Engine admits at most one mutating execution at a time; a second mutating start receives a typed busy/admission result and the host owns any queueing policy. Safely independent read-only work may execute concurrently. NSCB does not impose a machine-wide mutation lock: separate processes/engines rely on last-moment destination revalidation and exclusive/atomic promotion, so a concurrent destination winner causes a typed conflict rather than implicit last-writer-wins behavior.
