@@ -40,6 +40,10 @@ _Avoid_: work list, queued text list
 A prior job run that was active when its owning process ended and therefore reached a terminal state without completing, failing, or being cancelled normally.
 _Avoid_: paused job, resumable job
 
+**Metadata enrichment**:
+Optional external catalog information layered onto metadata derived from the content itself, such as regional descriptions, images, release data, or update/DLC availability. Enrichment can improve the experience but is never required for core local operations.
+_Avoid_: authoritative metadata, required metadata service
+
 **Device transfer**:
 Moving supported content from the host to a connected Nintendo Switch for installation or storage without broad device administration.
 _Avoid_: MTP mode
