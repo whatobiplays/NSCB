@@ -40,6 +40,10 @@ _Avoid_: executable plan, immutable extraction hash list
 Reconstructing original content, when sufficient evidence exists, from content that was previously transformed in a reversible way.
 _Avoid_: undo
 
+**Rename/Sanitize**:
+A filesystem-organization operation that deterministically changes a Content file's path or filename without changing its content bytes. Sanitization removes or replaces path components that are unsafe or incompatible with the destination platform; romanization remains a separate explicit choice.
+_Avoid_: content transformation, repack, implicit romanization
+
 **Output directory**:
 The user-visible directory where standalone NSCB publishes validated results. The standalone configuration field is `output_dir`; its default is `NSCB_output` under the current user's platform Documents directory.
 _Avoid_: workspace, temp directory, output root
