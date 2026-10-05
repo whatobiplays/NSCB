@@ -12,6 +12,10 @@ _Avoid_: game file, ROM
 An operation that produces changed content or a changed container from one or more content files, such as repacking, conversion, splitting, trimming, patching, compression, decompression, or restoration.
 _Avoid_: mode, processing mode
 
+**Content patch**:
+An explicitly requested content transformation that changes a compatibility, rights, metadata, or composition property, such as title-rights removal, delta removal, RSV/keygeneration lowering, update-partition removal, or linked-account requirement patching.
+_Avoid_: cleaning, safe mode, recommended patch profile
+
 **Inspection**:
 Read-only interpretation of a content file's structure and metadata.
 _Avoid_: file info mode
