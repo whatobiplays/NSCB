@@ -37,8 +37,12 @@ Reconstructing original content, when sufficient evidence exists, from content t
 _Avoid_: undo
 
 **Operation Plan**:
-A fully resolved, read-only description of the work NSCB intends to perform before a mutating job begins, including its selected inputs, outputs, and required operations.
-_Avoid_: dry run, preview
+A fully resolved, immutable specification of a Job's work that contains the decisions and context needed to execute without further user input or prompting, including selected inputs, outputs, operations, providers, prerequisites, and conflict policy.
+_Avoid_: dry run, preview, interactive execution recipe
+
+**Plan snapshot**:
+A read-only serialized representation of an Operation Plan for inspection or automation output. A Plan snapshot is not itself executable or a replay contract.
+_Avoid_: saved executable plan
 
 **Job**:
 A user-requested unit of work containing one or more content operations that can be tracked as a whole.
