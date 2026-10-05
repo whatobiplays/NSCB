@@ -1,0 +1,3 @@
+# Keep stable machine output except for Plan snapshots
+
+NSCB's normal JSON and JSONL result/event surfaces remain explicitly versioned compatibility contracts, but serialized Plan snapshots are a deliberate exception: they identify their output kind and producing NSCB version yet carry no cross-version schema or replay guarantee. `--json` emits exactly one structured success or handled-error document on stdout and uses the stable process exit class for outcome; `--jsonl` emits typed semantic records and ends every normally handled execution with exactly one authoritative terminal result record. Human and technical diagnostics remain on stderr rather than contaminating machine-readable stdout.
