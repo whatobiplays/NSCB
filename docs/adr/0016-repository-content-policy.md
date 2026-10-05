@@ -1,0 +1,3 @@
+# Keep proprietary content out of the repository
+
+NSCB never commits third-party copyrighted or proprietary material that lacks explicit redistribution rights, including commercial game data or excerpts, Nintendo firmware/system/title content, keys, tickets, certificates, or proprietary derived assets/metadata. Repository fixtures must be synthetic or clearly redistributable with documented provenance; optional real-content qualification may occur privately outside Git and can never be the sole required public CI gate.
