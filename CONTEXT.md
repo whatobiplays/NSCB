@@ -32,6 +32,10 @@ _Avoid_: verification level, best-effort verification
 Materializing selected embedded content or filesystem data from a content file without changing the source.
 _Avoid_: advanced mode
 
+**Extracted-content manifest**:
+A versioned stable description of extracted logical structure, content roles or identities, and relative extracted paths. It can be used later to repack current extracted files, including intentionally edited files.
+_Avoid_: executable plan, immutable extraction hash list
+
 **Restoration**:
 Reconstructing original content, when sufficient evidence exists, from content that was previously transformed in a reversible way.
 _Avoid_: undo
@@ -59,6 +63,14 @@ _Avoid_: paused job, resumable job
 **Metadata enrichment**:
 Optional external catalog information layered onto metadata derived from the content itself, such as regional descriptions, images, release data, or update/DLC availability. Enrichment can improve the experience but is never required for core local operations.
 _Avoid_: authoritative metadata, required metadata service
+
+**Device responder**:
+Switch-side software that exposes host-accessible device capabilities such as installation, storage transfer, inventory, or dumping. The responder is a user-owned prerequisite rather than software managed by NSCB.
+_Avoid_: device driver, NSCB service
+
+**Device protocol**:
+The host-to-responder communication contract NSCB depends on, including its transport and responder-specific capability semantics.
+_Avoid_: responder implementation
 
 **Device capability set**:
 The operations a currently connected Switch and its compatible responder can demonstrably support for the active connection, such as installation, storage transfer, inventory, or dumping. Planning relies on capabilities rather than assuming features from a responder name or version alone.
