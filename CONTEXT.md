@@ -25,7 +25,7 @@ Read-only validation of a content file's structure, integrity, signatures, hashe
 _Avoid_: checking
 
 **Verification profile**:
-A named, typed scope of verification checks. Verification succeeds only when every check applicable to the selected profile actually runs and passes.
+A named, typed scope of verification checks. v1 defines Full, which includes every applicable structural, integrity, hash, signature, and cryptographic check, and Structural, which validates container structure and relationships without claiming cryptographic authenticity. Verification succeeds only when every applicable check in the selected profile runs and passes.
 _Avoid_: verification level, best-effort verification
 
 **Extraction**:
