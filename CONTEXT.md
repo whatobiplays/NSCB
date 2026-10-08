@@ -8,6 +8,10 @@ NSCB is a Nintendo Switch content-file toolkit. It exists to inspect, verify, tr
 A supported Nintendo Switch content container or archive handled by NSCB, including NSP, XCI, NSZ, XCZ, NCA, and supported split-file variants.
 _Avoid_: game file, ROM
 
+**Split set**:
+A single logical Content file represented by an ordered, complete collection of physical segments in a recognized split layout. Any recognized segment identifies the whole set; missing or inconsistent segments do not constitute valid Content.
+_Avoid_: separate content files, partial valid archive
+
 **Content transformation**:
 An operation that produces changed content or a changed container from one or more content files, such as repacking, conversion, splitting, trimming, patching, compression, decompression, or restoration.
 _Avoid_: mode, processing mode
