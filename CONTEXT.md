@@ -32,9 +32,9 @@ _Avoid_: checking
 A named, typed scope of verification checks. v1 defines Full, which includes every applicable structural, integrity, hash, signature, and cryptographic check, and Structural, which validates container structure and relationships without claiming cryptographic authenticity. Verification succeeds only when every applicable check in the selected profile runs and passes.
 _Avoid_: verification level, best-effort verification
 
-**Modification-qualified installation**:
-An explicitly authorized device-installation pathway that accepts positively recognized intentional Content modifications when all remaining applicable integrity and compatibility checks pass, without treating invalid original signatures as Full Verification success.
-_Avoid_: Full Verification, ignoring signature errors, unrestricted installation
+**Modification-qualified device write**:
+An explicitly authorized Installation or Storage transfer of intentionally modified Content, based on the file's recognized modification semantics and all remaining applicable integrity/compatibility checks rather than the identity of the producing tool. It never treats invalid original signatures as Full Verification success.
+_Avoid_: Full Verification, ignoring signature errors, unrestricted device transfer
 
 **Extraction**:
 Materializing selected embedded content or filesystem data from a content file without changing the source.
