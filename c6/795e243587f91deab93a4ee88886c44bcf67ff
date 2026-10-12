@@ -1,0 +1,19 @@
+.gitignore
+  s_580f932c955f7c::t_c494101a29b0f6 19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "4d1b43f3275d3056ef0ecda4713fa024a352bca4",
+  "prompts": {},
+  "sessions": {
+    "s_580f932c955f7c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12f1b-7318-7983-bcc2-8f318e6aa6a9",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
