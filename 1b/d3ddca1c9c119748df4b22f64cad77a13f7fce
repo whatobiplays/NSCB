@@ -1,0 +1,31 @@
+.serena/.gitignore
+  s_6e45b70b7be182::t_74b69bee08846c 1-2
+.serena/project.yml
+  s_6e45b70b7be182::t_5bbd14938976bf 1-168
+docs/product-contract.json
+  s_0e06dddf4b365d::t_91bb3161350375 1-117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ec3fea91508d4a5fdda1a757fe4213cbfc2b6325",
+  "prompts": {},
+  "sessions": {
+    "s_0e06dddf4b365d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a129e5-12de-75e2-9bc4-b63956a5150f",
+        "model": "gpt-6-sol"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_6e45b70b7be182": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e67d-0812-78b0-a9f2-1a3c3d5e671b",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
