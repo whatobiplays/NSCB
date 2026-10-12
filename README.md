@@ -28,6 +28,6 @@ The repository-owned `Makefile` is the canonical entrypoint for local validation
 make all
 ```
 
-Individual profiles are also available through `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting; validation targets never modify source files.
+Individual profiles are also available through `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting, and `make clean` removes Cargo-generated build artifacts. Validation targets never modify source files.
 
 See [development validation](docs/validation.md) for the exact Cargo commands, the MCP profile-to-target mapping, and the server-side configuration required to enable MCP validation.

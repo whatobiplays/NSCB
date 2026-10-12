@@ -13,6 +13,8 @@ NSCB uses a repository-owned `Makefile` for consistent local and automated valid
 
 `make` prints the available targets. `make fmt` **modifies source files** and must not be mapped to a validation profile. `make lint` only checks formatting.
 
+`make clean` runs `cargo clean` to remove generated Cargo build artifacts. It does not remove source files or `Cargo.lock`, and is deliberately excluded from the `all` validation profile.
+
 ## GPT Repo MCP integration
 
 GPT Repo MCP's `repo_validate` accepts named validation profiles, not arbitrary shell commands. Its Make runner requires an explicit mapping in the MCP server's **local** `config.local.json` for the approved NSCB repository.
