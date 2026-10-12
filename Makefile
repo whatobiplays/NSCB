@@ -1,5 +1,3 @@
-.DEFAULT_GOAL := help
-
 .PHONY: help fmt typecheck lint test build smoke all
 
 help:
