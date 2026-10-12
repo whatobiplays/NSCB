@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "product": {
+    "name": "NSCB",
+    "purpose": "A cross-platform, Rust-owned Nintendo Switch content-file toolkit for trustworthy inspection, verification, extraction, transformation, packaging, compression, restoration, organization, and qualified local-USB device workflows. It serves CLI/TUI users and embedding Rust hosts through one typed, runtime-neutral Engine facade without bundling proprietary content."
+  },
+  "primary_users": [
+    {
+      "id": "desktop-content-user",
+      "role": "Desktop user managing supported Nintendo Switch content files",
+      "technical_level": "Comfortable with file formats and advanced content workflows; needs truthful inspection and safe, understandable results",
+      "work_context": "Inspects and organizes legally obtained NSP/XCI/NSZ/XCZ/NCA content, including split and multi-content packages, across supported desktop platforms."
+    },
+    {
+      "id": "cli-automation-user",
+      "role": "CLI automation author",
+      "technical_level": "Technical user composing unattended scripts and consuming stable typed machine output",
+      "work_context": "Runs deterministic batch inspection and processing without prompts, parses JSON/JSONL and exit classes, and needs reproducible error and outcome semantics."
+    },
+    {
+      "id": "rust-embedding-host",
+      "role": "Developer embedding NSCB in another Rust application",
+      "technical_level": "Experienced Rust host/application developer integrating typed capabilities and controlling lifecycle and application policy",
+      "work_context": "Integrates the supported Engine directly, including in Argus ROM Toolkit, while owning configuration, persistence, execution environment, UI and output policy."
+    }
+  ],
+  "jobs_to_be_done": [
+    {
+      "id": "inspect-content",
+      "statement": "Inspect supported content-file structure and validated identity/metadata read-only, with byte-derived format recognition and truthful errors."
+    },
+    {
+      "id": "verify-content",
+      "statement": "Validate selected structural and cryptographic checks with clear applicability, prerequisites and integrity/authenticity semantics."
+    },
+    {
+      "id": "transform-content",
+      "statement": "Explicitly convert, extract, split, repack, patch, compress or restore compatible content without silent content changes."
+    },
+    {
+      "id": "preserve-and-organize",
+      "statement": "Organize or move content with deterministic names, complete Split sets, safe conflicts, byte verification and atomic publication that preserves originals on failure."
+    },
+    {
+      "id": "plan-and-automate",
+      "statement": "Review fully resolved immutable Operation Plans and execute noninteractive Jobs with typed terminal outcomes, durable evidence and stable machine output."
+    },
+    {
+      "id": "manage-qualified-device-operations",
+      "statement": "Use an explicit locally connected, user-operated Switch responder for capability-qualified installation, storage transfer, inventory and selected Dump/backup operations."
+    },
+    {
+      "id": "embed-engine",
+      "statement": "Embed NSCB through one stable typed Rust facade while the host retains lifecycle, persistence, runtime, provider and destination policy."
+    },
+    {
+      "id": "qualify-distributions",
+      "statement": "Deliver portable, integrity-checked binaries and auditable dependency/provider qualifications for the four declared v1 host targets."
+    }
+  ],
+  "must_reduce": [
+    "Loss or corruption of original content during split, transformation, move or publication",
+    "Keeping duplicate originals because combined multi-content packages cannot safely be split",
+    "Misleading format, verification, authenticity, modification or device-success claims",
+    "Unexplained failures, hidden content changes, implicit interactive prompts and unpredictable batch behavior",
+    "Platform-specific divergence in Engine behavior or CLI automation contracts",
+    "Embedding friction from bundled standalone state, mandatory executors or leaking private implementation crates"
+  ],
+  "must_not_become": [
+    "An in-place port of legacy NSC_BUILDER or a public API coupled to its architecture",
+    "An unrestricted launcher for arbitrary external helpers or unqualified user-installed executables",
+    "A distribution of proprietary Nintendo keys, tickets, firmware, personal certificates or unlicensed game material",
+    "A Switch-side responder manager, remote device-administration suite or unqualified device writer",
+    "A workflow that silently patches content, overwrites original files, self-elevates, self-updates or reports unsupported success",
+    "An embedding facade that forces host adoption of standalone NSCB configuration, SQLite, user-directory storage or Tokio",
+    "A dedicated Flutter NSCB application in v1"
+  ],
+  "experience_principles": [
+    "Validated bytes and typed structural evidence outrank filenames, extensions and provider-native text",
+    "Read-only inspection and verification never silently mutate user content",
+    "Every content-changing operation is explicit, planned, revalidated and safely published",
+    "Success claims reflect executed applicable checks and verified postconditions, not skipped work or helper exit status",
+    "Stable typed results, machine records and error categories separate semantics from localized presentation",
+    "CLI, TUI and embedding adapters consume the same Rust-owned application capabilities",
+    "Embedded hosts own outer lifecycle, runtime, storage and product-specific policy",
+    "Only synthetic or explicitly licensed redistributable fixtures belong in the repository; provider binaries require exact-version qualification",
+    "Capabilities and release compatibility are advertised only when demonstrated on supported platforms"
+  ],
+  "canonical_docs": [
+    "CONTEXT.md",
+    "docs/ROADMAP.md",
+    "docs/adr/0001-rust-core.md",
+    "docs/adr/0003-plan-first-jobs.md",
+    "docs/adr/0004-embeddable-rust-core.md",
+    "docs/adr/0006-stable-rust-embedding-facade.md",
+    "docs/adr/0007-host-owned-embedded-lifecycle.md",
+    "docs/adr/0008-runtime-neutral-embedded-engine.md",
+    "docs/adr/0010-stable-errors-localized-messages.md",
+    "docs/adr/0012-typed-operation-api.md",
+    "docs/adr/0016-repository-content-policy.md",
+    "docs/adr/0017-v1-hosts-and-distribution.md",
+    "docs/adr/0018-v1-capability-baseline.md",
+    "docs/adr/0021-content-and-helper-trust-boundaries.md",
+    "docs/adr/0023-machine-output-contract.md",
+    "docs/adr/0026-public-compatibility-boundary.md",
+    "docs/adr/0027-content-recognition-and-deterministic-batch-input.md",
+    "docs/research/third-party-dependency-assessment.md"
+  ],
+  "governance": {
+    "mode": "advisory",
+    "product_review_required_for": [
+      "product_slice",
+      "product_correction"
+    ],
+    "checkpoint_every_root_runs": 5
+  }
+}
