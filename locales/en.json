@@ -1,0 +1,19 @@
+{
+  "usage": "Usage: nscb probe <path> [--json]",
+  "success": {
+    "one": "PFS0 container probe found one entry; payload begins at byte {payload_offset}.",
+    "other": "PFS0 container probe found {entry_count} entries; payload begins at byte {payload_offset}."
+  },
+  "output_failure": "nscb: unable to write command output",
+  "errors": {
+    "unsupported_format": "The outer-container format is not supported.",
+    "truncated_input": "The input is incomplete.",
+    "invalid_header": "The container header is invalid.",
+    "invalid_string_table": "The container filename table is invalid.",
+    "invalid_entry": "A container entry is invalid.",
+    "limit_exceeded": "The input exceeds a supported limit.",
+    "name_too_long": "A container filename exceeds the supported limit.",
+    "input_unavailable": "The input could not be read.",
+    "resource_limit_exceeded": "The container probe could not reserve bounded resources."
+  }
+}
