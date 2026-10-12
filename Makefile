@@ -1,4 +1,4 @@
-.PHONY: help fmt typecheck lint test build smoke all
+.PHONY: help fmt typecheck lint test build smoke all clean
 
 help:
 	@printf '%s\n' \
@@ -9,7 +9,8 @@ help:
 		'  make test       Run the complete Rust test suite' \
 		'  make build      Build the CLI and library' \
 		'  make smoke      Run real-CLI subprocess integration tests' \
-		'  make fmt        Apply Rust formatting (mutates source)'
+		'  make fmt        Apply Rust formatting (mutates source)' \
+		'  make clean      Remove Cargo-generated build artifacts'
 
 fmt:
 	cargo fmt --all
@@ -31,3 +32,6 @@ smoke:
 	cargo test --locked --test cli_subprocess
 
 all: typecheck lint test build smoke
+
+clean:
+	cargo clean
