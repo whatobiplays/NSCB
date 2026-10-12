@@ -1,0 +1,59 @@
+.gitignore
+  s_ea8831b8e36fee::t_28230709a403b4 1
+CONTEXT.md
+  s_ea8831b8e36fee::t_1c46d8c2e7b0b8 23-26,28,32
+Cargo.lock
+  s_ea8831b8e36fee::t_a035cdb5847ed3 1-114
+Cargo.toml
+  s_ea8831b8e36fee::t_9eac069a41e2c9 1-20
+README.md
+  s_ea8831b8e36fee::t_a9de9f379f4bbb 1-30
+docs/adr/0021-content-and-helper-trust-boundaries.md
+  s_ea8831b8e36fee::t_a7ff0841c5dac6 3
+docs/container-probe.md
+  s_ea8831b8e36fee::t_691e9e114deb26 1-51
+locales/en.json
+  s_ea8831b8e36fee::t_dfd44b8390a436 1-19
+rust-toolchain.toml
+  s_ea8831b8e36fee::t_080139b8a11075 1-4
+src/cli.rs
+  s_ea8831b8e36fee::t_105be933eb5e54 1-382
+src/engine.rs
+  s_ea8831b8e36fee::t_fdcae0ea857509 1-115
+src/error.rs
+  s_ea8831b8e36fee::t_9b21080ef96fe5 1-152
+src/lib.rs
+  s_ea8831b8e36fee::t_124a8fadeb6458 1-14
+src/localization.rs
+  s_ea8831b8e36fee::t_9b6cddae00b77f 1-3
+src/localization/english.rs
+  s_ea8831b8e36fee::t_d4a9af9e611f65 1-99
+src/main.rs
+  s_ea8831b8e36fee::t_33af40af83a204 1-17
+src/pfs0.rs
+  s_ea8831b8e36fee::t_e768cea16b532d 1-509
+tests/cli_subprocess.rs
+  s_ea8831b8e36fee::t_aa7b22cc5ba51f 1-240
+tests/public_facade.rs
+  s_ea8831b8e36fee::t_1de210e571a013 1-133
+tests/support/mod.rs
+  s_ea8831b8e36fee::t_efbd4545b3ddfc 1
+tests/support/synthetic_pfs0.rs
+  s_ea8831b8e36fee::t_8cd6d0d563ec46 1-78
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d5a4988b046404fc1f6d527b9b60196f1c24e8cb",
+  "prompts": {},
+  "sessions": {
+    "s_ea8831b8e36fee": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a12a1d-66b3-7970-8e63-c143e20f8adf",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
