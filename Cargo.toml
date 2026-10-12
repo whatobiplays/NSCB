@@ -1,0 +1,20 @@
+[package]
+name = "nscb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98.1"
+description = "A bounded, read-only PFS0 Container Probe for NSCB"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "nscb"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

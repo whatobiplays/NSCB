@@ -20,12 +20,16 @@ _Avoid_: mode, processing mode
 An explicitly requested content transformation that changes a compatibility, rights, metadata, or composition property, such as title-rights removal, delta removal, RSV/keygeneration lowering, update-partition removal, or linked-account requirement patching.
 _Avoid_: cleaning, safe mode, recommended patch profile
 
+**Container Probe**:
+Separately requested, read-only validation and reporting of supported outer-container framing. It does not interpret embedded content or establish content identity.
+_Avoid_: Inspection, Verification
+
 **Inspection**:
-Read-only interpretation of a content file's structure and metadata.
+Read-only, content-aware interpretation of supported content and metadata.
 _Avoid_: file info mode
 
 **Verification**:
-Read-only validation of a content file's structure, integrity, signatures, hashes, or cryptographic metadata where applicable.
+A distinct read-only operation that validates a content file's structure, integrity, signatures, hashes, or cryptographic metadata where applicable.
 _Avoid_: checking
 
 **Verification profile**:
