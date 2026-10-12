@@ -22,9 +22,12 @@ See [the Container Probe documentation](docs/container-probe.md) for the typed r
 
 Rust 1.98.1 is pinned as both the development toolchain and minimum supported Rust version. Dependency versions are recorded in `Cargo.lock`.
 
-```text
-cargo fmt --all -- --check
-cargo test --locked
-cargo build --locked
-cargo clippy --locked --all-targets --all-features -- -D warnings
+The repository-owned `Makefile` is the canonical entrypoint for local validation and GPT Repo MCP validation profiles:
+
+```sh
+make all
 ```
+
+Individual profiles are also available through `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting; validation targets never modify source files.
+
+See [development validation](docs/validation.md) for the exact Cargo commands, the MCP profile-to-target mapping, and the server-side configuration required to enable MCP validation.
