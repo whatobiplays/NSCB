@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install the repository Rust toolchain
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())[
+              "toolchain"
+          ]
+          command = [
+              "rustup",
+              "toolchain",
+              "install",
+              toolchain["channel"],
+              "--profile",
+              toolchain.get("profile", "minimal"),
+          ]
+          for component in toolchain.get("components", []):
+              command.extend(["--component", component])
+          subprocess.run(command, check=True)
+          PY
+
+      - name: Run repository validation
+        run: make all

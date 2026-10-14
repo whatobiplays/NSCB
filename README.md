@@ -22,12 +22,18 @@ See [the Container Probe documentation](docs/container-probe.md) for the typed r
 
 Rust 1.98.1 is pinned as both the development toolchain and minimum supported Rust version. Dependency versions are recorded in `Cargo.lock`.
 
+The content-policy checker and its tests use only the Python 3.11+ standard library. It checks prohibited-content patterns and verifies provenance for every binary fixture against both the Git index and working tree. The initial fixture registry is intentionally empty because the repository contains no binary fixtures.
+
 The repository-owned `Makefile` is the canonical entrypoint for local validation and GPT Repo MCP validation profiles:
 
 ```sh
 make all
 ```
 
-Individual profiles are also available through `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting, and `make clean` removes Cargo-generated build artifacts. Validation targets never modify source files.
+Individual profiles are also available through `make content-policy`, `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting, and `make clean` removes Cargo-generated build artifacts. Validation targets never modify source files.
 
-See [development validation](docs/validation.md) for the exact Cargo commands, the MCP profile-to-target mapping, and the server-side configuration required to enable MCP validation.
+Use `make all-git-ai-paused` when a full validation run should temporarily stop the global Git AI background service while the Python content-policy suite runs. This affects Git AI users across repositories for the duration of that suite. Normal `make all`, `make test`, and GitHub Actions do not pause Git AI. See [development validation](docs/validation.md) for restoration limits, concurrency risks, and recovery steps.
+
+That opt-in executes the profiles in `make all` order even with `-j`; only the Python content-policy suite uses the pause wrapper.
+
+GitHub Actions runs `make all` on `ubuntu-24.04` for pushes to `main` and pull requests. See [development validation](docs/validation.md) for the exact commands, the MCP profile-to-target mapping, and the server-side configuration required to enable MCP validation. See [the repository content policy](docs/adr/0016-repository-content-policy.md) for fixture provenance and prohibited-content rules.
