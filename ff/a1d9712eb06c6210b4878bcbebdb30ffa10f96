@@ -1,0 +1,19 @@
+.serena/project.yml
+  s_5d62df6b616a0e::t_3d290b892d7d03 5-20,29,34-35,174-187
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "ffa1d9712eb06c6210b4878bcbebdb30ffa10f96",
+  "prompts": {},
+  "sessions": {
+    "s_5d62df6b616a0e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a131c2-ae01-7141-874c-cf889bf8eb74",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
