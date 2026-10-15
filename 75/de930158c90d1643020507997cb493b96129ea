@@ -1,0 +1,19 @@
+locales/en.json
+  s_567a14c404eb46::t_61c51572971a32 29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "75de930158c90d1643020507997cb493b96129ea",
+  "prompts": {},
+  "sessions": {
+    "s_567a14c404eb46": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a13e20-83b5-7e92-b6b6-1536b42c1c8d",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <daniel@oblivioncollectibles.com>"
+    }
+  }
+}
