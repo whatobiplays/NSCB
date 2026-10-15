@@ -8,6 +8,9 @@ use std::sync::OnceLock;
 #[derive(Deserialize)]
 struct Messages {
     usage: String,
+    recognition: String,
+    recognition_usage: String,
+    recognition_errors: HashMap<String, String>,
     success: SuccessMessages,
     output_failure: String,
     errors: HashMap<String, String>,
@@ -51,6 +54,54 @@ pub(crate) fn error_message(code: ContainerProbeErrorCode) -> &'static str {
 
 pub(crate) fn output_failure() -> &'static str {
     &messages().output_failure
+}
+
+/// Renders sanitized recognition facts with bundled presentation text.
+pub(crate) fn recognition(result: &nscb::ContentRecognitionResult) -> String {
+    let value = serde_json::to_value(result).expect("recognition facts serialize");
+    messages()
+        .recognition
+        .replace(
+            "{outcome}",
+            value["recognition"]["outcome"]
+                .as_str()
+                .unwrap_or("unknown"),
+        )
+        .replace(
+            "{family}",
+            value["recognition"]["family"]
+                .as_str()
+                .unwrap_or("not_established"),
+        )
+        .replace(
+            "{compression}",
+            value["recognition"]["compression_variant"]
+                .as_str()
+                .unwrap_or("not_established"),
+        )
+        .replace(
+            "{eligibility}",
+            value["package_structure_eligibility"]
+                .as_str()
+                .unwrap_or("not_established"),
+        )
+        .replace(
+            "{extension}",
+            value["extension_observation"]
+                .as_str()
+                .unwrap_or("unrecognized"),
+        )
+}
+/// Returns a localized sanitized recognition error.
+pub(crate) fn recognition_error(code: nscb::ContentRecognitionErrorCode) -> &'static str {
+    messages()
+        .recognition_errors
+        .get(code.as_str())
+        .expect("recognition error message")
+}
+
+pub(crate) fn recognition_usage() -> &'static str {
+    &messages().recognition_usage
 }
 
 #[cfg(test)]

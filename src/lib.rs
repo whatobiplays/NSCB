@@ -1,12 +1,20 @@
-//! Runtime-neutral Rust facade for a read-only PFS0 Container Probe.
+//! Runtime-neutral Rust facade for separate read-only Container Probe and recognition operations.
 //!
-//! The probe validates outer-container framing and reports structural facts.
-//! It does not interpret embedded content, read payload bytes, or establish
-//! content identity.
+//! Container Probe validates outer PFS0 framing without reading payloads.
+//! Recognition examines bounded structural metadata and reports positive families,
+//! uncertainty, and package/card structural eligibility without execution authority.
+//! Neither operation establishes title identity, authenticity, or Verification.
 
 mod engine;
 mod error;
 mod pfs0;
+mod recognition;
+
+pub use recognition::{
+    CompressionVariant, ContentRecognitionError, ContentRecognitionErrorCode,
+    ContentRecognitionRequest, ContentRecognitionResult, ExtensionObservation, RecognitionOutcome,
+    RecognizedFamily, StructuralEligibility, TicketNameObservation,
+};
 
 pub use engine::{
     ContainerFormat, ContainerProbeEntry, ContainerProbeRequest, ContainerProbeResult, Engine,

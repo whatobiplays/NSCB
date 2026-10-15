@@ -131,3 +131,36 @@ fn public_engine_rejects_a_directory_as_container_input() {
     assert_eq!(error.code(), ContainerProbeErrorCode::InputUnavailable);
     assert_eq!(error.to_string(), "the input could not be read");
 }
+
+#[test]
+fn recognition_preserves_input_and_observes_only_ticket_names() {
+    let bytes = support::synthetic_pfs0::pfs0(
+        &[support::synthetic_pfs0::EntrySpec {
+            name: "unvalidated.tik",
+            offset: 0,
+            size: 4,
+        }],
+        b"FAKE",
+    );
+    let input = support::synthetic_pfs0::TempInput::new(&bytes);
+    let result = nscb::Engine::new()
+        .recognize_content(nscb::ContentRecognitionRequest::new(input.path()))
+        .unwrap();
+    assert_eq!(
+        result.package_structure_eligibility,
+        nscb::StructuralEligibility::NotEstablished
+    );
+    assert_eq!(
+        result.ticket_name_observation,
+        nscb::TicketNameObservation::Present
+    );
+    assert_eq!(std::fs::read(input.path()).unwrap(), bytes);
+    let error = nscb::Engine::new()
+        .recognize_content(nscb::ContentRecognitionRequest::new(std::env::temp_dir()))
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        nscb::ContentRecognitionErrorCode::InputUnavailable
+    );
+    assert_eq!(error.to_string(), "input_unavailable");
+}

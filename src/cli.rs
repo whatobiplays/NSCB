@@ -1,4 +1,4 @@
-use nscb::{ContainerProbeError, ContainerProbeErrorCode, ContainerProbeResult, Engine};
+use nscb::{ContainerProbeError, ContainerProbeErrorCode, Engine};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
@@ -10,11 +10,11 @@ const EXIT_INPUT: i32 = 3;
 const EXIT_INTERNAL: i32 = 7;
 
 #[derive(Serialize)]
-struct SuccessDocument<'a> {
+struct SuccessDocument<'a, T> {
     schema_version: u8,
     kind: &'static str,
     nscb_version: &'static str,
-    result: &'a ContainerProbeResult,
+    result: &'a T,
 }
 
 #[derive(Serialize)]
@@ -30,9 +30,13 @@ struct ErrorDetail {
     code: &'static str,
 }
 
-struct ParsedProbe {
+/// A validated command line invocation shared by the `probe` and `recognize`
+/// subcommands: the target path, whether JSON output was requested, and which
+/// subcommand selects the operation.
+struct CliInvocation {
     path: PathBuf,
     json: bool,
+    recognize: bool,
 }
 
 /// Adapts typed Container Probe requests and errors to the stable CLI contract.
@@ -49,7 +53,20 @@ pub(crate) fn run(
             if json_requested {
                 return emit_error(stdout, "usage_error", EXIT_USAGE);
             }
-            return if writeln!(stderr, "{}", crate::localization::english::usage()).is_ok() {
+            return if writeln!(
+                stderr,
+                "{}",
+                if args
+                    .first()
+                    .is_some_and(|arg| arg == OsStr::new("recognize"))
+                {
+                    crate::localization::english::recognition_usage()
+                } else {
+                    crate::localization::english::usage()
+                }
+            )
+            .is_ok()
+            {
                 EXIT_USAGE
             } else {
                 EXIT_INTERNAL
@@ -57,6 +74,9 @@ pub(crate) fn run(
         }
     };
 
+    if parsed.recognize {
+        return run_recognition(parsed, engine, stdout, stderr);
+    }
     match engine.probe_container(nscb::ContainerProbeRequest::new(parsed.path)) {
         Ok(result) if parsed.json => {
             let document = SuccessDocument {
@@ -98,10 +118,10 @@ pub(crate) fn run(
     }
 }
 
-fn parse(args: &[OsString]) -> Result<ParsedProbe, ()> {
+fn parse(args: &[OsString]) -> Result<CliInvocation, ()> {
     if args
         .first()
-        .is_none_or(|command| command != OsStr::new("probe"))
+        .is_none_or(|command| command != OsStr::new("probe") && command != OsStr::new("recognize"))
     {
         return Err(());
     }
@@ -126,10 +146,74 @@ fn parse(args: &[OsString]) -> Result<ParsedProbe, ()> {
         }
     }
 
-    Ok(ParsedProbe {
+    Ok(CliInvocation {
         path: path.ok_or(())?,
         json,
+        recognize: args[0] == OsStr::new("recognize"),
     })
+}
+
+fn run_recognition(
+    parsed: CliInvocation,
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    match engine.recognize_content(nscb::ContentRecognitionRequest::new(parsed.path)) {
+        Ok(result) => {
+            let exit = if matches!(
+                result.recognition,
+                nscb::RecognitionOutcome::Recognized { .. }
+            ) {
+                EXIT_SUCCESS
+            } else {
+                EXIT_INPUT
+            };
+            let written = if parsed.json {
+                write_json(
+                    &SuccessDocument {
+                        schema_version: 1,
+                        kind: "content_recognition.result",
+                        nscb_version: env!("CARGO_PKG_VERSION"),
+                        result: &result,
+                    },
+                    stdout,
+                )
+            } else {
+                writeln!(
+                    stdout,
+                    "{}",
+                    crate::localization::english::recognition(&result)
+                )
+                .is_ok()
+            };
+            if written {
+                exit
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Err(error) => {
+            let exit = if error.code() == nscb::ContentRecognitionErrorCode::ResourceLimitExceeded {
+                EXIT_INTERNAL
+            } else {
+                EXIT_INPUT
+            };
+            if parsed.json {
+                emit_error(stdout, error.code().as_str(), exit)
+            } else if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::recognition_error(error.code())
+            )
+            .is_ok()
+            {
+                exit
+            } else {
+                EXIT_INTERNAL
+            }
+        }
+    }
 }
 
 fn write_json(document: &impl Serialize, stdout: &mut dyn Write) -> bool {
