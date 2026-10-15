@@ -26,7 +26,7 @@
     "resource_limit_exceeded": "Recognition could not reserve bounded resources."
   },
   "recognition_usage": "Usage: nscb recognize <path> [--json]",
-  "input_resolution_usage": "Usage: nscb resolve [--json] [--recursive] [--follow-symlinks] [--input-list <path>] <path>...",
+  "input_resolution_usage": "Usage: nscb resolve [--json] [--recursive] [--follow-symlinks] [--input-list <path>] [PATH...]",
   "input_resolution_success": "Resolved {input_count} logical input(s) across {segment_count} physical segment(s).",
   "input_resolution_errors": {
     "empty_selection": "No usable input was selected.",
