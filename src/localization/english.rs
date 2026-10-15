@@ -1,6 +1,6 @@
 //! English presentation strings for the standalone command-line adapter.
 
-use nscb::ContainerProbeErrorCode;
+use nscb::{ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -10,6 +10,9 @@ struct Messages {
     usage: String,
     recognition: String,
     recognition_usage: String,
+    input_resolution_usage: String,
+    input_resolution_success: String,
+    input_resolution_errors: HashMap<String, String>,
     recognition_errors: HashMap<String, String>,
     success: SuccessMessages,
     output_failure: String,
@@ -100,6 +103,28 @@ pub(crate) fn recognition_error(code: nscb::ContentRecognitionErrorCode) -> &'st
         .expect("recognition error message")
 }
 
+/// Renders the number of logical inputs and physical segments resolved.
+pub(crate) fn input_resolution_success(result: &InputResolutionResult) -> String {
+    let segment_count: usize = result.inputs.iter().map(|input| input.segments.len()).sum();
+    messages()
+        .input_resolution_success
+        .replace("{input_count}", &result.inputs.len().to_string())
+        .replace("{segment_count}", &segment_count.to_string())
+}
+
+/// Returns a sanitized English message for an input-resolution error.
+pub(crate) fn input_resolution_error(code: InputResolutionErrorCode) -> &'static str {
+    messages()
+        .input_resolution_errors
+        .get(code.as_str())
+        .expect("every input-resolution error code must have an English CLI message")
+}
+
+/// Returns the input-resolution command syntax.
+pub(crate) fn input_resolution_usage() -> &'static str {
+    &messages().input_resolution_usage
+}
+
 pub(crate) fn recognition_usage() -> &'static str {
     &messages().recognition_usage
 }
@@ -107,7 +132,7 @@ pub(crate) fn recognition_usage() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{error_message, success, usage};
-    use nscb::ContainerProbeErrorCode as Code;
+    use nscb::{ContainerProbeErrorCode as Code, InputResolutionErrorCode as InputCode};
 
     #[test]
     fn resource_contains_a_message_for_every_stable_error_code() {
@@ -141,6 +166,57 @@ mod tests {
             success(2, 64),
             "PFS0 container probe found 2 entries; payload begins at byte 64."
         );
+    }
+
+    #[test]
+    fn resource_contains_a_message_for_every_input_resolution_error_code() {
+        let codes = [
+            InputCode::EmptySelection,
+            InputCode::InputUnavailable,
+            InputCode::UnsupportedFilesystemEntry,
+            InputCode::UnsupportedSplitLayout,
+            InputCode::InvalidInputList,
+            InputCode::UnsupportedInputListVersion,
+            InputCode::UnsupportedRequiredFeature,
+            InputCode::DuplicateSelection,
+            InputCode::ResourceLimitExceeded,
+            InputCode::InvalidBaseDirectory,
+            InputCode::UnrepresentablePath,
+        ];
+
+        for code in codes {
+            assert!(
+                !super::input_resolution_error(code).is_empty(),
+                "missing message for {code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn input_resolution_success_formats_counts_and_usage_documents_the_command() {
+        use nscb::{Engine, InputResolutionRequest};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "nscb-input-message-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("item.bin"), b"x").unwrap();
+        let result = Engine::new()
+            .resolve_inputs(InputResolutionRequest::new(directory.clone()).with_path("item.bin"))
+            .unwrap();
+        let _ = std::fs::remove_dir_all(directory);
+
+        assert_eq!(
+            super::input_resolution_success(&result),
+            "Resolved 1 logical input(s) across 1 physical segment(s)."
+        );
+        assert!(super::input_resolution_usage().contains("--input-list"));
     }
 
     #[test]

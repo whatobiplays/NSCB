@@ -1,6 +1,6 @@
 # NSCB
 
-This repository currently contains a bounded, read-only PFS0 Container Probe.
+This repository contains bounded, read-only Rust Engine capabilities for PFS0 probing, content recognition, and deterministic input resolution.
 
 ## Container Probe
 
@@ -17,6 +17,18 @@ nscb probe <path> [--json]
 Successful JSON output is one versioned document with `kind: "container_probe.result"`. With `--json`, handled errors produce one versioned error document with a sanitized code. Exit classes are 0 for success, 2 for usage errors, 3 for input errors, and 7 for internal resource or output failures. No keys or credentials are required for this operation.
 
 See [the Container Probe documentation](docs/container-probe.md) for the typed result, validation bounds, JSON fields, error categories, and tested-platform evidence.
+
+## Input resolution
+
+Use the read-only resolver to preserve ordered explicit paths, discover supported directory candidates, or load a versioned JSON input list:
+
+```text
+nscb resolve [--json] [--recursive] [--follow-symlinks] [--input-list FILE] [PATH...]
+```
+
+Explicit regular files are accepted regardless of extension. Directory discovery filters by documented extensions, sorts candidates deterministically, and includes hidden files. Duplicate logical selections and suspected Split parts fail as input errors. No Split layout is reported as resolved until its completeness rules are positively qualified.
+
+See [Input selection and resolution](docs/input-selection.md) for the Rust API, JSON v1 contract, relative-path bases, traversal limits, duplicate identity behavior, and current Split-set deferral.
 
 ## Build and validation
 

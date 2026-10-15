@@ -7,6 +7,7 @@
 
 mod engine;
 mod error;
+mod input_resolution;
 mod pfs0;
 mod recognition;
 
@@ -20,3 +21,8 @@ pub use engine::{
     ContainerFormat, ContainerProbeEntry, ContainerProbeRequest, ContainerProbeResult, Engine,
 };
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
+
+pub use input_resolution::{
+    InputProvenance, InputResolutionError, InputResolutionErrorCode, InputResolutionRequest,
+    InputResolutionResult, InputSegment, InputSelection, InputSelectionSource, ResolvedInput,
+};
