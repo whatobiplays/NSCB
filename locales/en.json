@@ -15,5 +15,15 @@
     "name_too_long": "A container filename exceeds the supported limit.",
     "input_unavailable": "The input could not be read.",
     "resource_limit_exceeded": "The container probe could not reserve bounded resources."
-  }
+  },
+  "recognition": "Recognition: {outcome}; family: {family}; compression: {compression}; package structure eligibility: {eligibility}; extension: {extension}.",
+  "recognition_errors": {
+    "input_unavailable": "The input could not be read.",
+    "truncated_input": "The input is incomplete.",
+    "malformed_input": "The recognition structure is invalid.",
+    "unsupported_structure": "The structural profile is not supported.",
+    "limit_exceeded": "The input exceeds a cumulative recognition limit.",
+    "resource_limit_exceeded": "Recognition could not reserve bounded resources."
+  },
+  "recognition_usage": "Usage: nscb recognize <path> [--json]"
 }

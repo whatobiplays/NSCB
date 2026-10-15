@@ -67,3 +67,11 @@ After updating the server configuration, use `repo_validate` with the approved r
 ## CI usage
 
 GitHub Actions runs `make all` on `ubuntu-24.04` for pushes to `main` and pull requests. It installs the Rust channel and components declared in `rust-toolchain.toml`; the Makefile remains the single owner of validation commands. The workflow exercises Linux x86_64 only and does not change the broader platform qualification matrix.
+
+## Recognition validation
+
+Run `cargo test --locked recognition::tests`, the `public_facade` and
+`cli_subprocess` integration targets, then ordinary `make all`. Recognition
+fixtures are deterministic generated source data; no proprietary binaries or
+cryptographic material are required. The global Git AI pause target requires
+separate authorization and is not part of recognition validation.

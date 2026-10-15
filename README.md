@@ -37,3 +37,11 @@ Use `make all-git-ai-paused` when a full validation run should temporarily stop 
 That opt-in executes the profiles in `make all` order even with `-j`; only the Python content-policy suite uses the pause wrapper.
 
 GitHub Actions runs `make all` on `ubuntu-24.04` for pushes to `main` and pull requests. See [development validation](docs/validation.md) for the exact commands, the MCP profile-to-target mapping, and the server-side configuration required to enable MCP validation. See [the repository content policy](docs/adr/0016-repository-content-policy.md) for fixture provenance and prohibited-content rules.
+
+## Content recognition
+
+`cargo run --locked -- recognize <path> --json` reports byte-derived container
+or archive structure through `Engine::recognize_content`. Unknown and Ambiguous
+are distinct results with exit 3. Package/card structural eligibility is not
+execution authorization. See [Content recognition](docs/content-recognition.md)
+for supported profiles, encrypted NCA/NSX limitations, evidence and budgets.

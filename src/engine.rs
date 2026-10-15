@@ -24,6 +24,16 @@ impl ContainerProbeRequest {
 pub struct Engine;
 
 impl Engine {
+    /// Recognizes byte-supported structure without keys, execution authority, or content identity.
+    pub fn recognize_content(
+        &self,
+        request: crate::ContentRecognitionRequest,
+    ) -> Result<crate::ContentRecognitionResult, crate::ContentRecognitionError> {
+        let (mut file, size) =
+            open_regular_file(request.path()).map_err(crate::recognition::from_probe_error)?;
+        crate::recognition::recognize(&mut file, size, request.path())
+    }
+
     /// Creates an engine without global state, persistent storage, or a runtime requirement.
     pub const fn new() -> Self {
         Self
