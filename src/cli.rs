@@ -1,8 +1,11 @@
-use nscb::{ContainerProbeError, ContainerProbeErrorCode, Engine};
+use nscb::{
+    ContainerProbeError, ContainerProbeErrorCode, Engine, InputResolutionRequest,
+    InputSelectionSource,
+};
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USAGE: i32 = 2;
@@ -46,6 +49,13 @@ pub(crate) fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
+    if args
+        .first()
+        .is_some_and(|argument| argument == OsStr::new("resolve"))
+    {
+        return run_input_resolution(args, engine, stdout, stderr);
+    }
+
     let json_requested = args.iter().any(|argument| argument == OsStr::new("--json"));
     let parsed = match parse(args) {
         Ok(parsed) => parsed,
@@ -116,6 +126,277 @@ pub(crate) fn run(
             }
         }
     }
+}
+
+struct ResolveInvocation {
+    selections: Vec<ResolveSelection>,
+    json: bool,
+    recursive: bool,
+    follow_symlinks: bool,
+}
+
+enum ResolveSelection {
+    Path(PathBuf),
+    InputList(PathBuf),
+}
+
+#[derive(Serialize)]
+struct InputResolutionJsonResult {
+    inputs: Vec<InputResolutionJsonInput>,
+}
+
+#[derive(Serialize)]
+struct InputResolutionJsonInput {
+    segments: Vec<InputResolutionJsonSegment>,
+    provenance: InputResolutionJsonProvenance,
+}
+
+#[derive(Serialize)]
+struct InputResolutionJsonSegment {
+    path: String,
+    size_bytes: u64,
+}
+
+#[derive(Serialize)]
+struct InputResolutionJsonProvenance {
+    selection_index: usize,
+    source: InputSelectionSource,
+    selection_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_list_entry_index: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_list_entry_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discovered_directory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discovered_relative_path: Option<String>,
+}
+
+fn input_resolution_json(
+    result: &nscb::InputResolutionResult,
+) -> Result<InputResolutionJsonResult, nscb::InputResolutionErrorCode> {
+    let inputs = result
+        .inputs
+        .iter()
+        .map(|input| {
+            let segments = input
+                .segments
+                .iter()
+                .map(|segment| {
+                    Ok(InputResolutionJsonSegment {
+                        path: json_path(&segment.path)?,
+                        size_bytes: segment.size,
+                    })
+                })
+                .collect::<Result<Vec<_>, nscb::InputResolutionErrorCode>>()?;
+            Ok(InputResolutionJsonInput {
+                segments,
+                provenance: InputResolutionJsonProvenance {
+                    selection_index: input.provenance.selection_index,
+                    source: input.provenance.source,
+                    selection_path: json_path(&input.provenance.selection_path)?,
+                    input_list_entry_index: input.provenance.input_list_entry_index,
+                    input_list_entry_path: input
+                        .provenance
+                        .input_list_entry_path
+                        .as_deref()
+                        .map(json_path)
+                        .transpose()?,
+                    discovered_directory: input
+                        .provenance
+                        .discovered_directory
+                        .as_deref()
+                        .map(json_path)
+                        .transpose()?,
+                    discovered_relative_path: input
+                        .provenance
+                        .discovered_relative_path
+                        .as_deref()
+                        .map(json_path)
+                        .transpose()?,
+                },
+            })
+        })
+        .collect::<Result<Vec<_>, nscb::InputResolutionErrorCode>>()?;
+    Ok(InputResolutionJsonResult { inputs })
+}
+
+fn json_path(path: &Path) -> Result<String, nscb::InputResolutionErrorCode> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or(nscb::InputResolutionErrorCode::UnrepresentablePath)
+}
+
+fn run_input_resolution(
+    args: &[OsString],
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let json_requested = args.iter().any(|argument| argument == OsStr::new("--json"));
+    let parsed = match parse_input_resolution(args) {
+        Ok(parsed) => parsed,
+        Err(()) => {
+            if json_requested {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            return if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::input_resolution_usage()
+            )
+            .is_ok()
+            {
+                EXIT_USAGE
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let base = match std::env::current_dir() {
+        Ok(base) => base,
+        Err(_) if parsed.json => {
+            return emit_error(
+                stdout,
+                nscb::InputResolutionErrorCode::InvalidBaseDirectory.as_str(),
+                EXIT_INPUT,
+            );
+        }
+        Err(_) => {
+            return if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::input_resolution_error(
+                    nscb::InputResolutionErrorCode::InvalidBaseDirectory
+                )
+            )
+            .is_ok()
+            {
+                EXIT_INPUT
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let mut request = InputResolutionRequest::new(base)
+        .with_recursive(parsed.recursive)
+        .with_follow_symlinks(parsed.follow_symlinks);
+    for selection in parsed.selections {
+        request = match selection {
+            ResolveSelection::Path(path) => request.with_path(path),
+            ResolveSelection::InputList(path) => request.with_input_list(path),
+        };
+    }
+
+    match engine.resolve_inputs(request) {
+        Ok(result) if parsed.json => {
+            let result = match input_resolution_json(&result) {
+                Ok(result) => result,
+                Err(code) => return emit_error(stdout, code.as_str(), EXIT_INPUT),
+            };
+            if write_json(
+                &SuccessDocument {
+                    schema_version: 1,
+                    kind: "input_resolution.result",
+                    nscb_version: env!("CARGO_PKG_VERSION"),
+                    result: &result,
+                },
+                stdout,
+            ) {
+                EXIT_SUCCESS
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Ok(result) => {
+            let message = crate::localization::english::input_resolution_success(&result);
+            if writeln!(stdout, "{message}").is_ok() {
+                EXIT_SUCCESS
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Err(error) if parsed.json => emit_error(stdout, error.code().as_str(), EXIT_INPUT),
+        Err(error) => {
+            if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::input_resolution_error(error.code())
+            )
+            .is_ok()
+            {
+                EXIT_INPUT
+            } else {
+                EXIT_INTERNAL
+            }
+        }
+    }
+}
+
+fn parse_input_resolution(args: &[OsString]) -> Result<ResolveInvocation, ()> {
+    if args
+        .first()
+        .is_none_or(|command| command != OsStr::new("resolve"))
+    {
+        return Err(());
+    }
+
+    let mut selections = Vec::new();
+    let mut json = false;
+    let mut recursive = false;
+    let mut follow_symlinks = false;
+    let mut positional_only = false;
+    let mut index = 1;
+    while index < args.len() {
+        let argument = &args[index];
+        if !positional_only && argument == OsStr::new("--") {
+            positional_only = true;
+            index += 1;
+        } else if !positional_only && argument == OsStr::new("--json") {
+            if json {
+                return Err(());
+            }
+            json = true;
+            index += 1;
+        } else if !positional_only && argument == OsStr::new("--recursive") {
+            if recursive {
+                return Err(());
+            }
+            recursive = true;
+            index += 1;
+        } else if !positional_only && argument == OsStr::new("--follow-symlinks") {
+            if follow_symlinks {
+                return Err(());
+            }
+            follow_symlinks = true;
+            index += 1;
+        } else if !positional_only && argument == OsStr::new("--input-list") {
+            let Some(path) = args
+                .get(index + 1)
+                .filter(|path| !path.to_str().is_some_and(|value| value.starts_with("--")))
+            else {
+                return Err(());
+            };
+            selections.push(ResolveSelection::InputList(PathBuf::from(path)));
+            index += 2;
+        } else if !positional_only
+            && argument
+                .to_str()
+                .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else {
+            selections.push(ResolveSelection::Path(PathBuf::from(argument)));
+            index += 1;
+        }
+    }
+
+    Ok(ResolveInvocation {
+        selections,
+        json,
+        recursive,
+        follow_symlinks,
+    })
 }
 
 fn parse(args: &[OsString]) -> Result<CliInvocation, ()> {
@@ -462,5 +743,39 @@ mod tests {
         let exit = run(&args, &engine, &mut FailingWriter, &mut stderr);
 
         assert_eq!(exit, 7);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_resolution_json_does_not_lossily_encode_non_unicode_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let baseline = Engine::new()
+            .resolve_inputs(
+                nscb::InputResolutionRequest::new(std::env::current_dir().unwrap())
+                    .with_path("Cargo.toml"),
+            )
+            .expect("resolve an existing file for the serialization fixture");
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(
+            b"non-unicode-\xff.nsp".to_vec(),
+        ));
+
+        for path_field in 0..5 {
+            let mut result = baseline.clone();
+            let input = &mut result.inputs[0];
+            match path_field {
+                0 => input.segments[0].path = path.clone(),
+                1 => input.provenance.selection_path = path.clone(),
+                2 => input.provenance.input_list_entry_path = Some(path.clone()),
+                3 => input.provenance.discovered_directory = Some(path.clone()),
+                _ => input.provenance.discovered_relative_path = Some(path.clone()),
+            }
+
+            let error = match super::input_resolution_json(&result) {
+                Ok(_) => panic!("path field {path_field} must not be silently replaced"),
+                Err(error) => error,
+            };
+            assert_eq!(error.as_str(), "unrepresentable_path");
+        }
     }
 }

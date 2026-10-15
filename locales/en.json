@@ -25,5 +25,20 @@
     "limit_exceeded": "The input exceeds a cumulative recognition limit.",
     "resource_limit_exceeded": "Recognition could not reserve bounded resources."
   },
-  "recognition_usage": "Usage: nscb recognize <path> [--json]"
+  "recognition_usage": "Usage: nscb recognize <path> [--json]",
+  "input_resolution_usage": "Usage: nscb resolve [--json] [--recursive] [--follow-symlinks] [--input-list <path>] <path>...",
+  "input_resolution_success": "Resolved {input_count} logical input(s) across {segment_count} physical segment(s).",
+  "input_resolution_errors": {
+    "empty_selection": "No usable input was selected.",
+    "input_unavailable": "The input could not be read.",
+    "unsupported_filesystem_entry": "The filesystem entry is not supported.",
+    "unsupported_split_layout": "The selected path appears to use an unsupported Split layout.",
+    "invalid_input_list": "The input list is invalid.",
+    "unsupported_input_list_version": "The input-list schema version is not supported.",
+    "unsupported_required_feature": "The input list requires unsupported features.",
+    "duplicate_selection": "The selection contains a duplicate logical input.",
+    "resource_limit_exceeded": "Input resolution exceeded a safety limit.",
+    "invalid_base_directory": "The relative path base is not an absolute directory.",
+    "unrepresentable_path": "A filesystem path cannot be represented losslessly in JSON."
+  }
 }
