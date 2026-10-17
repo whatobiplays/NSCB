@@ -1,0 +1,49 @@
+tests/split_resolution.rs
+  s_4da3368bfe083c::t_5e23f704137053 1082-1107
+  s_4da3368bfe083c::t_6132fb49a20049 6,461
+  s_4da3368bfe083c::t_016eef063fe1d0 1080-1081
+src/strict_json.rs
+  s_4da3368bfe083c::t_d48884ffb35c58 26,60,83-84
+  s_4da3368bfe083c::t_5494bbc41a981e 166,172-179
+src/input_resolution.rs
+  s_4da3368bfe083c::t_e9d132883d4b88 1474
+  s_4da3368bfe083c::t_95bb1ab139cfba 1485-1496
+  s_4da3368bfe083c::t_5ccbd0f9b4d371 1451-1455,1469
+  s_4da3368bfe083c::t_ea276745af1445 1468,1470-1472
+src/localization/english.rs
+  s_4da3368bfe083c::t_49171bebb60538 185-194
+src/split_trust.rs
+  s_4da3368bfe083c::t_4bab247027a294 1693,2214,2216-2234,2240-2246,2248-2258,2299-2322,2326-2332,2339-2344
+  s_4da3368bfe083c::t_add97ffd14c975 850,860-866,872-878
+  s_4da3368bfe083c::t_e6628e05a3c096 557-558,574-577,614-630,632-654
+  s_4da3368bfe083c::t_2f360d45c8f7a2 2345-2380
+  s_4da3368bfe083c::t_1c5cabe754f342 2438-2439
+  s_4da3368bfe083c::t_8f4ac01693d8c8 867-871,885-889
+  s_4da3368bfe083c::t_db85296032c5f0 1694-1712
+  s_4da3368bfe083c::t_03a4285f963904 851-859
+  s_4da3368bfe083c::t_78718fd6351c2e 2215,2235-2239,2247
+  s_4da3368bfe083c::t_62b169a77e7ec4 2333-2338
+  s_4da3368bfe083c::t_1d666de008fd53 527-533,535
+  s_4da3368bfe083c::t_ea42983893ae06 212-218,220-224
+  s_4da3368bfe083c::t_f0e3c75585150f 219,534,539,2323-2325
+  s_4da3368bfe083c::t_00c0e001c17727 525
+  s_4da3368bfe083c::t_adb9727138a875 2259-2298
+src/lib.rs
+  s_4da3368bfe083c::t_38826cf4c023c3 41-42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6aafdecf4bf2051de8989eb70bfaad56632c059b",
+  "prompts": {},
+  "sessions": {
+    "s_4da3368bfe083c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a147c9-3778-7de3-b5ae-1186f7a50bc4",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
