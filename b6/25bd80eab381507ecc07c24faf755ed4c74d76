@@ -1,0 +1,19 @@
+src/split_trust.rs
+  s_4da3368bfe083c::t_65f7feff3dcd3d 353-355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b625bd80eab381507ecc07c24faf755ed4c74d76",
+  "prompts": {},
+  "sessions": {
+    "s_4da3368bfe083c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a147c9-3778-7de3-b5ae-1186f7a50bc4",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
