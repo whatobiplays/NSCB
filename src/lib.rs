@@ -7,9 +7,16 @@
 
 mod engine;
 mod error;
+mod file_identity;
 mod input_resolution;
 mod pfs0;
 mod recognition;
+mod sha256;
+mod split_manifest;
+mod split_reader;
+mod split_resolution;
+mod split_trust;
+mod strict_json;
 
 pub use recognition::{
     CompressionVariant, ContentRecognitionError, ContentRecognitionErrorCode,
@@ -23,6 +30,14 @@ pub use engine::{
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
 
 pub use input_resolution::{
-    InputProvenance, InputResolutionError, InputResolutionErrorCode, InputResolutionRequest,
-    InputResolutionResult, InputSegment, InputSelection, InputSelectionSource, ResolvedInput,
+    DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputProvenance, InputResolutionCapabilities,
+    InputResolutionControl, InputResolutionError, InputResolutionErrorCode,
+    InputResolutionProgress, InputResolutionRequest, InputResolutionResult, InputSegment,
+    InputSelection, InputSelectionSource, ResolvedInput, SplitQualification,
+    SplitQualificationKind,
+};
+pub use sha256::{InvalidSha256Digest, SHA256_HEX_LENGTH, Sha256Digest};
+pub use split_trust::{
+    LocalSplitTrustStore, SplitTrustReceipt, SplitTrustRestore, SplitTrustStore,
+    SplitTrustStoreError, SplitTrustWriter,
 };

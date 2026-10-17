@@ -182,6 +182,16 @@ mod tests {
             InputCode::ResourceLimitExceeded,
             InputCode::InvalidBaseDirectory,
             InputCode::UnrepresentablePath,
+            InputCode::SplitManifestMissing,
+            InputCode::SplitEvidenceUntrusted,
+            InputCode::SplitManifestInvalid,
+            InputCode::SplitManifestVersionUnsupported,
+            InputCode::SplitSetIncomplete,
+            InputCode::SplitIntegrityMismatch,
+            InputCode::SplitInputChanged,
+            InputCode::SplitStateUnavailable,
+            InputCode::SplitTrustStoreConfigurationInvalid,
+            InputCode::SplitResolutionCancelled,
         ];
 
         for code in codes {

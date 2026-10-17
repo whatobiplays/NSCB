@@ -39,6 +39,16 @@
     "duplicate_selection": "The selection contains a duplicate logical input.",
     "resource_limit_exceeded": "Input resolution exceeded a safety limit.",
     "invalid_base_directory": "The relative path base is not an absolute directory.",
-    "unrepresentable_path": "A filesystem path cannot be represented losslessly in JSON."
+    "unrepresentable_path": "A filesystem path cannot be represented losslessly in JSON.",
+    "split_manifest_missing": "The Split set has no matching sidecar manifest.",
+    "split_evidence_untrusted": "The Split set has no active local evidence receipt for its exact manifest.",
+    "split_manifest_invalid": "The Split manifest is malformed or inconsistent.",
+    "split_manifest_version_unsupported": "The Split manifest version or a required feature is unsupported.",
+    "split_set_incomplete": "The Split set is incomplete or contains a competing member.",
+    "split_integrity_mismatch": "The Split set does not match the sizes and digests declared by its manifest.",
+    "split_input_changed": "A Split input changed while it was being validated.",
+    "split_state_unavailable": "The Split trust store is unavailable or corrupt.",
+    "split_trust_store_configuration_invalid": "The configured Split trust-store location is invalid.",
+    "split_resolution_cancelled": "Split input resolution was cancelled."
   }
 }

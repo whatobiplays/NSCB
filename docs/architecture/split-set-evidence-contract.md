@@ -1,6 +1,6 @@
 # Split-set evidence contract (accepted v1 architecture)
 
-**Status:** Accepted architecture under ADR 0028; not yet implemented as a production capability or released as a stable wire protocol.
+**Status:** Accepted architecture under ADR 0028. Issue #6 implements read-only canonical resolution, the local receipt lookup contract, and a test-only source-backed issuance seam. Production source-to-Split publication and user-facing issuance remain future work; the wire protocol is not released.
 
 **Authority:** Accepted ADR 0028, interpreted with ADRs 0007, 0008, 0010, 0011, 0013, 0022, 0023, 0025, 0026, and 0027.
 

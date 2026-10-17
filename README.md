@@ -26,9 +26,15 @@ Use the read-only resolver to preserve ordered explicit paths, discover supporte
 nscb resolve [--json] [--recursive] [--follow-symlinks] [--input-list FILE] [PATH...]
 ```
 
-Explicit regular files are accepted regardless of extension. Directory discovery filters by documented extensions, sorts candidates deterministically, and includes hidden files. Duplicate logical selections and suspected Split parts fail as input errors. No Split layout is reported as resolved until its completeness rules are positively qualified.
+Explicit non-Split regular files are accepted regardless of extension; numeric Split-like names are interpreted through the canonical Split rules and fail closed when incomplete. Directory discovery filters ordinary files by documented extensions, sorts candidates deterministically, and includes hidden files. Duplicate logical selections fail as input errors.
 
-See [Input selection and resolution](docs/input-selection.md) for the Rust API, JSON v1 contract, relative-path bases, traversal limits, duplicate identity behavior, and current Split-set deferral.
+A canonical Split set is a directory of contiguous two-digit members with a sibling <directory-name>.nscb-split.json manifest. It resolves as one logical input only when the exact manifest bytes have an active host-local receipt, the declared source evidence matches, and every member and the reconstructed whole stream pass size and SHA-256 validation. The resolver performs lookup only; it never issues trust. A missing receipt fails closed, a missing state directory is treated as an empty store, and a corrupt or unreadable store is an internal state failure.
+
+The standalone CLI reads Split receipts from the state directory selected by the absolute NSCB_STATE_DIR environment variable, or from the platform state directory when it is unset. Relative or empty explicit state paths are configuration errors for Split inputs. A resolved store path that does not yet exist is treated as an empty store; if no native state-root environment exists, Split evidence is unavailable. Ordinary single-file resolution does not read the trust store.
+
+See [Input selection and resolution](docs/input-selection.md) for the Rust API, the additive resolve_inputs_with capability, JSON v1 qualification fields, relative-path bases, traversal and Split budgets, cancellation, state-directory rules, duplicate identity behavior, and the test-only issuance seam.
+
+Split receipts are host-local. Preserve the store root and its sibling continuity file as a unit: a copied root without local continuity evidence, a rolled-back authority index, or a receipt from another store fails closed. Recover a lost store root with `LocalSplitTrustStore::restore_from_snapshot`, which runs under the store lock and preserves later local revocations. Issuance and revocation are lock-serialized and journaled before state files are replaced. Newly created directories are synchronized on Unix; Windows uses write-through file replacement, but ordering of newly created directories is not qualified there.
 
 ## Build and validation
 
