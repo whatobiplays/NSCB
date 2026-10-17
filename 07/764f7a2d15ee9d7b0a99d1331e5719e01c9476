@@ -1,0 +1,21 @@
+src/split_trust.rs
+  s_4da3368bfe083c::t_e30de233de8274 353-354
+  s_4da3368bfe083c::t_4637ccfb29e590 502-511,513-518,2388-2408
+  s_4da3368bfe083c::t_bdc8b228c8d2a6 877,879-894,2362-2387
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "07764f7a2d15ee9d7b0a99d1331e5719e01c9476",
+  "prompts": {},
+  "sessions": {
+    "s_4da3368bfe083c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a147c9-3778-7de3-b5ae-1186f7a50bc4",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
