@@ -350,7 +350,8 @@ enum LoadedIndexes {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct SplitTrustRestore {
-    /// Snapshot entries that were absent locally or newer than local state.
+    /// Number of receipt files written from the snapshot, including repairs of
+    /// missing or differing receipts for entries that are otherwise unchanged.
     pub restored_entries: usize,
     /// Local revocations that the snapshot asked to replace.
     pub preserved_revocations: usize,
@@ -498,19 +499,23 @@ impl LocalSplitTrustStore {
 
     /// Explicitly merges a same-host store snapshot into this store.
     ///
-    /// A snapshot is a directory that contains an `authority.json` written by an
-    /// earlier copy of this store. Restoration is the supported way to recover
-    /// receipts after the store root is lost: it runs under the store lock,
-    /// requires the snapshot to carry the same host authority identifier as the
-    /// local continuity anchor, rejects a snapshot generation newer than the
-    /// anchor, and never replaces a local revocation with an issued record.
-    /// Receipt files named by restored issued entries are copied from the
-    /// snapshot after their authority binding and revision are validated.
+    /// A snapshot directory contains an `authority.json` written by an
+    /// earlier copy of this store. Restoration is the supported way to
+    /// recover receipts after the store root is lost: it runs under the store
+    /// lock, requires the snapshot to carry the same host authority identifier
+    /// as the local continuity anchor, rejects a snapshot generation newer
+    /// than the anchor, and never replaces a local revocation with an issued
+    /// record. Receipt files for restored issued entries are copied from the
+    /// snapshot after authority binding and revision validation. Missing or
+    /// differing receipt files for entries that are otherwise unchanged
+    /// locally are also repaired from the snapshot.
     ///
-    /// Replacing `authority.json` or a receipt file by hand is not a
-    /// restoration. A copied store root has no continuity anchor, and a
-    /// partially rolled-back root disagrees with the anchor, so both fail
-    /// closed instead of silently reviving trust.
+    /// Every issued entry must have a valid receipt after reconciliation. A
+    /// snapshot that cannot supply a missing receipt fails closed. Replacing
+    /// `authority.json` or a receipt file by hand is not restoration. A copied
+    /// store root without a continuity anchor, and a partially rolled-back
+    /// root whose indexes disagree with the anchor, both fail closed instead
+    /// of silently reviving trust.
     pub fn restore_from_snapshot(
         &self,
         snapshot_root: impl AsRef<Path>,
@@ -869,11 +874,24 @@ fn recover_pending_commit(paths: &StorePaths) -> Result<(), SplitTrustStoreError
         {
             return Err(SplitTrustStoreError::Corrupt);
         }
-    } else if existing_authority.is_some() {
+    } else if let Some(existing) = &existing_authority {
         // A root without its sibling continuity anchor is not enough local
-        // authority to recover a journal. Treat it as a copied or incomplete
-        // store instead of recreating the anchor from the journal.
-        return Err(SplitTrustStoreError::Corrupt);
+        // authority to recover a journal. The one safe exception is the
+        // initial empty bootstrap: a crash can leave authority.json and its
+        // journal after the first index write but before the continuity
+        // anchor. Replaying that journal recreates only an empty,
+        // receipt-free store, so it cannot promote any evidence.
+        let empty_bootstrap = existing.generation == 0
+            && existing.receipts.is_empty()
+            && authority.generation == 0
+            && authority.receipts.is_empty()
+            && existing.authority_id == authority.authority_id
+            && existing.same_authority_and_contents(&authority);
+        if !empty_bootstrap {
+            // Treat any other authority-only state as a copied or incomplete
+            // store instead of recreating the anchor from the journal.
+            return Err(SplitTrustStoreError::Corrupt);
+        }
     }
     if let Some(existing) = existing_authority {
         if existing.authority_id != authority.authority_id {
@@ -2339,6 +2357,53 @@ mod tests {
 
         fs::remove_dir_all(base).unwrap();
         fs::remove_dir_all(copied_base).unwrap();
+    }
+
+    #[test]
+    fn interrupted_first_use_bootstrap_recreates_an_empty_anchor() {
+        let base = temp_root();
+        let root = base.join("store");
+        let store = LocalSplitTrustStore::new(&root);
+        let paths = store.ensure_store_directories().unwrap();
+        let authority = super::IndexDocument::new(super::AUTHORITY_KIND, super::new_authority_id());
+        let journal = super::encode_commit(&authority, None).unwrap();
+        super::atomic_write(&paths.authority, &super::encode_index(&authority).unwrap()).unwrap();
+        super::atomic_write(&paths.pending, &journal).unwrap();
+        assert!(!paths.continuity.exists());
+
+        let manifest = Sha256Digest::digest(b"first-use recovery");
+        store
+            .issue(SplitTrustReceipt::new(
+                manifest,
+                1,
+                Sha256Digest::digest(b"first-use source"),
+            ))
+            .unwrap();
+
+        assert!(paths.continuity.is_file());
+        assert!(!paths.pending.exists());
+        assert!(store.lookup(&manifest).unwrap().is_some());
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn empty_authority_only_recovery_requires_an_exact_journal_match() {
+        let base = temp_root();
+        let root = base.join("store");
+        let store = LocalSplitTrustStore::new(&root);
+        let paths = store.ensure_store_directories().unwrap();
+        let authority = super::IndexDocument::new(super::AUTHORITY_KIND, super::new_authority_id());
+        let other = super::IndexDocument::new(super::AUTHORITY_KIND, super::new_authority_id());
+        super::atomic_write(&paths.authority, &super::encode_index(&authority).unwrap()).unwrap();
+        super::atomic_write(&paths.pending, &super::encode_commit(&other, None).unwrap()).unwrap();
+
+        let manifest = Sha256Digest::digest(b"mismatched bootstrap");
+        assert_eq!(
+            store.lookup(&manifest).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+        assert!(!paths.continuity.exists());
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
