@@ -5,16 +5,48 @@ NSCB is a Nintendo Switch content-file toolkit. It exists to inspect, verify, tr
 ## Language
 
 **Content file**:
-A supported Nintendo Switch content container or archive handled by NSCB, including NSP, XCI, NSZ, XCZ, NCA, and supported split-file variants.
+A supported Nintendo Switch content container or archive, represented as a regular file or as a qualified Split set whose reconstructed bytes independently establish a supported Content family.
 _Avoid_: game file, ROM
 
+**Logical byte stream**:
+An exact ordered sequence of bytes with a known length, independently of whether it is recognized Nintendo Switch Content.
+_Avoid_: Content file, verified container
+
 **Split set**:
-A single logical Content file represented by an ordered, complete collection of physical segments in a recognized split layout. Any recognized segment identifies the whole set; missing or inconsistent segments do not constitute valid Content.
+A single logical byte stream represented by an ordered, complete collection of physical segments in a recognized split layout. It is Nintendo Switch Content only when independently recognized as such.
 _Avoid_: separate content files, partial valid archive
 
+**Candidate Split representation**:
+A filesystem arrangement resembling a Split layout whose completeness and consistency have not yet been established. It is not a qualified Split set.
+_Avoid_: partial valid Split set, qualified Content
+
+**Qualified Split set**:
+A Split set whose segment membership and exact reconstructed bytes are established by independently retained source evidence.
+_Avoid_: plausible Split set, recognized Content
+
+**Split manifest**:
+A versioned declaration of a source's expected length and digest and the ordered physical segments intended to reproduce it. A manifest alone is not authoritative source evidence.
+_Avoid_: input list, executable plan, trust certificate
+
+**Split-set completeness evidence**:
+Independently retained evidence that a Split set reconstructs the exact bytes and length of an observed source file. It makes no claim about that source's upstream provenance or authenticity.
+_Avoid_: Content Verification, signature validity
+
+**Local trust receipt**:
+A revocable host-retained record linking a Split manifest to source evidence established during an authorized, completed Split operation. It is not a portable digital signature.
+_Avoid_: signed manifest, authenticity certificate
+
 **Content transformation**:
-An operation that produces changed content or a changed container from one or more content files, such as repacking, conversion, splitting, trimming, patching, compression, decompression, or restoration.
+An operation that produces changed content or a changed container from one or more content files, such as repacking, conversion, container-aware Content splitting, trimming, patching, compression, decompression, or restoration.
 _Avoid_: mode, processing mode
+
+**Generic byte-stream splitting**:
+A byte-preserving filesystem operation that divides any explicitly selected regular file into ordered segments. It requires no Content Recognition and establishes no Nintendo Content identity, authenticity, Verification, or eligibility for container-aware operations.
+_Avoid_: Content transformation, container-aware Content splitting
+
+**Container-aware Content splitting**:
+A Content transformation that splits supported package or container input, or input selected through an extracted-content manifest, under ADR 0022's eligibility rules. A standalone loose NCA is ineligible for this transformation.
+_Avoid_: generic byte-stream splitting, arbitrary file splitting
 
 **Content patch**:
 An explicitly requested content transformation that changes a compatibility, rights, metadata, or composition property, such as title-rights removal, delta removal, RSV/keygeneration lowering, update-partition removal, or linked-account requirement patching.
