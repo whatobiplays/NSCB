@@ -1448,13 +1448,12 @@ fn absolute_path(base: &Path, path: &Path) -> PathBuf {
 /// traverses a symlink.
 ///
 /// The final component is handled separately because a symlinked member has
-/// different semantics from a member reached through a symlinked parent. When
-/// the selected path is below the request base, every component between the
-/// two is inspected. An absolute path outside the base is checked at its
-/// immediate parent only, which avoids treating platform aliases such as
-/// macOS `/tmp` as user-selected traversal.
+/// different semantics from a member reached through a symlinked parent.
+/// Every intermediate component is inspected, including components above an
+/// absolute path outside the request base. Known macOS filesystem aliases
+/// (`/tmp`, `/var`, and `/etc`) are ignored so platform path normalization
+/// does not require traversal permission.
 fn traverses_intermediate_symlink(path: &Path, base: &Path) -> Result<bool, InputResolutionError> {
-    let within_base = path.starts_with(base);
     let mut ancestors = Vec::new();
     let mut current = path.parent();
     while let Some(parent) = current {
@@ -1462,16 +1461,17 @@ fn traverses_intermediate_symlink(path: &Path, base: &Path) -> Result<bool, Inpu
             break;
         }
         ancestors.push(parent.to_path_buf());
-        if !within_base && ancestors.len() == 1 {
-            break;
-        }
         current = parent.parent();
     }
     for ancestor in ancestors.iter().rev() {
         match fs::symlink_metadata(ancestor) {
-            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(metadata)
+                if metadata.file_type().is_symlink() && !is_platform_directory_alias(ancestor) =>
+            {
+                return Ok(true);
+            }
             Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => {
                 return Err(InputResolutionError::new(
                     InputResolutionErrorCode::InputUnavailable,
@@ -1480,6 +1480,18 @@ fn traverses_intermediate_symlink(path: &Path, base: &Path) -> Result<bool, Inpu
         }
     }
     Ok(false)
+}
+
+fn is_platform_directory_alias(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        matches!(path.to_str(), Some("/tmp" | "/var" | "/etc"))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 fn is_discovery_candidate(path: &Path) -> bool {

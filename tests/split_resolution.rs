@@ -3,7 +3,7 @@ mod support;
 use nscb::{
     Engine, InputResolutionCapabilities, InputResolutionControl, InputResolutionErrorCode,
     InputResolutionRequest, LocalSplitTrustStore, Sha256Digest, SplitQualificationKind,
-    SplitTrustReceipt, SplitTrustStore, SplitTrustStoreError, SplitTrustWriter,
+    SplitTrustReceipt, SplitTrustRestore, SplitTrustStore, SplitTrustStoreError, SplitTrustWriter,
 };
 use std::fs;
 use std::io::{Seek as _, SeekFrom, Write as _};
@@ -458,7 +458,7 @@ fn explicit_restoration_after_store_root_loss_preserves_qualification() {
 
     // The explicit restoration path merges the snapshot with the surviving
     // local anchor. Replacing the root by hand is not a restoration.
-    let restore = store.restore_from_snapshot(&backup).unwrap();
+    let restore: SplitTrustRestore = store.restore_from_snapshot(&backup).unwrap();
     assert_eq!(restore.restored_entries, 1);
     resolve(request(&tree).with_path("Game.nsp"), &store).unwrap();
 
@@ -1075,6 +1075,34 @@ fn special_files_are_rejected() {
     let error = resolve(request(&tree).with_path("Game.nsp"), &store).unwrap_err();
     assert_eq!(error.code(), InputResolutionErrorCode::SplitSetIncomplete);
     drop(listener);
+}
+
+#[cfg(unix)]
+#[test]
+fn absolute_member_above_a_symlinked_ancestor_requires_permission() {
+    let tree = TempTree::new("absolute-symlink");
+    let outside = TempTree::new("absolute-symlink-outside");
+    let real = tree.path().join("real");
+    let fixture = SplitFixture::new(&source(2048), 1024);
+    fixture.write(&real, "Game.nsp");
+    let store = tree.store();
+    fixture.issue(&store);
+    std::os::unix::fs::symlink(&real, outside.path().join("alias")).unwrap();
+
+    let selection = outside.path().join("alias").join("Game.nsp").join("00");
+    let denied = resolve(request(&tree).with_path(selection.clone()), &store).unwrap_err();
+    assert_eq!(
+        denied.code(),
+        InputResolutionErrorCode::UnsupportedFilesystemEntry
+    );
+    let allowed = resolve(
+        request(&tree)
+            .with_path(selection)
+            .with_follow_symlinks(true),
+        &store,
+    )
+    .unwrap();
+    assert!(allowed.inputs[0].qualification.is_some());
 }
 
 #[cfg(unix)]

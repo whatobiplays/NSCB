@@ -38,6 +38,6 @@ pub use input_resolution::{
 };
 pub use sha256::{InvalidSha256Digest, SHA256_HEX_LENGTH, Sha256Digest};
 pub use split_trust::{
-    LocalSplitTrustStore, SplitTrustReceipt, SplitTrustStore, SplitTrustStoreError,
-    SplitTrustWriter,
+    LocalSplitTrustStore, SplitTrustReceipt, SplitTrustRestore, SplitTrustStore,
+    SplitTrustStoreError, SplitTrustWriter,
 };

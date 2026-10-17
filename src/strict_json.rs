@@ -23,7 +23,7 @@ pub(crate) enum StrictJsonValue {
     /// A JSON number, including floats and negative integers.
     Number(serde_json::Number),
     /// A JSON boolean.
-    Bool,
+    Bool(bool),
     /// A JSON null.
     Null,
 }
@@ -57,7 +57,7 @@ pub(crate) fn depth(value: &StrictJsonValue) -> usize {
         StrictJsonValue::Array(values) => 1 + values.iter().map(depth).max().unwrap_or(0),
         StrictJsonValue::String(_)
         | StrictJsonValue::Number(_)
-        | StrictJsonValue::Bool
+        | StrictJsonValue::Bool(_)
         | StrictJsonValue::Null => 1,
     }
 }
@@ -80,8 +80,8 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
         formatter.write_str("a JSON value with unique object keys")
     }
 
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::Bool)
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(StrictJsonValue::Bool(value))
     }
 
     fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
@@ -163,12 +163,20 @@ mod tests {
 
     #[test]
     fn preserves_fields_and_computes_depth() {
-        let value = parse(br#"{"a":[1,{"b":null}],"c":true}"#).unwrap();
+        let value = parse(br#"{"a":[1,{"b":null}],"c":true,"d":false}"#).unwrap();
         let StrictJsonValue::Object(fields) = &value else {
             panic!("object");
         };
         assert!(required_field(fields, "a").is_some());
         assert!(required_field(fields, "missing").is_none());
+        assert_eq!(
+            required_field(fields, "c"),
+            Some(&StrictJsonValue::Bool(true))
+        );
+        assert_eq!(
+            required_field(fields, "d"),
+            Some(&StrictJsonValue::Bool(false))
+        );
         assert_eq!(depth(&value), 4);
     }
 

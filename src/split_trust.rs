@@ -209,6 +209,19 @@ pub enum SplitTrustStoreError {
     ConfigurationInvalid,
 }
 
+impl SplitTrustStoreError {
+    /// Returns the stable machine-readable code for this trust-store failure.
+    ///
+    /// These values match the input-resolution error codes a host observes
+    /// through the public resolver.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unavailable | Self::Corrupt | Self::StaleEvidence => "split_state_unavailable",
+            Self::ConfigurationInvalid => "split_trust_store_configuration_invalid",
+        }
+    }
+}
+
 impl fmt::Display for SplitTrustStoreError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -293,11 +306,6 @@ impl IndexDocument {
             generation: 0,
             receipts: BTreeMap::new(),
         }
-    }
-
-    const fn with_generation(mut self, generation: u64) -> Self {
-        self.generation = generation;
-        self
     }
 
     fn entry(&self, manifest_sha256: &Sha256Digest) -> Option<&IndexEntry> {
@@ -514,17 +522,21 @@ impl LocalSplitTrustStore {
         let snapshot = decode_index(&snapshot_bytes, AUTHORITY_KIND)?;
         let snapshot_receipts = snapshot_root.join("receipts");
         self.with_store_lock(|paths| {
-            let (mut authority, continuity) = match load_indexes(paths)? {
+            let (mut authority, continuity, reconstructed_authority) = match load_indexes(paths)? {
                 LoadedIndexes::Empty => return Err(SplitTrustStoreError::Corrupt),
-                LoadedIndexes::AnchorOnly { continuity } => (
-                    IndexDocument::new(AUTHORITY_KIND, continuity.authority_id)
-                        .with_generation(continuity.generation),
-                    continuity,
-                ),
+                LoadedIndexes::AnchorOnly { continuity } => {
+                    // The continuity anchor is the surviving local authority when
+                    // the replaceable root is lost. Seed the rebuilt authority
+                    // index with every continuity entry so a snapshot cannot
+                    // resurrect a revoked receipt or discard a newer local issue.
+                    let mut authority = continuity.clone();
+                    authority.kind = AUTHORITY_KIND;
+                    (authority, continuity, true)
+                }
                 LoadedIndexes::Ready {
                     authority,
                     continuity,
-                } => (authority, continuity),
+                } => (authority, continuity, false),
             };
             if snapshot.authority_id != continuity.authority_id
                 || snapshot.authority_id != authority.authority_id
@@ -542,7 +554,8 @@ impl LocalSplitTrustStore {
             for (key, entry) in &snapshot.receipts {
                 let manifest =
                     Sha256Digest::parse_hex(key).map_err(|_| SplitTrustStoreError::Corrupt)?;
-                let replace = match authority.receipts.get(key).copied() {
+                let current = authority.receipts.get(key).copied();
+                let replace = match current {
                     None => true,
                     Some(current) => {
                         if current.state == IndexState::Revoked
@@ -558,7 +571,10 @@ impl LocalSplitTrustStore {
                     }
                 };
                 if !replace {
-                    continue;
+                    let current = current.ok_or(SplitTrustStoreError::Corrupt)?;
+                    if current.state != entry.state || current.revision != entry.revision {
+                        continue;
+                    }
                 }
                 if entry.revision > snapshot.generation {
                     return Err(SplitTrustStoreError::Corrupt);
@@ -595,14 +611,47 @@ impl LocalSplitTrustStore {
                         &authority.authority_id,
                     )?,
                 };
-                pending_receipts.push((
-                    key.clone(),
-                    *entry,
-                    receipt_path(&paths.receipts, &manifest),
-                    bytes,
-                ));
+                if replace {
+                    pending_receipts.push((
+                        key.clone(),
+                        *entry,
+                        receipt_path(&paths.receipts, &manifest),
+                        bytes,
+                    ));
+                    continue;
+                }
+                let current = current.ok_or(SplitTrustStoreError::Corrupt)?;
+                if current.state == entry.state && current.revision == entry.revision {
+                    let destination = receipt_path(&paths.receipts, &manifest);
+                    let existing = read_bounded_state_file(&destination, MAX_RECEIPT_BYTES)?;
+                    if existing.as_deref() != Some(bytes.as_slice()) {
+                        pending_receipts.push((key.clone(), *entry, destination, bytes));
+                    }
+                }
             }
-            if pending_receipts.is_empty() && restore.preserved_revocations == 0 {
+            for (key, entry) in &authority.receipts {
+                if entry.state != IndexState::Issued {
+                    continue;
+                }
+                if pending_receipts
+                    .iter()
+                    .any(|(pending_key, _, _, _)| pending_key == key)
+                {
+                    continue;
+                }
+                let manifest =
+                    Sha256Digest::parse_hex(key).map_err(|_| SplitTrustStoreError::Corrupt)?;
+                let path = receipt_path(&paths.receipts, &manifest);
+                let receipt = read_receipt_file(&path, &manifest, Some(&authority.authority_id))?
+                    .ok_or(SplitTrustStoreError::Corrupt)?;
+                if receipt.predecessor_revision() != entry.revision || receipt.is_revoked() {
+                    return Err(SplitTrustStoreError::Corrupt);
+                }
+            }
+            if pending_receipts.is_empty()
+                && restore.preserved_revocations == 0
+                && !reconstructed_authority
+            {
                 return Ok(restore);
             }
             if pending_receipts.is_empty() {
@@ -798,13 +847,45 @@ fn recover_pending_commit(paths: &StorePaths) -> Result<(), SplitTrustStoreError
         return Ok(());
     };
     let (authority, receipt) = decode_commit(&bytes)?;
-    let (existing, _) = read_index_pair(paths)?;
-    if let Some(existing) = existing {
+    let (existing_authority, existing_continuity) = read_index_pair(paths)?;
+    if existing_authority.is_none()
+        && existing_continuity.is_none()
+        && (receipt.is_some() || !authority.receipts.is_empty())
+    {
+        // A journal inside the replaceable root is not independent local
+        // continuity evidence. Only an initial empty bootstrap may create both
+        // indexes; a copied root must not recreate the anchor from its journal.
+        return Err(SplitTrustStoreError::Corrupt);
+    }
+    if let Some(continuity) = &existing_continuity {
+        if continuity.authority_id != authority.authority_id {
+            return Err(SplitTrustStoreError::Corrupt);
+        }
+        if continuity.generation > authority.generation {
+            return remove_pending(paths);
+        }
+        if continuity.generation == authority.generation
+            && !continuity.same_authority_and_contents(&authority)
+        {
+            return Err(SplitTrustStoreError::Corrupt);
+        }
+    } else if existing_authority.is_some() {
+        // A root without its sibling continuity anchor is not enough local
+        // authority to recover a journal. Treat it as a copied or incomplete
+        // store instead of recreating the anchor from the journal.
+        return Err(SplitTrustStoreError::Corrupt);
+    }
+    if let Some(existing) = existing_authority {
         if existing.authority_id != authority.authority_id {
             return Err(SplitTrustStoreError::Corrupt);
         }
         if existing.generation > authority.generation {
             return remove_pending(paths);
+        }
+        if existing.generation == authority.generation
+            && !existing.same_authority_and_contents(&authority)
+        {
+            return Err(SplitTrustStoreError::Corrupt);
         }
     }
     if let Some((file_name, contents)) = receipt {
@@ -1610,6 +1691,26 @@ mod tests {
     }
 
     #[test]
+    fn trust_store_errors_have_stable_codes() {
+        assert_eq!(
+            SplitTrustStoreError::Unavailable.as_str(),
+            "split_state_unavailable"
+        );
+        assert_eq!(
+            SplitTrustStoreError::Corrupt.as_str(),
+            "split_state_unavailable"
+        );
+        assert_eq!(
+            SplitTrustStoreError::StaleEvidence.as_str(),
+            "split_state_unavailable"
+        );
+        assert_eq!(
+            SplitTrustStoreError::ConfigurationInvalid.as_str(),
+            "split_trust_store_configuration_invalid"
+        );
+    }
+
+    #[test]
     fn issue_lookup_revoke_and_missing_store_are_distinct() {
         let root = temp_root();
         let store = LocalSplitTrustStore::new(&root);
@@ -2111,6 +2212,173 @@ mod tests {
     }
 
     #[test]
+    fn lost_root_restoration_preserves_local_revocation_and_restores_receipts() {
+        let base = temp_root();
+        let root = base.join("store");
+        let store = LocalSplitTrustStore::new(&root);
+        let revoked = Sha256Digest::digest(b"lost revoked");
+        let retained = Sha256Digest::digest(b"lost retained");
+        store
+            .issue(SplitTrustReceipt::new(
+                revoked,
+                4,
+                Sha256Digest::digest(b"lost source"),
+            ))
+            .unwrap();
+        store
+            .issue(SplitTrustReceipt::new(
+                retained,
+                4,
+                Sha256Digest::digest(b"retained source"),
+            ))
+            .unwrap();
+        let snapshot_base = temp_root();
+        let snapshot = snapshot_base.join("store");
+        copy_tree(&root, &snapshot);
+
+        store.revoke(&revoked).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(
+            store.lookup(&revoked).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+
+        let restore = store.restore_from_snapshot(&snapshot).unwrap();
+        assert_eq!(restore.restored_entries, 1);
+        assert_eq!(restore.preserved_revocations, 1);
+        let receipt = store.lookup(&revoked).unwrap().unwrap();
+        assert!(receipt.is_revoked());
+        assert_eq!(receipt.predecessor_revision(), 2);
+        assert!(store.lookup(&retained).unwrap().is_some());
+
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(snapshot_base).unwrap();
+    }
+
+    #[test]
+    fn lost_root_restoration_rejects_a_snapshot_missing_a_current_issued_receipt() {
+        let base = temp_root();
+        let root = base.join("store");
+        let store = LocalSplitTrustStore::new(&root);
+        let older = Sha256Digest::digest(b"older issued");
+        store
+            .issue(SplitTrustReceipt::new(
+                older,
+                4,
+                Sha256Digest::digest(b"older source"),
+            ))
+            .unwrap();
+        let snapshot_base = temp_root();
+        let snapshot = snapshot_base.join("store");
+        copy_tree(&root, &snapshot);
+
+        let newer = Sha256Digest::digest(b"newer issued");
+        store
+            .issue(SplitTrustReceipt::new(
+                newer,
+                4,
+                Sha256Digest::digest(b"newer source"),
+            ))
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert_eq!(
+            store.restore_from_snapshot(&snapshot).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+        assert_eq!(
+            store.lookup(&newer).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(snapshot_base).unwrap();
+    }
+
+    #[test]
+    fn pending_journal_cannot_recreate_a_missing_continuity_anchor() {
+        let base = temp_root();
+        let root = base.join("store");
+        let store = LocalSplitTrustStore::new(&root);
+        let manifest = Sha256Digest::digest(b"copied journal");
+        store
+            .issue(SplitTrustReceipt::new(
+                manifest,
+                3,
+                Sha256Digest::digest(b"copied source"),
+            ))
+            .unwrap();
+
+        let copied_base = temp_root();
+        let copied_root = copied_base.join("store");
+        copy_tree(&root, &copied_root);
+        let authority = super::read_index_file(
+            &copied_root.join(super::AUTHORITY_FILE),
+            super::AUTHORITY_KIND,
+        )
+        .unwrap()
+        .unwrap();
+        let receipt_path = super::receipt_path(&copied_root.join("receipts"), &manifest);
+        let receipt_bytes = fs::read(&receipt_path).unwrap();
+        let journal =
+            super::encode_commit(&authority, Some((&receipt_path, &receipt_bytes))).unwrap();
+        fs::write(copied_root.join(super::COMMIT_PENDING_FILE), journal).unwrap();
+
+        let copied = LocalSplitTrustStore::new(&copied_root);
+        assert_eq!(
+            copied.lookup(&manifest).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+        assert!(!super::continuity_file(&copied_root).unwrap().exists());
+        fs::remove_file(copied_root.join(super::AUTHORITY_FILE)).unwrap();
+        assert_eq!(
+            copied.lookup(&manifest).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+        assert!(!super::continuity_file(&copied_root).unwrap().exists());
+
+        fs::remove_dir_all(base).unwrap();
+        fs::remove_dir_all(copied_base).unwrap();
+    }
+
+    #[test]
+    fn pending_journal_at_the_same_generation_must_match_the_anchor() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        let manifest = Sha256Digest::digest(b"same generation");
+        store
+            .issue(SplitTrustReceipt::new(
+                manifest,
+                3,
+                Sha256Digest::digest(b"same generation source"),
+            ))
+            .unwrap();
+
+        let authority_path = root.join(super::AUTHORITY_FILE);
+        let original = fs::read(&authority_path).unwrap();
+        let mut forged = super::read_index_file(&authority_path, super::AUTHORITY_KIND)
+            .unwrap()
+            .unwrap();
+        forged.receipts.insert(
+            "0".repeat(64),
+            super::IndexEntry {
+                revision: 1,
+                state: super::IndexState::Issued,
+            },
+        );
+        let journal = super::encode_commit(&forged, None).unwrap();
+        fs::write(root.join(super::COMMIT_PENDING_FILE), journal).unwrap();
+
+        assert_eq!(
+            store.lookup(&manifest).unwrap_err(),
+            SplitTrustStoreError::Corrupt
+        );
+        assert_eq!(fs::read(&authority_path).unwrap(), original);
+
+        remove_store(&root);
+    }
+
+    #[test]
     fn interrupted_restoration_completes_through_the_commit_journal() {
         let base = temp_root();
         let root = base.join("store");
@@ -2167,6 +2435,8 @@ mod tests {
             SplitTrustStoreError::Unavailable
         );
         fs::remove_dir(&blocked_path).unwrap();
+        let restore = copied.restore_from_snapshot(&snapshot).unwrap();
+        assert_eq!(restore.restored_entries, 0);
 
         let receipt = copied.lookup(&completed).unwrap().unwrap();
         assert_eq!(receipt.predecessor_revision(), 2);
