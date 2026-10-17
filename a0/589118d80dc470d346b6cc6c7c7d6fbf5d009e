@@ -1,0 +1,57 @@
+docs/research/split-set-completeness-qualification.md
+  s_d4891987d8d0d8::t_7cdb4188b06cd7 5,9,113,141
+  s_d4891987d8d0d8::t_b95097aba2aee9 1-4,6-8,10-112,114-140,142-153
+docs/adr/0028-evidence-backed-split-set-qualification.md
+  s_d4891987d8d0d8::t_d365f236ef73da 10
+  s_d4891987d8d0d8::t_ffe01e4e050abc 1-8,11-33
+  s_d4891987d8d0d8::t_c14e61997e91ac 9
+docs/research/split-set-completeness-evidence-matrix.md
+  s_d4891987d8d0d8::t_7cdb4188b06cd7 40,53
+  s_d4891987d8d0d8::t_b95097aba2aee9 1-39,41-52
+docs/architecture/split-set-evidence-contract.md
+  s_d4891987d8d0d8::t_d365f236ef73da 14,23
+  s_d4891987d8d0d8::t_c14e61997e91ac 24,42,142
+  s_d4891987d8d0d8::t_478f1fb5f35376 15
+  s_d4891987d8d0d8::t_ffe01e4e050abc 1-13,16-22,25-41,43-141,143-146
+docs/adr/0013-staged-validated-artifact-publication.md
+  s_d4891987d8d0d8::t_7cdb4188b06cd7 7-8
+CONTEXT.md
+  s_d4891987d8d0d8::t_478f1fb5f35376 48
+  s_d4891987d8d0d8::t_7cdb4188b06cd7 8,11-14,16,19-37
+  s_d4891987d8d0d8::t_d365f236ef73da 40,43-47,49
+  s_425d0d2da125f7::t_0a31a3dde50dc1 38,50
+docs/adr/0022-explicit-composable-content-operations.md
+  s_d4891987d8d0d8::t_d365f236ef73da 3,7-9
+docs/research/split-set-contract-decisions-01-46.md
+  s_d4891987d8d0d8::t_ffe01e4e050abc 1-66
+docs/adr/0027-content-recognition-and-deterministic-batch-input.md
+  s_d4891987d8d0d8::t_d365f236ef73da 11
+docs/testing/split-set-contract-acceptance.md
+  s_d4891987d8d0d8::t_d365f236ef73da 64-69,71-91
+  s_d4891987d8d0d8::t_478f1fb5f35376 70
+  s_d4891987d8d0d8::t_ffe01e4e050abc 1-63,92-105
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "a0589118d80dc470d346b6cc6c7c7d6fbf5d009e",
+  "prompts": {},
+  "sessions": {
+    "s_425d0d2da125f7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1478c-6050-7821-9571-d728c11823b1",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_d4891987d8d0d8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1476a-5a8a-7562-996a-ea4abcda20a6",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
