@@ -350,8 +350,9 @@ enum LoadedIndexes {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct SplitTrustRestore {
-    /// Number of receipt files written from the snapshot, including repairs of
-    /// missing or differing receipts for entries that are otherwise unchanged.
+    /// Number of receipt files written during restoration, including snapshot
+    /// copies, repairs of missing or differing receipts for otherwise unchanged
+    /// entries, and synthesized revocation tombstones.
     pub restored_entries: usize,
     /// Local revocations that the snapshot asked to replace.
     pub preserved_revocations: usize,
