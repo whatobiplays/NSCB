@@ -1,6 +1,6 @@
 use nscb::{
-    ContainerProbeError, ContainerProbeErrorCode, Engine, InputResolutionRequest,
-    InputSelectionSource,
+    ContainerProbeError, ContainerProbeErrorCode, Engine, InputResolutionCapabilities,
+    InputResolutionRequest, InputSelectionSource, LocalSplitTrustStore, SplitQualificationKind,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USAGE: i32 = 2;
 const EXIT_INPUT: i32 = 3;
+const EXIT_CANCELLED: i32 = 6;
 const EXIT_INTERNAL: i32 = 7;
 
 #[derive(Serialize)]
@@ -149,6 +150,16 @@ struct InputResolutionJsonResult {
 struct InputResolutionJsonInput {
     segments: Vec<InputResolutionJsonSegment>,
     provenance: InputResolutionJsonProvenance,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualification: Option<InputResolutionJsonQualification>,
+}
+
+#[derive(Serialize)]
+struct InputResolutionJsonQualification {
+    kind: SplitQualificationKind,
+    manifest_schema_version: u16,
+    original_size_bytes: u64,
+    original_sha256: String,
 }
 
 #[derive(Serialize)]
@@ -215,6 +226,14 @@ fn input_resolution_json(
                         .map(json_path)
                         .transpose()?,
                 },
+                qualification: input.qualification.as_ref().map(|qualification| {
+                    InputResolutionJsonQualification {
+                        kind: qualification.kind,
+                        manifest_schema_version: qualification.manifest_schema_version,
+                        original_size_bytes: qualification.original_size_bytes,
+                        original_sha256: qualification.original_sha256.to_hex(),
+                    }
+                }),
             })
         })
         .collect::<Result<Vec<_>, nscb::InputResolutionErrorCode>>()?;
@@ -230,6 +249,24 @@ fn json_path(path: &Path) -> Result<String, nscb::InputResolutionErrorCode> {
 fn run_input_resolution(
     args: &[OsString],
     engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let trust_store = LocalSplitTrustStore::from_environment();
+    run_input_resolution_with(args, engine, &trust_store, None, stdout, stderr)
+}
+
+/// Runs one input-resolution invocation with explicit host capabilities.
+///
+/// Production calls supply the environment-derived trust store and no
+/// cancellation handle. Tests use this seam to exercise dispatcher behavior
+/// with a controlled store and progress handle instead of adding a
+/// user-facing flag that exists only for testing.
+fn run_input_resolution_with(
+    args: &[OsString],
+    engine: &Engine,
+    trust_store: &dyn nscb::SplitTrustStore,
+    control: Option<&nscb::InputResolutionControl>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -288,7 +325,11 @@ fn run_input_resolution(
         };
     }
 
-    match engine.resolve_inputs(request) {
+    let mut capabilities = InputResolutionCapabilities::new().with_split_trust_store(trust_store);
+    if let Some(control) = control {
+        capabilities = capabilities.with_control(control);
+    }
+    match engine.resolve_inputs_with(request, capabilities) {
         Ok(result) if parsed.json => {
             let result = match input_resolution_json(&result) {
                 Ok(result) => result,
@@ -316,7 +357,11 @@ fn run_input_resolution(
                 report_output_failure(stderr)
             }
         }
-        Err(error) if parsed.json => emit_error(stdout, error.code().as_str(), EXIT_INPUT),
+        Err(error) if parsed.json => emit_error(
+            stdout,
+            error.code().as_str(),
+            input_resolution_exit_code(error.code()),
+        ),
         Err(error) => {
             if writeln!(
                 stderr,
@@ -325,11 +370,21 @@ fn run_input_resolution(
             )
             .is_ok()
             {
-                EXIT_INPUT
+                input_resolution_exit_code(error.code())
             } else {
                 EXIT_INTERNAL
             }
         }
+    }
+}
+
+fn input_resolution_exit_code(code: nscb::InputResolutionErrorCode) -> i32 {
+    use nscb::InputResolutionErrorCode as Code;
+    match code {
+        Code::SplitTrustStoreConfigurationInvalid => EXIT_USAGE,
+        Code::SplitStateUnavailable => EXIT_INTERNAL,
+        Code::SplitResolutionCancelled => EXIT_CANCELLED,
+        _ => EXIT_INPUT,
     }
 }
 
@@ -534,11 +589,16 @@ mod synthetic_fixtures;
 #[cfg(test)]
 mod tests {
     use super::run;
+    use super::run_input_resolution_with;
     use super::synthetic_fixtures::{self, TempInput};
     use crate::localization::english;
-    use nscb::Engine;
+    use nscb::{
+        Engine, InputResolutionControl, LocalSplitTrustStore, Sha256Digest, SplitTrustReceipt,
+        SplitTrustWriter,
+    };
     use serde_json::Value;
     use std::ffi::OsString;
+    use std::fs;
     use std::io::{self, Write};
 
     struct FailingWriter;
@@ -777,5 +837,79 @@ mod tests {
             };
             assert_eq!(error.as_str(), "unrepresentable_path");
         }
+    }
+
+    #[test]
+    fn cancelled_split_resolution_emits_one_json_error_and_exits_six() {
+        let base = std::env::temp_dir().join(format!(
+            "nscb-cli-cancelled-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        fs::create_dir_all(&base).unwrap();
+        let directory = base.join("Game.nsp");
+        fs::create_dir_all(&directory).unwrap();
+        let parts = [b"abcdef".as_slice(), b"ghijkl".as_slice()];
+        let mut segments = Vec::new();
+        for (index, part) in parts.iter().enumerate() {
+            fs::write(directory.join(format!("{index:02}")), part).unwrap();
+            segments.push(serde_json::json!({
+                "name": format!("{index:02}"),
+                "size_bytes": part.len(),
+                "sha256": Sha256Digest::digest(part).to_hex(),
+            }));
+        }
+        let source = parts.concat();
+        let manifest = serde_json::json!({
+            "schema_version": 1,
+            "kind": "nscb.split_manifest",
+            "required_features": [],
+            "source": {
+                "size_bytes": source.len(),
+                "sha256": Sha256Digest::digest(&source).to_hex(),
+            },
+            "segments": segments,
+        });
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        fs::write(
+            directory.with_file_name("Game.nsp.nscb-split.json"),
+            &manifest_bytes,
+        )
+        .unwrap();
+        let store = LocalSplitTrustStore::new(base.join("state").join("split-trust"));
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(&manifest_bytes),
+                source.len() as u64,
+                Sha256Digest::digest(&source),
+            ))
+            .unwrap();
+
+        let control = InputResolutionControl::new();
+        control.cancel();
+        let args = vec![
+            OsString::from("resolve"),
+            OsString::from("--json"),
+            directory.as_os_str().to_owned(),
+        ];
+        let engine = Engine::new();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_input_resolution_with(
+            &args,
+            &engine,
+            &store,
+            Some(&control),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 6);
+        assert!(stderr.is_empty());
+        assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let document: Value = serde_json::from_slice(&stdout).expect("one JSON error document");
+        assert_eq!(document["error"]["code"], "split_resolution_cancelled");
+        let _ = fs::remove_dir_all(base);
     }
 }

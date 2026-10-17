@@ -318,7 +318,6 @@ fn suspected_split_parts_fail_before_standalone_or_extension_handling() {
         "game.ns12",
         "game.00",
         "game.nsp.00",
-        "00",
     ] {
         tree.write(name, b"segment");
         let error = Engine::new()
@@ -330,6 +329,11 @@ fn suspected_split_parts_fail_before_standalone_or_extension_handling() {
             "{name}"
         );
     }
+    tree.write("00", b"segment");
+    let error = Engine::new()
+        .resolve_inputs(request(&tree).with_path("00"))
+        .expect_err("a canonical member requires its sidecar before qualification");
+    assert_eq!(error.code(), InputResolutionErrorCode::SplitManifestMissing);
 
     tree.write("dir/segment.xc0", b"segment");
     tree.write("dir/candidate.nsp", b"candidate");
@@ -345,11 +349,8 @@ fn suspected_split_parts_fail_before_standalone_or_extension_handling() {
     tree.write("numbered/01", b"second");
     let error = Engine::new()
         .resolve_inputs(request(&tree).with_path("numbered"))
-        .expect_err("canonical numbered layouts remain unsupported");
-    assert_eq!(
-        error.code(),
-        InputResolutionErrorCode::UnsupportedSplitLayout
-    );
+        .expect_err("a canonical numbered layout requires its sidecar");
+    assert_eq!(error.code(), InputResolutionErrorCode::SplitManifestMissing);
 }
 
 #[test]
@@ -373,6 +374,28 @@ fn numeric_directory_names_are_not_treated_as_split_files() {
 
     let recursive = resolve(request(&discovery_tree).with_path(".").with_recursive(true));
     assert_eq!(recursive.inputs.len(), 2);
+}
+
+#[test]
+fn numeric_child_directories_do_not_suppress_ordinary_discovery() {
+    let tree = TempTree::new();
+    tree.write("library/ordinary.nsp", b"ordinary");
+    fs::create_dir(tree.path().join("library/00")).unwrap();
+
+    let result = resolve(request(&tree).with_path("library"));
+    assert_eq!(result.inputs.len(), 1);
+    assert_eq!(
+        result.inputs[0].segments[0].path.file_name().unwrap(),
+        "ordinary.nsp"
+    );
+
+    let numeric_only = TempTree::new();
+    fs::create_dir_all(numeric_only.path().join("collection/00")).unwrap();
+    fs::create_dir_all(numeric_only.path().join("collection/01")).unwrap();
+    let error = Engine::new()
+        .resolve_inputs(request(&numeric_only).with_path("collection"))
+        .unwrap_err();
+    assert_eq!(error.code(), InputResolutionErrorCode::EmptySelection);
 }
 
 #[test]

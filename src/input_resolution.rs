@@ -1,12 +1,21 @@
 //! Deterministic, read-only resolution of ordered local content selections.
 //!
-//! Resolution identifies regular filesystem inputs and records their paths, sizes,
-//! and selection provenance. It does not inspect content bytes, establish a content
-//! family, verify identity, or decide that a Split set is complete. Suspected Split
-//! representations fail closed until their physical layout has qualified support.
+//! Ordinary files and directory candidates are identified from metadata and keep
+//! the original v1 behavior. Canonical Split representations additionally require
+//! an adjacent manifest, a host-owned local receipt, complete physical membership,
+//! and matching per-segment and whole-stream SHA-256 evidence. Resolution never
+//! treats a manifest or a plausible numeric layout as completeness evidence, and
+//! it never issues or repairs trust itself.
 
-use serde::de::{self, MapAccess, SeqAccess, Visitor};
-use serde::{Deserialize, Serialize};
+use crate::file_identity::{FileIdentity, path_identity};
+use crate::sha256::Sha256Digest;
+use crate::split_resolution::{
+    SplitResolutionContext, canonical_member_index, directory_has_canonical_member,
+    has_adjacent_sidecar, qualify_directory,
+};
+use crate::split_trust::SplitTrustStore;
+use crate::strict_json::{self, StrictJsonValue};
+use serde::Serialize;
 use std::collections::HashSet;
 use std::fmt;
 use std::fs::{self, Metadata, OpenOptions, ReadDir};
@@ -14,6 +23,7 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use unicode_normalization::UnicodeNormalization;
 
 const MAX_INPUT_LIST_BYTES: u64 = 1_048_576;
@@ -21,6 +31,12 @@ const MAX_INPUT_LIST_BYTES_PER_REQUEST: u64 = 4_194_304;
 const MAX_INPUT_LIST_ENTRIES: usize = 100_000;
 const MAX_TRAVERSAL_ENTRIES: usize = 100_000;
 const MAX_TRAVERSAL_DEPTH: usize = 64;
+const MAX_RESOLVED_SEGMENTS: usize = 100_000;
+/// Cumulative Split bytes one request may hash when the host does not override
+/// the budget. This covers the largest canonical FAT32 Split set (100 parts of
+/// 0xFFFF0000 bytes) without limiting ordinary single-file resolution.
+pub const DEFAULT_MAX_SPLIT_VALIDATION_BYTES: u64 = 429_490_176_000;
+const PROGRESS_TOTAL_UNSET: u64 = u64::MAX;
 const DISCOVERABLE_EXTENSIONS: &[&str] = &["nsp", "nsz", "nsx", "xci", "xcz", "nca", "ncz"];
 
 /// Ordered selections and traversal controls for a read-only input resolution.
@@ -104,6 +120,180 @@ pub struct InputResolutionResult {
     pub inputs: Vec<ResolvedInput>,
 }
 
+/// Additive host capabilities used for one read-only resolution request.
+///
+/// Omitting a trust store preserves ordinary non-Split resolution. A canonical
+/// Split candidate then fails as untrusted instead of silently accepting an
+/// unsigned manifest. The control handle is host-owned and optional; it never
+/// creates a background Job or hidden engine state.
+#[non_exhaustive]
+pub struct InputResolutionCapabilities<'a> {
+    /// Host-owned local evidence store used only for Split qualification.
+    pub split_trust_store: Option<&'a dyn SplitTrustStore>,
+    /// Optional latest-value progress and cancellation control.
+    pub control: Option<&'a InputResolutionControl>,
+    /// Cumulative byte budget for Split validation in this request.
+    pub max_split_validation_bytes: u64,
+}
+
+impl Default for InputResolutionCapabilities<'_> {
+    fn default() -> Self {
+        Self {
+            split_trust_store: None,
+            control: None,
+            max_split_validation_bytes: DEFAULT_MAX_SPLIT_VALIDATION_BYTES,
+        }
+    }
+}
+
+impl<'a> InputResolutionCapabilities<'a> {
+    /// Creates capabilities without a trust store or progress control.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Adds a host-owned Split trust store.
+    #[must_use]
+    pub fn with_split_trust_store(mut self, store: &'a dyn SplitTrustStore) -> Self {
+        self.split_trust_store = Some(store);
+        self
+    }
+
+    /// Adds a host-owned progress and cancellation control.
+    #[must_use]
+    pub fn with_control(mut self, control: &'a InputResolutionControl) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// Replaces the cumulative Split validation byte budget.
+    #[must_use]
+    pub const fn with_max_split_validation_bytes(mut self, bytes: u64) -> Self {
+        self.max_split_validation_bytes = bytes;
+        self
+    }
+}
+
+/// Latest-value progress for the Split input currently being validated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct InputResolutionProgress {
+    /// Zero-based logical input index in the eventual result.
+    pub input_index: usize,
+    /// Bytes hashed for the current Split input.
+    pub completed_bytes: u64,
+    /// Expected logical byte length of the current Split input.
+    pub total_bytes: Option<u64>,
+}
+
+/// Host-owned cancellation and progress state for one resolution request.
+///
+/// The resolver updates this atomically while hashing Split segments. Hosts may
+/// poll [`progress`](Self::progress) from another thread and call
+/// [`cancel`](Self::cancel) at any time. Progress is not a queued event stream
+/// and never backpressures the resolver.
+#[derive(Debug)]
+pub struct InputResolutionControl {
+    input_index: AtomicUsize,
+    completed_bytes: AtomicU64,
+    total_bytes: AtomicU64,
+    cancelled: AtomicBool,
+}
+
+impl Default for InputResolutionControl {
+    fn default() -> Self {
+        Self {
+            input_index: AtomicUsize::new(0),
+            completed_bytes: AtomicU64::new(0),
+            total_bytes: AtomicU64::new(PROGRESS_TOTAL_UNSET),
+            cancelled: AtomicBool::new(false),
+        }
+    }
+}
+
+impl InputResolutionControl {
+    /// Creates an uncancelled control with no active Split input.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Requests cooperative cancellation.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Reports whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    /// Returns the latest progress snapshot without blocking.
+    pub fn progress(&self) -> InputResolutionProgress {
+        let total_bytes = self.total_bytes.load(Ordering::Acquire);
+        InputResolutionProgress {
+            input_index: self.input_index.load(Ordering::Acquire),
+            completed_bytes: self.completed_bytes.load(Ordering::Acquire),
+            total_bytes: (total_bytes != PROGRESS_TOTAL_UNSET).then_some(total_bytes),
+        }
+    }
+
+    pub(crate) fn begin_split_input(&self, input_index: usize, total_bytes: u64) {
+        self.input_index.store(input_index, Ordering::Release);
+        self.completed_bytes.store(0, Ordering::Release);
+        self.total_bytes.store(total_bytes, Ordering::Release);
+    }
+
+    pub(crate) fn add_completed(&self, bytes: u64) -> Result<(), InputResolutionError> {
+        let completed = self
+            .completed_bytes
+            .fetch_add(bytes, Ordering::AcqRel)
+            .checked_add(bytes)
+            .ok_or_else(|| {
+                InputResolutionError::new(InputResolutionErrorCode::SplitIntegrityMismatch)
+            })?;
+        let total = self.total_bytes.load(Ordering::Acquire);
+        if total != PROGRESS_TOTAL_UNSET && completed > total {
+            return Err(InputResolutionError::new(
+                InputResolutionErrorCode::SplitIntegrityMismatch,
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn check_cancelled(&self) -> Result<(), InputResolutionError> {
+        if self.is_cancelled() {
+            Err(InputResolutionError::new(
+                InputResolutionErrorCode::SplitResolutionCancelled,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// Additive completeness evidence attached only to a qualified Split input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct SplitQualification {
+    /// Evidence family that established completeness.
+    pub kind: SplitQualificationKind,
+    /// Manifest schema version bound to the receipt.
+    pub manifest_schema_version: u16,
+    /// Independently observed source byte length.
+    pub original_size_bytes: u64,
+    /// Independently observed source SHA-256 digest.
+    pub original_sha256: Sha256Digest,
+}
+
+/// Kind of completeness evidence attached to a resolved Split input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SplitQualificationKind {
+    /// A host-local receipt binds exact manifest bytes to source evidence.
+    LocalSplitReceipt,
+}
+
 /// One logical input with an ordered physical segment representation.
 ///
 /// Version 1 non-Split inputs contain exactly one segment. The vector preserves
@@ -116,6 +306,8 @@ pub struct ResolvedInput {
     pub segments: Vec<InputSegment>,
     /// The caller selection and directory/list entry that produced this input.
     pub provenance: InputProvenance,
+    /// Split completeness evidence, present only for qualified Split inputs.
+    pub qualification: Option<SplitQualification>,
 }
 
 /// One physical file segment and its observed byte length.
@@ -186,6 +378,26 @@ pub enum InputResolutionErrorCode {
     InvalidBaseDirectory,
     /// A filesystem path cannot be represented losslessly in the JSON result format.
     UnrepresentablePath,
+    /// A canonical Split candidate has no adjacent manifest.
+    SplitManifestMissing,
+    /// A Split receipt is absent, revoked, or does not bind this manifest.
+    SplitEvidenceUntrusted,
+    /// A Split manifest is malformed, unsafe, or internally inconsistent.
+    SplitManifestInvalid,
+    /// A Split manifest version or required feature is unsupported.
+    SplitManifestVersionUnsupported,
+    /// Declared members are missing or the representation is ambiguous.
+    SplitSetIncomplete,
+    /// A member or reconstructed stream does not match its declared digest.
+    SplitIntegrityMismatch,
+    /// A Split input changed while it was being validated.
+    SplitInputChanged,
+    /// The configured host evidence store is unreadable or corrupt.
+    SplitStateUnavailable,
+    /// The explicitly configured trust-store location is invalid.
+    SplitTrustStoreConfigurationInvalid,
+    /// Cooperative cancellation stopped Split validation.
+    SplitResolutionCancelled,
 }
 
 impl InputResolutionErrorCode {
@@ -203,6 +415,16 @@ impl InputResolutionErrorCode {
             Self::ResourceLimitExceeded => "resource_limit_exceeded",
             Self::InvalidBaseDirectory => "invalid_base_directory",
             Self::UnrepresentablePath => "unrepresentable_path",
+            Self::SplitManifestMissing => "split_manifest_missing",
+            Self::SplitEvidenceUntrusted => "split_evidence_untrusted",
+            Self::SplitManifestInvalid => "split_manifest_invalid",
+            Self::SplitManifestVersionUnsupported => "split_manifest_version_unsupported",
+            Self::SplitSetIncomplete => "split_set_incomplete",
+            Self::SplitIntegrityMismatch => "split_integrity_mismatch",
+            Self::SplitInputChanged => "split_input_changed",
+            Self::SplitStateUnavailable => "split_state_unavailable",
+            Self::SplitTrustStoreConfigurationInvalid => "split_trust_store_configuration_invalid",
+            Self::SplitResolutionCancelled => "split_resolution_cancelled",
         }
     }
 }
@@ -214,7 +436,7 @@ pub struct InputResolutionError {
 }
 
 impl InputResolutionError {
-    fn new(code: InputResolutionErrorCode) -> Self {
+    pub(crate) fn new(code: InputResolutionErrorCode) -> Self {
         Self { code }
     }
 
@@ -254,6 +476,32 @@ impl fmt::Display for InputResolutionError {
             InputResolutionErrorCode::UnrepresentablePath => {
                 "a filesystem path cannot be represented losslessly in JSON"
             }
+            InputResolutionErrorCode::SplitManifestMissing => "the Split candidate has no manifest",
+            InputResolutionErrorCode::SplitEvidenceUntrusted => {
+                "the Split manifest has no usable local trust receipt"
+            }
+            InputResolutionErrorCode::SplitManifestInvalid => "the Split manifest is invalid",
+            InputResolutionErrorCode::SplitManifestVersionUnsupported => {
+                "the Split manifest version or required feature is unsupported"
+            }
+            InputResolutionErrorCode::SplitSetIncomplete => {
+                "the Split set is incomplete or ambiguous"
+            }
+            InputResolutionErrorCode::SplitIntegrityMismatch => {
+                "the Split set does not match its declared integrity evidence"
+            }
+            InputResolutionErrorCode::SplitInputChanged => {
+                "a Split input changed during validation"
+            }
+            InputResolutionErrorCode::SplitStateUnavailable => {
+                "the Split trust store is unavailable or corrupt"
+            }
+            InputResolutionErrorCode::SplitTrustStoreConfigurationInvalid => {
+                "the Split trust store location is invalid"
+            }
+            InputResolutionErrorCode::SplitResolutionCancelled => {
+                "Split input resolution was cancelled"
+            }
         })
     }
 }
@@ -264,21 +512,38 @@ impl std::error::Error for InputResolutionError {}
 ///
 /// Explicit file selections accept regular files regardless of extension. Directory
 /// discovery uses the documented candidate extensions and is nonrecursive by
-/// default. Every output contains one physical segment; suspected Split layouts
-/// return a typed error until positive completeness evidence and a stable grammar
-/// qualify their support.
+/// default. Ordinary outputs contain one physical segment. Canonical Split
+/// directories additionally require a host-owned receipt and complete byte
+/// validation; unsupported numeric layouts remain typed failures.
 impl crate::Engine {
-    /// Resolves ordered local selections without reading or changing content bytes.
+    /// Resolves ordered local selections without a Split trust-store capability.
+    ///
+    /// Ordinary non-Split inputs retain their metadata-only behavior. Canonical
+    /// Split candidates fail as untrusted because no host evidence was supplied.
     pub fn resolve_inputs(
         &self,
         request: InputResolutionRequest,
     ) -> Result<InputResolutionResult, InputResolutionError> {
-        resolve_inputs(request)
+        resolve_inputs_impl(request, InputResolutionCapabilities::default())
+    }
+
+    /// Resolves ordered local selections with explicit host capabilities.
+    ///
+    /// The capability boundary is evaluated per call and introduces no engine
+    /// state. A configured trust store is consulted only when a canonical Split
+    /// candidate is selected or discovered.
+    pub fn resolve_inputs_with(
+        &self,
+        request: InputResolutionRequest,
+        capabilities: InputResolutionCapabilities<'_>,
+    ) -> Result<InputResolutionResult, InputResolutionError> {
+        resolve_inputs_impl(request, capabilities)
     }
 }
 
-fn resolve_inputs(
+fn resolve_inputs_impl(
     request: InputResolutionRequest,
+    capabilities: InputResolutionCapabilities<'_>,
 ) -> Result<InputResolutionResult, InputResolutionError> {
     if request.selections.is_empty() {
         return Err(InputResolutionError::new(
@@ -307,7 +572,13 @@ fn resolve_inputs(
         ));
     }
 
-    let mut resolver = Resolver::new(request.recursive, request.follow_symlinks);
+    let mut resolver = Resolver::new(
+        request.recursive,
+        request.follow_symlinks,
+        capabilities.split_trust_store,
+        capabilities.control,
+        capabilities.max_split_validation_bytes,
+    );
     for (selection_index, selection) in request.selections.iter().enumerate() {
         match selection {
             InputSelection::Path(path) => {
@@ -378,12 +649,17 @@ fn resolve_inputs(
     })
 }
 
-struct Resolver {
+struct Resolver<'a> {
     recursive: bool,
     follow_symlinks: bool,
+    trust_store: Option<&'a dyn SplitTrustStore>,
+    control: Option<&'a InputResolutionControl>,
     visited_entries: usize,
     input_list_bytes: u64,
     input_list_entries: usize,
+    resolved_segments: usize,
+    validated_split_bytes: u64,
+    max_split_validation_bytes: u64,
     path_keys: HashSet<String>,
     file_identities: HashSet<FileIdentity>,
     inputs: Vec<ResolvedInput>,
@@ -397,14 +673,25 @@ struct SelectionContext {
     input_list_entry_path: Option<PathBuf>,
 }
 
-impl Resolver {
-    fn new(recursive: bool, follow_symlinks: bool) -> Self {
+impl<'a> Resolver<'a> {
+    fn new(
+        recursive: bool,
+        follow_symlinks: bool,
+        trust_store: Option<&'a dyn SplitTrustStore>,
+        control: Option<&'a InputResolutionControl>,
+        max_split_validation_bytes: u64,
+    ) -> Self {
         Self {
             recursive,
             follow_symlinks,
+            trust_store,
+            control,
             visited_entries: 0,
             input_list_bytes: 0,
             input_list_entries: 0,
+            resolved_segments: 0,
+            validated_split_bytes: 0,
+            max_split_validation_bytes,
             path_keys: HashSet::new(),
             file_identities: HashSet::new(),
             inputs: Vec::new(),
@@ -438,6 +725,18 @@ impl Resolver {
         Ok(())
     }
 
+    fn record_resolved_segments(&mut self, count: usize) -> Result<(), InputResolutionError> {
+        self.resolved_segments = self.resolved_segments.checked_add(count).ok_or_else(|| {
+            InputResolutionError::new(InputResolutionErrorCode::ResourceLimitExceeded)
+        })?;
+        if self.resolved_segments > MAX_RESOLVED_SEGMENTS {
+            return Err(InputResolutionError::new(
+                InputResolutionErrorCode::ResourceLimitExceeded,
+            ));
+        }
+        Ok(())
+    }
+
     fn expand_path(
         &mut self,
         path: &Path,
@@ -452,6 +751,25 @@ impl Resolver {
             .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
 
         if target_metadata.is_file() {
+            if selected_path
+                .file_name()
+                .and_then(canonical_member_index)
+                .is_some()
+            {
+                if is_symlink {
+                    return Err(InputResolutionError::new(
+                        InputResolutionErrorCode::SplitSetIncomplete,
+                    ));
+                }
+                if !self.follow_symlinks
+                    && traverses_intermediate_symlink(&selected_path, path_base)?
+                {
+                    return Err(InputResolutionError::new(
+                        InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                    ));
+                }
+                return self.append_split_member(&selected_path, selection);
+            }
             self.append_file(&selected_path, selection, None, None)
         } else if target_metadata.is_dir() {
             if is_symlink && !self.follow_symlinks {
@@ -459,7 +777,33 @@ impl Resolver {
                     InputResolutionErrorCode::UnsupportedFilesystemEntry,
                 ));
             }
-            self.expand_directory(&selected_path, selection)
+            let canonical = fs::canonicalize(&selected_path).map_err(|_| {
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
+            })?;
+            let has_sidecar = has_adjacent_sidecar(&canonical)?;
+            let has_canonical_member = if has_sidecar {
+                false
+            } else {
+                directory_has_canonical_member(&canonical)?
+            };
+            let split_candidate = has_sidecar || has_canonical_member;
+            if split_candidate
+                && !self.follow_symlinks
+                && traverses_intermediate_symlink(&selected_path, path_base)?
+            {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                ));
+            }
+            if has_sidecar {
+                self.append_split_directory(&canonical, selection, None, None)
+            } else if has_canonical_member {
+                Err(InputResolutionError::new(
+                    InputResolutionErrorCode::SplitManifestMissing,
+                ))
+            } else {
+                self.expand_directory(&selected_path, selection)
+            }
         } else {
             Err(InputResolutionError::new(
                 InputResolutionErrorCode::InputUnavailable,
@@ -495,10 +839,10 @@ impl Resolver {
             &mut found,
         )?;
         found.sort_by(|left, right| {
-            normalized_path_key(&left.relative_path)
-                .cmp(&normalized_path_key(&right.relative_path))
+            normalized_path_key(left.relative_path())
+                .cmp(&normalized_path_key(right.relative_path()))
                 .then_with(|| {
-                    raw_path_key(&left.relative_path).cmp(&raw_path_key(&right.relative_path))
+                    raw_path_key(left.relative_path()).cmp(&raw_path_key(right.relative_path()))
                 })
         });
 
@@ -508,14 +852,25 @@ impl Resolver {
             ));
         }
         for candidate in found {
-            self.append_known_file(
-                candidate.canonical_path,
-                candidate.size,
-                candidate.file_identity,
-                selection,
-                Some(canonical_root.clone()),
-                Some(candidate.relative_path),
-            )?;
+            match candidate {
+                FoundInput::File(candidate) => self.append_known_file(
+                    candidate.canonical_path,
+                    candidate.size,
+                    candidate.file_identity,
+                    selection,
+                    Some(canonical_root.clone()),
+                    Some(candidate.relative_path),
+                )?,
+                FoundInput::Split {
+                    canonical_directory,
+                    relative_path,
+                } => self.append_split_directory(
+                    &canonical_directory,
+                    selection,
+                    Some(canonical_root.clone()),
+                    Some(relative_path),
+                )?,
+            }
         }
         Ok(())
     }
@@ -529,7 +884,7 @@ impl Resolver {
         depth: usize,
         visited_directories: &mut HashSet<DirectoryIdentity>,
         active_directories: &mut HashSet<DirectoryIdentity>,
-        found: &mut Vec<FoundFile>,
+        found: &mut Vec<FoundInput>,
     ) -> Result<(), InputResolutionError> {
         if depth > MAX_TRAVERSAL_DEPTH {
             return Err(InputResolutionError::new(
@@ -588,15 +943,22 @@ impl Resolver {
                                 InputResolutionErrorCode::UnsupportedFilesystemEntry,
                             ));
                         }
-                        self.scan_directory(
-                            root,
-                            &target,
-                            &relative_path,
-                            depth + 1,
-                            visited_directories,
-                            active_directories,
-                            found,
-                        )?;
+                        if has_adjacent_sidecar(&target)? {
+                            found.push(FoundInput::Split {
+                                canonical_directory: target,
+                                relative_path,
+                            });
+                        } else {
+                            self.scan_directory(
+                                root,
+                                &target,
+                                &relative_path,
+                                depth + 1,
+                                visited_directories,
+                                active_directories,
+                                found,
+                            )?;
+                        }
                     }
                 } else if target_metadata.is_file() {
                     if suspected_split || looks_like_split_segment(&target) {
@@ -610,7 +972,11 @@ impl Resolver {
                                 InputResolutionErrorCode::UnsupportedFilesystemEntry,
                             ));
                         }
-                        found.push(found_file(&target, &target_metadata, relative_path)?);
+                        found.push(FoundInput::File(found_file(
+                            &target,
+                            &target_metadata,
+                            relative_path,
+                        )?));
                     }
                 } else if discovery_candidate || suspected_split {
                     return Err(InputResolutionError::new(
@@ -621,7 +987,20 @@ impl Resolver {
             }
 
             if file_type.is_dir() {
-                if self.recursive {
+                if has_adjacent_sidecar(&encountered_path)? {
+                    let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
+                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
+                    })?;
+                    if !canonical.starts_with(root) {
+                        return Err(InputResolutionError::new(
+                            InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                        ));
+                    }
+                    found.push(FoundInput::Split {
+                        canonical_directory: canonical,
+                        relative_path,
+                    });
+                } else if self.recursive {
                     let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
                         InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
                     })?;
@@ -663,7 +1042,11 @@ impl Resolver {
                             InputResolutionErrorCode::UnsupportedSplitLayout,
                         ));
                     }
-                    found.push(found_file(&canonical, &metadata, relative_path)?);
+                    found.push(FoundInput::File(found_file(
+                        &canonical,
+                        &metadata,
+                        relative_path,
+                    )?));
                 }
             } else if is_discovery_candidate(&encountered_path) {
                 return Err(InputResolutionError::new(
@@ -673,6 +1056,83 @@ impl Resolver {
         }
 
         active_directories.remove(&identity);
+        Ok(())
+    }
+
+    fn append_split_member(
+        &mut self,
+        member: &Path,
+        selection: &SelectionContext,
+    ) -> Result<(), InputResolutionError> {
+        let canonical_member = fs::canonicalize(member)
+            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
+        let metadata = fs::metadata(&canonical_member)
+            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
+        if !metadata.is_file() {
+            return Err(InputResolutionError::new(
+                InputResolutionErrorCode::SplitSetIncomplete,
+            ));
+        }
+        let directory = canonical_member.parent().ok_or_else(|| {
+            InputResolutionError::new(InputResolutionErrorCode::SplitSetIncomplete)
+        })?;
+        self.append_split_directory(directory, selection, None, None)
+    }
+
+    fn append_split_directory(
+        &mut self,
+        directory: &Path,
+        selection: &SelectionContext,
+        discovered_directory: Option<PathBuf>,
+        discovered_relative_path: Option<PathBuf>,
+    ) -> Result<(), InputResolutionError> {
+        let input_index = self.inputs.len();
+        let mut context = SplitResolutionContext {
+            trust_store: self.trust_store,
+            control: self.control,
+            visited_entries: &mut self.visited_entries,
+            validated_bytes: &mut self.validated_split_bytes,
+            max_validated_bytes: self.max_split_validation_bytes,
+            input_index,
+        };
+        let qualified = qualify_directory(directory, &mut context)?;
+        self.record_resolved_segments(qualified.segments.len())?;
+
+        let mut segments = Vec::with_capacity(qualified.segments.len());
+        for segment in qualified.segments {
+            let path_key = normalized_path_key(&segment.path);
+            if !self.path_keys.insert(path_key) {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::DuplicateSelection,
+                ));
+            }
+            let identity = segment.identity.ok_or_else(|| {
+                InputResolutionError::new(InputResolutionErrorCode::SplitSetIncomplete)
+            })?;
+            if !self.file_identities.insert(identity) {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::DuplicateSelection,
+                ));
+            }
+            segments.push(InputSegment {
+                path: segment.path,
+                size: segment.size,
+            });
+        }
+
+        self.inputs.push(ResolvedInput {
+            segments,
+            provenance: InputProvenance {
+                selection_index: selection.selection_index,
+                source: selection.source,
+                selection_path: selection.selection_path.clone(),
+                input_list_entry_index: selection.input_list_entry_index,
+                input_list_entry_path: selection.input_list_entry_path.clone(),
+                discovered_directory,
+                discovered_relative_path,
+            },
+            qualification: Some(qualified.qualification),
+        });
         Ok(())
     }
 
@@ -709,7 +1169,7 @@ impl Resolver {
                 InputResolutionErrorCode::UnsupportedSplitLayout,
             ));
         }
-        let file_identity = file_identity(&metadata);
+        let file_identity = path_identity(&canonical_path);
         self.append_known_file(
             canonical_path,
             metadata.len(),
@@ -742,6 +1202,7 @@ impl Resolver {
                 InputResolutionErrorCode::DuplicateSelection,
             ));
         }
+        self.record_resolved_segments(1)?;
         self.inputs.push(ResolvedInput {
             segments: vec![InputSegment {
                 path: canonical_path,
@@ -756,8 +1217,26 @@ impl Resolver {
                 discovered_directory,
                 discovered_relative_path,
             },
+            qualification: None,
         });
         Ok(())
+    }
+}
+
+enum FoundInput {
+    File(FoundFile),
+    Split {
+        canonical_directory: PathBuf,
+        relative_path: PathBuf,
+    },
+}
+
+impl FoundInput {
+    fn relative_path(&self) -> &Path {
+        match self {
+            Self::File(file) => &file.relative_path,
+            Self::Split { relative_path, .. } => relative_path,
+        }
     }
 }
 
@@ -781,12 +1260,12 @@ fn found_file(
     Ok(FoundFile {
         canonical_path: path.to_path_buf(),
         size: metadata.len(),
-        file_identity: file_identity(metadata),
+        file_identity: path_identity(path),
         relative_path,
     })
 }
 
-fn read_directory(
+pub(crate) fn read_directory(
     path: &Path,
     visited_entries: &mut usize,
 ) -> Result<Vec<fs::DirEntry>, InputResolutionError> {
@@ -852,7 +1331,7 @@ fn read_bounded_regular_file(path: &Path) -> Result<Vec<u8>, InputResolutionErro
 }
 
 fn parse_input_list(bytes: &[u8]) -> Result<Vec<PathBuf>, InputResolutionError> {
-    let document: StrictJsonValue = serde_json::from_slice(bytes)
+    let document = strict_json::parse(bytes)
         .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InvalidInputList))?;
     let fields = match document {
         StrictJsonValue::Object(fields) => fields,
@@ -953,102 +1432,8 @@ fn required_field<'a>(
     fields: &'a [(String, StrictJsonValue)],
     name: &str,
 ) -> Result<&'a StrictJsonValue, InputResolutionError> {
-    fields
-        .iter()
-        .find(|(field_name, _)| field_name == name)
-        .map(|(_, value)| value)
+    strict_json::required_field(fields, name)
         .ok_or_else(|| InputResolutionError::new(InputResolutionErrorCode::InvalidInputList))
-}
-
-enum StrictJsonValue {
-    Object(Vec<(String, StrictJsonValue)>),
-    Array(Vec<StrictJsonValue>),
-    String(String),
-    Number(serde_json::Number),
-    Bool,
-    Null,
-}
-
-impl<'de> Deserialize<'de> for StrictJsonValue {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        deserializer.deserialize_any(StrictJsonValueVisitor)
-    }
-}
-
-struct StrictJsonValueVisitor;
-
-impl<'de> Visitor<'de> for StrictJsonValueVisitor {
-    type Value = StrictJsonValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value with unique object keys")
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::Bool)
-    }
-
-    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::Number(value.into()))
-    }
-
-    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::Number(value.into()))
-    }
-
-    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
-    where
-        E: de::Error,
-    {
-        serde_json::Number::from_f64(value)
-            .map(StrictJsonValue::Number)
-            .ok_or_else(|| E::custom("invalid JSON number"))
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::String(value.to_owned()))
-    }
-
-    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::String(value))
-    }
-
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::Null)
-    }
-
-    fn visit_unit<E>(self) -> Result<Self::Value, E> {
-        Ok(StrictJsonValue::Null)
-    }
-
-    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-    where
-        A: SeqAccess<'de>,
-    {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element()? {
-            values.push(value);
-        }
-        Ok(StrictJsonValue::Array(values))
-    }
-
-    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
-    where
-        A: MapAccess<'de>,
-    {
-        let mut fields = Vec::new();
-        let mut keys = HashSet::new();
-        while let Some((key, value)) = map.next_entry::<String, StrictJsonValue>()? {
-            if !keys.insert(key.clone()) {
-                return Err(de::Error::custom("duplicate JSON object key"));
-            }
-            fields.push((key, value));
-        }
-        Ok(StrictJsonValue::Object(fields))
-    }
 }
 
 fn absolute_path(base: &Path, path: &Path) -> PathBuf {
@@ -1057,6 +1442,44 @@ fn absolute_path(base: &Path, path: &Path) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+/// Reports whether an intermediate component of an explicit Split candidate
+/// traverses a symlink.
+///
+/// The final component is handled separately because a symlinked member has
+/// different semantics from a member reached through a symlinked parent. When
+/// the selected path is below the request base, every component between the
+/// two is inspected. An absolute path outside the base is checked at its
+/// immediate parent only, which avoids treating platform aliases such as
+/// macOS `/tmp` as user-selected traversal.
+fn traverses_intermediate_symlink(path: &Path, base: &Path) -> Result<bool, InputResolutionError> {
+    let within_base = path.starts_with(base);
+    let mut ancestors = Vec::new();
+    let mut current = path.parent();
+    while let Some(parent) = current {
+        if parent == base {
+            break;
+        }
+        ancestors.push(parent.to_path_buf());
+        if !within_base && ancestors.len() == 1 {
+            break;
+        }
+        current = parent.parent();
+    }
+    for ancestor in ancestors.iter().rev() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InputUnavailable,
+                ));
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn is_discovery_candidate(path: &Path) -> bool {
@@ -1069,7 +1492,7 @@ fn is_discovery_candidate(path: &Path) -> bool {
         })
 }
 
-fn looks_like_split_segment(path: &Path) -> bool {
+pub(crate) fn looks_like_split_segment(path: &Path) -> bool {
     let Some(name) = path.file_name().map(|name| name.to_string_lossy()) else {
         return false;
     };
@@ -1102,10 +1525,10 @@ fn looks_like_split_segment(path: &Path) -> bool {
         })
 }
 
-fn directory_identity(path: &Path, metadata: &Metadata) -> DirectoryIdentity {
+fn directory_identity(path: &Path, _metadata: &Metadata) -> DirectoryIdentity {
     DirectoryIdentity {
         path_key: normalized_path_key(path),
-        file_identity: file_identity(metadata),
+        file_identity: path_identity(path),
     }
 }
 
@@ -1113,25 +1536,6 @@ fn directory_identity(path: &Path, metadata: &Metadata) -> DirectoryIdentity {
 struct DirectoryIdentity {
     path_key: String,
     file_identity: Option<FileIdentity>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct FileIdentity {
-    first: u64,
-    second: u64,
-}
-
-fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        return Some(FileIdentity {
-            first: metadata.dev(),
-            second: metadata.ino(),
-        });
-    }
-    #[allow(unreachable_code)]
-    None
 }
 
 fn normalized_path_key(path: &Path) -> String {
@@ -1197,18 +1601,20 @@ fn hex_key(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputResolutionCapabilities, InputResolutionControl,
         MAX_INPUT_LIST_BYTES_PER_REQUEST, MAX_INPUT_LIST_ENTRIES, MAX_TRAVERSAL_DEPTH,
         MAX_TRAVERSAL_ENTRIES, Resolver, parse_input_list,
     };
-    use crate::input_resolution::{InputResolutionErrorCode, StrictJsonValue};
-    use serde::Deserialize;
+    use crate::input_resolution::InputResolutionErrorCode;
 
-    #[test]
-    fn strict_json_parser_rejects_duplicate_keys_before_schema_projection() {
-        let parsed = StrictJsonValue::deserialize(&mut serde_json::Deserializer::from_str(
-            r#"{"x":{"y":1,"y":2}}"#,
-        ));
-        assert!(parsed.is_err());
+    fn resolver() -> Resolver<'static> {
+        Resolver::new(
+            false,
+            false,
+            InputResolutionCapabilities::default().split_trust_store,
+            None,
+            DEFAULT_MAX_SPLIT_VALIDATION_BYTES,
+        )
     }
 
     #[test]
@@ -1232,7 +1638,7 @@ mod tests {
 
     #[test]
     fn aggregate_input_list_entry_and_byte_budgets_are_enforced() {
-        let mut entry_budget = Resolver::new(false, false);
+        let mut entry_budget = resolver();
         entry_budget.record_input_list(10, 60_000).unwrap();
         let entry_error = entry_budget.record_input_list(10, 40_001).unwrap_err();
         assert_eq!(
@@ -1240,7 +1646,7 @@ mod tests {
             InputResolutionErrorCode::ResourceLimitExceeded
         );
 
-        let mut byte_budget = Resolver::new(false, false);
+        let mut byte_budget = resolver();
         byte_budget.record_input_list(3_000_000, 1).unwrap();
         let byte_error = byte_budget.record_input_list(1_200_000, 1).unwrap_err();
         assert_eq!(
@@ -1263,7 +1669,7 @@ mod tests {
             input_list_entry_index: None,
             input_list_entry_path: None,
         };
-        let error = Resolver::new(false, false)
+        let error = resolver()
             .expand_path(&split_path, std::path::Path::new("/"), &selection)
             .unwrap_err();
         assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
@@ -1275,5 +1681,15 @@ mod tests {
         assert_eq!(MAX_TRAVERSAL_ENTRIES, 100_000);
         assert_eq!(MAX_INPUT_LIST_ENTRIES, 100_000);
         assert_eq!(MAX_INPUT_LIST_BYTES_PER_REQUEST, 4_194_304);
+    }
+
+    #[test]
+    fn fresh_control_reports_no_active_split_input() {
+        let control = InputResolutionControl::new();
+        let progress = control.progress();
+        assert_eq!(progress.input_index, 0);
+        assert_eq!(progress.completed_bytes, 0);
+        assert_eq!(progress.total_bytes, None);
+        assert!(!control.is_cancelled());
     }
 }
