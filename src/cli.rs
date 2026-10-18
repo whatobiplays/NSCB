@@ -1,11 +1,15 @@
 use nscb::{
-    ContainerProbeError, ContainerProbeErrorCode, Engine, InputResolutionCapabilities,
-    InputResolutionRequest, InputSelectionSource, LocalSplitTrustStore, SplitQualificationKind,
+    CancellationHandle, ContainerProbeError, ContainerProbeErrorCode, Engine,
+    InputResolutionCapabilities, InputResolutionRequest, InputSelectionSource, InspectionErrorCode,
+    InspectionHost, InspectionPreflightStatus, InspectionRequest, InspectionResult,
+    LocalSplitTrustStore, SplitQualificationKind,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 const EXIT_SUCCESS: i32 = 0;
 const EXIT_USAGE: i32 = 2;
@@ -19,6 +23,267 @@ struct SuccessDocument<'a, T> {
     kind: &'static str,
     nscb_version: &'static str,
     result: &'a T,
+}
+
+#[cfg(test)]
+mod inspection_cli_tests {
+    use super::{parse_inspection, run};
+    use nscb::Engine;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn inspection_parser_requires_one_input_and_accepts_optional_keys() {
+        assert!(parse_inspection(&args(&["inspect"])).is_err());
+        let implicit = parse_inspection(&args(&["inspect", "input.nca"])).unwrap();
+        assert!(implicit.key_file.is_none());
+        assert!(
+            parse_inspection(&args(&[
+                "inspect",
+                "input.nca",
+                "--keys",
+                "prod.keys",
+                "extra.nca"
+            ]))
+            .is_err()
+        );
+        let parsed = parse_inspection(&args(&[
+            "inspect",
+            "input.nca",
+            "--keys",
+            "prod.keys",
+            "--cache-dir",
+            "cache",
+            "--allow-download",
+            "--preflight",
+            "--json",
+        ]))
+        .unwrap();
+        assert!(parsed.allow_download);
+        assert!(parsed.preflight);
+        assert!(parsed.json);
+        assert_eq!(parsed.key_file.as_deref(), Some(Path::new("prod.keys")));
+
+        for values in [
+            &["inspect", "input.nca", "--keys"][..],
+            &["inspect", "input.nca", "--cache-dir"][..],
+            &["inspect", "input.nca", "--keys", "--json"][..],
+            &["inspect", "input.nca", "--cache-dir", "--json"][..],
+        ] {
+            assert!(parse_inspection(&args(values)).is_err(), "{values:?}");
+        }
+    }
+
+    #[test]
+    fn inspection_key_resolution_prefers_explicit_then_configured_then_home_default() {
+        let home = PathBuf::from("/fixture/home");
+        assert_eq!(
+            super::resolve_inspection_key_file(
+                Some(PathBuf::from("/explicit/prod.keys")),
+                Some(PathBuf::from("/configured/prod.keys")),
+                Some(home.clone()),
+            )
+            .unwrap(),
+            PathBuf::from("/explicit/prod.keys")
+        );
+        assert_eq!(
+            super::resolve_inspection_key_file(
+                None,
+                Some(PathBuf::from("/configured/prod.keys")),
+                Some(home.clone()),
+            )
+            .unwrap(),
+            PathBuf::from("/configured/prod.keys")
+        );
+        assert_eq!(
+            super::resolve_inspection_key_file(None, None, Some(home)).unwrap(),
+            PathBuf::from("/fixture/home/.switch/prod.keys")
+        );
+        assert_eq!(
+            super::resolve_inspection_key_file(None, None, None).unwrap_err(),
+            nscb::InspectionErrorCode::InvalidKeyPath
+        );
+    }
+
+    #[test]
+    fn inspection_home_uses_home_on_all_platforms() {
+        assert_eq!(
+            super::resolve_home_directory(
+                Some(PathBuf::from("/Users/tester")),
+                Some(PathBuf::from("C:/Users/tester")),
+                false,
+            ),
+            Some(PathBuf::from("/Users/tester"))
+        );
+    }
+
+    #[test]
+    fn inspection_home_uses_userprofile_as_a_windows_fallback() {
+        assert_eq!(
+            super::resolve_home_directory(None, Some(PathBuf::from("C:/Users/tester")), true,)
+                .unwrap(),
+            PathBuf::from("C:/Users/tester")
+        );
+    }
+
+    #[test]
+    fn inspection_home_prefers_home_over_windows_userprofile() {
+        assert_eq!(
+            super::resolve_home_directory(
+                Some(PathBuf::from("/Users/tester")),
+                Some(PathBuf::from("C:/Users/tester")),
+                true,
+            )
+            .unwrap(),
+            PathBuf::from("/Users/tester")
+        );
+    }
+
+    #[test]
+    fn inspection_home_is_missing_on_non_windows_without_home() {
+        assert_eq!(
+            super::resolve_home_directory(None, Some(PathBuf::from("C:/Users/tester")), false),
+            None
+        );
+    }
+
+    #[test]
+    fn inspect_usage_is_human_readable_without_json() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            &args(&["inspect"]),
+            &Engine::new(),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 2);
+        assert!(stdout.is_empty());
+        assert!(
+            String::from_utf8(stderr)
+                .unwrap()
+                .contains("nscb inspect <path> [--keys <path>]")
+        );
+    }
+
+    #[test]
+    fn inspect_usage_is_sanitized_json_when_requested() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            &args(&["inspect", "--json"]),
+            &Engine::new(),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 2);
+        assert!(stderr.is_empty());
+        let document: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(document["kind"], "error");
+        assert_eq!(document["error"]["code"], "usage_error");
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn missing_input_is_reported_as_a_localized_prerequisite_failure() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run(
+            &args(&[
+                "inspect",
+                "/definitely/missing/input.nca",
+                "--keys",
+                "/definitely/missing/prod.keys",
+                "--cache-dir",
+                "/tmp/nscb-inspection-test-cache",
+            ]),
+            &Engine::new(),
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(exit, 3);
+        assert!(stdout.is_empty());
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(message.contains("content input could not be read"));
+        assert!(!message.contains("/definitely/missing"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn unqualified_target_is_reported_without_disclosing_input_or_key_paths() {
+        let input = "/definitely/missing/input.nca";
+        let keys = "/definitely/missing/prod.keys";
+        let engine = Engine::new();
+        let invocation = [
+            "inspect",
+            input,
+            "--keys",
+            keys,
+            "--cache-dir",
+            "/tmp/nscb-inspection-test-cache",
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run(&args(&invocation), &engine, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, 3);
+        assert!(stdout.is_empty());
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(
+            message
+                .contains("NSTool v1.9.2 is not qualified for NCA inspection on this host target.")
+        );
+        assert!(!message.contains(input));
+        assert!(!message.contains(keys));
+
+        let json_invocation = [
+            "inspect",
+            input,
+            "--keys",
+            keys,
+            "--cache-dir",
+            "/tmp/nscb-inspection-test-cache",
+            "--json",
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run(&args(&json_invocation), &engine, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, 3);
+        assert!(stderr.is_empty());
+        let document: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(document["kind"], "error");
+        assert_eq!(document["error"]["code"], "provider_unqualified_target");
+        let output = String::from_utf8(stdout).unwrap();
+        assert!(!output.contains(input));
+        assert!(!output.contains(keys));
+    }
+
+    #[test]
+    fn input_unavailable_error_uses_localized_prerequisite_exit_class() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = super::emit_inspection_error(
+            &mut stdout,
+            &mut stderr,
+            nscb::InspectionErrorCode::InputUnavailable,
+            false,
+        );
+
+        assert_eq!(exit, 3);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "The content input could not be read.\n"
+        );
+    }
 }
 
 #[derive(Serialize)]
@@ -50,6 +315,13 @@ pub(crate) fn run(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
+    if args
+        .first()
+        .is_some_and(|argument| argument == OsStr::new("inspect"))
+    {
+        return run_inspection(args, engine, stdout, stderr);
+    }
+
     if args
         .first()
         .is_some_and(|argument| argument == OsStr::new("resolve"))
@@ -550,6 +822,292 @@ fn run_recognition(
             }
         }
     }
+}
+
+struct InspectionInvocation {
+    input: PathBuf,
+    key_file: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    allow_download: bool,
+    preflight: bool,
+    json: bool,
+}
+
+fn parse_inspection(args: &[OsString]) -> Result<InspectionInvocation, ()> {
+    if args.first().is_none_or(|arg| arg != OsStr::new("inspect")) {
+        return Err(());
+    }
+    let mut input = None;
+    let mut key_file = None;
+    let mut cache_dir = None;
+    let mut allow_download = false;
+    let mut preflight = false;
+    let mut json = false;
+    let mut iter = args.iter().skip(1);
+    while let Some(argument) = iter.next() {
+        if argument == OsStr::new("--json") {
+            if json {
+                return Err(());
+            }
+            json = true;
+        } else if argument == OsStr::new("--allow-download") {
+            if allow_download {
+                return Err(());
+            }
+            allow_download = true;
+        } else if argument == OsStr::new("--preflight") {
+            if preflight {
+                return Err(());
+            }
+            preflight = true;
+        } else if argument == OsStr::new("--keys") {
+            if key_file.is_some() {
+                return Err(());
+            }
+            let value = iter.next().ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            key_file = Some(PathBuf::from(value));
+        } else if argument == OsStr::new("--cache-dir") {
+            if cache_dir.is_some() {
+                return Err(());
+            }
+            let value = iter.next().ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            cache_dir = Some(PathBuf::from(value));
+        } else if argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else if input.is_none() {
+            input = Some(PathBuf::from(argument));
+        } else {
+            return Err(());
+        }
+    }
+    Ok(InspectionInvocation {
+        input: input.ok_or(())?,
+        key_file,
+        cache_dir,
+        allow_download,
+        preflight,
+        json,
+    })
+}
+
+fn run_inspection(
+    args: &[OsString],
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let json_requested = args.iter().any(|argument| argument == OsStr::new("--json"));
+    let invocation = match parse_inspection(args) {
+        Ok(invocation) => invocation,
+        Err(()) => {
+            if json_requested {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            return if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::inspection_usage()
+            )
+            .is_ok()
+            {
+                EXIT_USAGE
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let key_file =
+        match resolve_inspection_key_file(invocation.key_file, None, inspection_home_directory()) {
+            Ok(path) => path,
+            Err(code) => return emit_inspection_error(stdout, stderr, code, invocation.json),
+        };
+    let cache_dir = match invocation.cache_dir {
+        Some(cache_dir) => cache_dir,
+        None => match default_inspection_cache_dir() {
+            Ok(cache_dir) => cache_dir,
+            Err(code) => return emit_inspection_error(stdout, stderr, code, invocation.json),
+        },
+    };
+    let cancellation = if invocation.preflight {
+        None
+    } else {
+        match inspection_cancellation() {
+            Ok(handle) => Some(handle),
+            Err(code) => return emit_inspection_error(stdout, stderr, code, invocation.json),
+        }
+    };
+    let mut host = if invocation.allow_download {
+        InspectionHost::managed_download(cache_dir)
+    } else {
+        InspectionHost::cache_only(cache_dir)
+    };
+    if let Some(cancellation) = cancellation {
+        host = host.with_cancellation(cancellation);
+    }
+    let request = InspectionRequest::nca(invocation.input, key_file);
+    if invocation.preflight {
+        return match engine.preflight_inspection(&request, &host) {
+            Ok(status) if invocation.json => {
+                if write_json(
+                    &SuccessDocument {
+                        schema_version: 1,
+                        kind: "inspection.preflight",
+                        nscb_version: env!("CARGO_PKG_VERSION"),
+                        result: &status,
+                    },
+                    stdout,
+                ) {
+                    EXIT_SUCCESS
+                } else {
+                    report_output_failure(stderr)
+                }
+            }
+            Ok(status) => {
+                let message = match status {
+                    InspectionPreflightStatus::Ready => {
+                        crate::localization::english::inspection_preflight_ready()
+                    }
+                    InspectionPreflightStatus::ProvisioningRequired => {
+                        crate::localization::english::inspection_preflight_provisioning_required()
+                    }
+                    _ => crate::localization::english::inspection_preflight_unknown(),
+                };
+                if writeln!(stdout, "{message}").is_ok() {
+                    EXIT_SUCCESS
+                } else {
+                    report_output_failure(stderr)
+                }
+            }
+            Err(error) => emit_inspection_error(stdout, stderr, error.code(), invocation.json),
+        };
+    }
+    match engine.inspect(request, &host) {
+        Ok(result) if invocation.json => {
+            if write_json(
+                &SuccessDocument {
+                    schema_version: 1,
+                    kind: "inspection.result",
+                    nscb_version: env!("CARGO_PKG_VERSION"),
+                    result: &result,
+                },
+                stdout,
+            ) {
+                EXIT_SUCCESS
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Ok(result) => {
+            let message = match result {
+                InspectionResult::Nca(inspection) => {
+                    crate::localization::english::inspection_result(&inspection)
+                }
+                _ => crate::localization::english::inspection_unsupported_result().to_owned(),
+            };
+            if writeln!(stdout, "{message}").is_ok() {
+                EXIT_SUCCESS
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Err(error) => emit_inspection_error(stdout, stderr, error.code(), invocation.json),
+    }
+}
+
+fn resolve_inspection_key_file(
+    explicit: Option<PathBuf>,
+    configured: Option<PathBuf>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, InspectionErrorCode> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    if let Some(path) = configured {
+        return Ok(path);
+    }
+    let home = home.ok_or(InspectionErrorCode::InvalidKeyPath)?;
+    Ok(home.join(".switch").join("prod.keys"))
+}
+
+fn resolve_home_directory(
+    home: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+    is_windows: bool,
+) -> Option<PathBuf> {
+    home.or(if is_windows { user_profile } else { None })
+}
+
+fn inspection_home_directory() -> Option<PathBuf> {
+    resolve_home_directory(
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+        cfg!(windows),
+    )
+}
+
+fn emit_inspection_error(
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    code: InspectionErrorCode,
+    json: bool,
+) -> i32 {
+    let exit = code.exit_class().code();
+    if json {
+        return emit_error(stdout, code.as_str(), exit);
+    }
+    if writeln!(
+        stderr,
+        "{}",
+        crate::localization::english::inspection_error(code)
+    )
+    .is_ok()
+    {
+        exit
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+#[cfg(unix)]
+fn inspection_cancellation() -> Result<CancellationHandle, InspectionErrorCode> {
+    let flag = Arc::new(AtomicBool::new(false));
+    signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))
+        .map_err(|_| InspectionErrorCode::SignalHandlerFailed)?;
+    signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))
+        .map_err(|_| InspectionErrorCode::SignalHandlerFailed)?;
+    Ok(CancellationHandle::from_flag(flag))
+}
+
+#[cfg(not(unix))]
+fn inspection_cancellation() -> Result<CancellationHandle, InspectionErrorCode> {
+    Ok(CancellationHandle::new())
+}
+
+fn default_inspection_cache_dir() -> Result<PathBuf, InspectionErrorCode> {
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or(InspectionErrorCode::InvalidCacheDirectory)?
+        .join("Library/Caches");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .ok_or(InspectionErrorCode::InvalidCacheDirectory)?;
+    #[cfg(windows)]
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or(InspectionErrorCode::InvalidCacheDirectory)?;
+    Ok(base.join("nscb").join("providers"))
 }
 
 fn write_json(document: &impl Serialize, stdout: &mut dyn Write) -> bool {

@@ -1,4 +1,5 @@
-//! Runtime-neutral Rust facade for separate read-only Container Probe and recognition operations.
+//! Runtime-neutral Rust facade for bounded, read-only Probe, Recognition,
+//! input-resolution, and qualified Inspection operations.
 //!
 //! Container Probe validates outer PFS0 framing without reading payloads.
 //! Recognition examines bounded structural metadata and reports positive families,
@@ -9,7 +10,10 @@ mod engine;
 mod error;
 mod file_identity;
 mod input_resolution;
+mod inspection;
+mod nca;
 mod pfs0;
+mod provider;
 mod recognition;
 mod sha256;
 mod split_manifest;
@@ -35,6 +39,13 @@ pub use input_resolution::{
     InputResolutionProgress, InputResolutionRequest, InputResolutionResult, InputSegment,
     InputSelection, InputSelectionSource, ResolvedInput, SplitQualification,
     SplitQualificationKind,
+};
+pub use inspection::{
+    CancellationHandle, InspectionCapability, InspectionEntry, InspectionError,
+    InspectionErrorCode, InspectionExitClass, InspectionHost, InspectionPreflightStatus,
+    InspectionRequest, InspectionResult, MemoryMonitoringPolicy, MemoryMonitoringStatus,
+    NcaContentType, NcaDistribution, NcaEncryptionType, NcaFilesystem, NcaHashType, NcaInspection,
+    NcaPartition, ProgramId,
 };
 pub use sha256::{InvalidSha256Digest, SHA256_HEX_LENGTH, Sha256Digest};
 pub use split_trust::{

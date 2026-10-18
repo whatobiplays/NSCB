@@ -1,4 +1,8 @@
 use crate::error::{ContainerProbeError, ContainerProbeErrorCode};
+use crate::inspection::{
+    InspectionError, InspectionErrorCode, InspectionHost, InspectionPreflightStatus,
+    InspectionRequest, InspectionResult,
+};
 use crate::pfs0;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -19,11 +23,43 @@ impl ContainerProbeRequest {
     }
 }
 
-/// A runtime-neutral facade for the supported read-only container probe.
-#[derive(Default)]
+/// A runtime-neutral facade for supported read-only Engine operations.
 pub struct Engine;
 
 impl Engine {
+    /// Creates an engine without global state, persistent storage, or a runtime requirement.
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Validates request and provider prerequisites without launching a helper.
+    pub fn preflight_inspection(
+        &self,
+        request: &InspectionRequest,
+        host: &InspectionHost,
+    ) -> Result<InspectionPreflightStatus, InspectionError> {
+        crate::provider::preflight(request, host).map_err(InspectionError::new)
+    }
+
+    /// Runs one keyed, provider-backed, read-only Inspection.
+    ///
+    /// At most one helper execution is active per explicitly constructed host
+    /// session. Admission is shared by clones of that host and releases on all
+    /// return paths.
+    pub fn inspect(
+        &self,
+        request: InspectionRequest,
+        host: &InspectionHost,
+    ) -> Result<InspectionResult, InspectionError> {
+        let _admission = host.begin_inspection().map_err(InspectionError::new)?;
+        if request.capability() != crate::InspectionCapability::Nca {
+            return Err(InspectionError::new(
+                InspectionErrorCode::UnsupportedInspectionProfile,
+            ));
+        }
+        crate::inspection::inspect(&request, host).map_err(InspectionError::new)
+    }
+
     /// Recognizes byte-supported structure without keys, execution authority, or content identity.
     pub fn recognize_content(
         &self,
@@ -32,11 +68,6 @@ impl Engine {
         let (mut file, size) =
             open_regular_file(request.path()).map_err(crate::recognition::from_probe_error)?;
         crate::recognition::recognize(&mut file, size, request.path())
-    }
-
-    /// Creates an engine without global state, persistent storage, or a runtime requirement.
-    pub const fn new() -> Self {
-        Self
     }
 
     /// Validates supported outer-container framing and returns structural facts.
@@ -49,6 +80,12 @@ impl Engine {
     ) -> Result<ContainerProbeResult, ContainerProbeError> {
         let (mut file, file_size) = open_regular_file(&request.path)?;
         pfs0::probe(&mut file, file_size)
+    }
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -122,4 +159,33 @@ pub struct ContainerProbeResult {
     pub payload_size: u64,
     /// Entries in the order declared by the PFS0 entry table.
     pub entries: Vec<ContainerProbeEntry>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Engine;
+    use crate::{InspectionErrorCode, InspectionHost, InspectionRequest};
+
+    #[test]
+    fn helper_execution_limit_is_shared_by_an_explicit_host_session() {
+        let host = InspectionHost::cache_only("/missing/cache");
+        let admission = host.begin_inspection().unwrap();
+        let request = InspectionRequest::nca("/missing/input.nca", "/missing/prod.keys");
+        assert_eq!(
+            Engine::new().inspect(request, &host).unwrap_err().code(),
+            InspectionErrorCode::ProviderExecutionBusy
+        );
+
+        let request = InspectionRequest::nca("/missing/input.nca", "/missing/prod.keys");
+        let cloned_host = host.clone();
+        assert_eq!(
+            Engine.inspect(request, &cloned_host).unwrap_err().code(),
+            InspectionErrorCode::ProviderExecutionBusy
+        );
+
+        drop(admission);
+        let request = InspectionRequest::nca("/missing/input.nca", "/missing/prod.keys");
+        let error = Engine::inspect(&Engine, request, &host).unwrap_err();
+        assert_ne!(error.code(), InspectionErrorCode::ProviderExecutionBusy);
+    }
 }

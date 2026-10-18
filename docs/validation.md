@@ -75,3 +75,29 @@ Run `cargo test --locked recognition::tests`, the `public_facade` and
 fixtures are deterministic generated source data; no proprietary binaries or
 cryptographic material are required. The global Git AI pause target requires
 separate authorization and is not part of recognition validation.
+
+## Inspection validation
+
+Inspection uses the same repository validation entry point:
+
+```sh
+make all
+```
+
+Focused Rust verification can be run directly:
+
+```sh
+cargo test --locked --all-features inspection::tests
+cargo test --locked --all-features provider::
+cargo test --locked --all-features cli::inspection_cli_tests
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+The provider cache tests create temporary directories and files; they do not
+modify the repository or a host cache. The fake-provider tests are compiled
+only under `#[cfg(test)]` and exercise direct argv, environment, output bounds,
+signal/nonzero exit, reader cleanup, cancellation, timeout, process reaping,
+known/escaped descendants, input/key mutation, and independent postcondition
+rejection without network access. The native macOS arm64 NSTool run and its
+qualification limits are recorded in
+[Inspection qualification evidence](testing/inspection-qualification.md).

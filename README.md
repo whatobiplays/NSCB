@@ -1,6 +1,6 @@
 # NSCB
 
-This repository contains bounded, read-only Rust Engine capabilities for PFS0 probing, content recognition, and deterministic input resolution.
+This repository contains bounded, read-only Rust Engine capabilities for PFS0 probing, content recognition, deterministic input resolution, and qualified NCA inspection.
 
 ## Container Probe
 
@@ -17,6 +17,71 @@ nscb probe <path> [--json]
 Successful JSON output is one versioned document with `kind: "container_probe.result"`. With `--json`, handled errors produce one versioned error document with a sanitized code. Exit classes are 0 for success, 2 for usage errors, 3 for input errors, and 7 for internal resource or output failures. No keys or credentials are required for this operation.
 
 See [the Container Probe documentation](docs/container-probe.md) for the typed result, validation bounds, JSON fields, error categories, and tested-platform evidence.
+
+## Content Inspection
+
+The provider-dependent read-only Inspection operation is available through
+`Engine::preflight_inspection` and `Engine::inspect`. The first capability,
+`InspectionCapability::Nca`, inspects a standalone NCA3 Program with a clear
+PartitionFs profile. It accepts encrypted NCA headers when a header key is
+available; plaintext NCA headers return a typed unsupported-profile error.
+Content Recognition retains its existing plaintext and encrypted-header
+behavior. Inspection selects the exact NSTool v1.9.2 artifact from an
+immutable manifest; callers cannot supply an executable or provider output.
+
+```text
+nscb inspect <path> [--keys <path>] [--cache-dir <absolute-dir>]
+             [--allow-download] [--preflight] [--json]
+```
+
+The CLI uses an explicitly supplied `--keys <path>` first. If omitted, it uses
+`~/.switch/prod.keys`. Embedding callers provide an explicit key path through
+`InspectionRequest`.
+
+`--preflight` validates request, cache, and required child-process controls
+without launching NSTool or downloading. It may start a disposable system
+process to verify the qualified CPU, open-file, file-size, and core-dump limits.
+For Inspection, NSCB validates the request and inputs, then checks mandatory
+child-process controls before launching NSTool and before any opt-in download,
+installation, or network access. A read-only provider-cache lookup may happen
+before those controls during preflight; it does not provision or mutate the
+cache. NSCB does not impose an address-space limit or claim hard memory
+containment. Physical-footprint
+sampling is disabled by default. An embedding host may request an optional
+threshold through `MemoryMonitoringPolicy`; because this macOS build has no
+supported sampler, Inspection proceeds without sampling or threshold
+enforcement. `InspectionHost::memory_monitoring_status()` reports this as
+unavailable. NSCB does not claim memory containment.
+`--allow-download` is an explicit host policy for the digest-pinned artifact;
+without it, a missing cache artifact fails with a prerequisite error. Human
+output is localized from a separate Inspection resource. Results contain only
+facts that NSCB independently parsed and corroborated; raw NSTool text is
+never exposed.
+
+The cache root must be absolute. Directory enumeration is bounded to 1,024
+entries and pointer candidates retained for sorting are bounded to 256. The
+child process must pass its qualified hard process-control setup before
+launch; unsupported controls return the typed
+`provider_containment_unsupported` prerequisite error. NSTool is launched
+directly with typed arguments, a cleared environment, controlled working
+directory and standard input, bounded output, deadline, cancellation, and
+process-group cleanup.
+
+The initial profile supports an encrypted NCA header and clear PartitionFs
+partitions with hash type
+`None` and encryption type `None`. It does not support general encrypted NCA
+partition content, plaintext NCA headers in Inspection, RomFs, hierarchical
+hash layers, extended metadata, signatures, authenticity, integrity
+verification, extraction, writing, or patch application. The manifest selects
+the pinned macOS arm64 artifact for `nca.inspect`; the production qualification
+and tested hard limits are recorded in [Inspection qualification
+evidence](docs/testing/inspection-qualification.md). No hard physical-memory
+or aggregate process-tree memory guarantee is claimed. macOS x86_64, Linux,
+and Windows remain unqualified, and Linux arm64 is unsupported.
+
+See [Inspection architecture](docs/architecture/inspection.md), [NSTool v1.9.2
+provider qualification](docs/providers/nstool-v1.9.2.md), and [Inspection
+qualification evidence](docs/testing/inspection-qualification.md).
 
 ## Input resolution
 
