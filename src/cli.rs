@@ -187,6 +187,7 @@ mod inspection_cli_tests {
         assert_eq!(document["error"]["code"], "usage_error");
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn missing_input_is_reported_as_a_localized_prerequisite_failure() {
         let mut stdout = Vec::new();
@@ -209,6 +210,76 @@ mod inspection_cli_tests {
         let message = String::from_utf8(stderr).unwrap();
         assert!(message.contains("content input could not be read"));
         assert!(!message.contains("/definitely/missing"));
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn unqualified_target_is_reported_without_disclosing_input_or_key_paths() {
+        let input = "/definitely/missing/input.nca";
+        let keys = "/definitely/missing/prod.keys";
+        let engine = Engine::new();
+        let invocation = [
+            "inspect",
+            input,
+            "--keys",
+            keys,
+            "--cache-dir",
+            "/tmp/nscb-inspection-test-cache",
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run(&args(&invocation), &engine, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, 3);
+        assert!(stdout.is_empty());
+        let message = String::from_utf8(stderr).unwrap();
+        assert!(message.contains("the provider is not qualified for this target and operation"));
+        assert!(!message.contains(input));
+        assert!(!message.contains(keys));
+
+        let json_invocation = [
+            "inspect",
+            input,
+            "--keys",
+            keys,
+            "--cache-dir",
+            "/tmp/nscb-inspection-test-cache",
+            "--json",
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run(&args(&json_invocation), &engine, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, 3);
+        assert!(stderr.is_empty());
+        let document: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(document["kind"], "error");
+        assert_eq!(document["error"]["code"], "provider_unqualified_target");
+        let output = String::from_utf8(stdout).unwrap();
+        assert!(!output.contains(input));
+        assert!(!output.contains(keys));
+    }
+
+    #[test]
+    fn input_unavailable_error_uses_localized_prerequisite_exit_class() {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = super::emit_inspection_error(
+            &mut stdout,
+            &mut stderr,
+            nscb::InspectionErrorCode::InputUnavailable,
+            false,
+        );
+
+        assert_eq!(exit, 3);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "The content input could not be read.\n"
+        );
     }
 }
 
