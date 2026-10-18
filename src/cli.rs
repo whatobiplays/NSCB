@@ -234,7 +234,10 @@ mod inspection_cli_tests {
         assert_eq!(exit, 3);
         assert!(stdout.is_empty());
         let message = String::from_utf8(stderr).unwrap();
-        assert!(message.contains("the provider is not qualified for this target and operation"));
+        assert!(
+            message
+                .contains("NSTool v1.9.2 is not qualified for NCA inspection on this host target.")
+        );
         assert!(!message.contains(input));
         assert!(!message.contains(keys));
 
