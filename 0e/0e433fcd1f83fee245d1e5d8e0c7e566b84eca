@@ -1,0 +1,19 @@
+src/provider/mod.rs
+  s_09dceb16f1163e::t_9374f4bb5c5880 890,908
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0e0e433fcd1f83fee245d1e5d8e0c7e566b84eca",
+  "prompts": {},
+  "sessions": {
+    "s_09dceb16f1163e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14942-201b-7073-a83c-a449fa666480",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
