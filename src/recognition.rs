@@ -651,49 +651,18 @@ impl<R: Read + Seek> Parser<'_, R> {
             return Ok(false);
         }
         let h = self.read(start, end, 0xc00)?;
-        if h[0x204] > 1
-            || h[0x205] > 5
-            || !(h[0x207] < 3 || h[0x207] == 0xff)
-            || u64le(&h[0x208..0x210]) != end - start
-            || h[0x222..0x230].iter().any(|b| *b != 0)
-        {
-            return Err(err(MalformedInput));
-        }
-        let mut prev = 0xc00;
-        let mut absent = false;
-        let mut present = false;
-        for i in 0..4 {
-            let r = &h[0x240 + i * 16..0x250 + i * 16];
-            let a = u32le(&r[..4]) * 0x200;
-            let b = u32le(&r[4..8]) * 0x200;
+        let block: [u8; crate::nca::HEADER_SIZE] =
+            h.as_slice().try_into().map_err(|_| err(MalformedInput))?;
+        let header =
+            crate::nca::parse_header_block(&block, end - start).map_err(|error| match error {
+                crate::nca::HeaderError::UnsupportedFormat
+                | crate::nca::HeaderError::MalformedInput => err(MalformedInput),
+                crate::nca::HeaderError::TruncatedInput => err(TruncatedInput),
+                crate::nca::HeaderError::InputUnavailable => err(MalformedInput),
+            })?;
+        for partition in &header.partitions {
+            let i = usize::from(partition.index);
             let fs = &h[0x400 + i * 0x200..0x600 + i * 0x200];
-            if a == 0 && b == 0 {
-                absent = true;
-                if r.iter().any(|b| *b != 0) || fs.iter().any(|b| *b != 0) {
-                    return Err(err(MalformedInput));
-                }
-                continue;
-            }
-            if absent
-                || a < prev
-                || b <= a
-                || b > end - start
-                || u32le(&r[8..12]) * 0x200 > b - a
-                || r[12..].iter().any(|b| *b != 0)
-            {
-                return Err(err(MalformedInput));
-            }
-            present = true;
-            prev = b;
-            if fs[..2] != [2, 0]
-                || fs[2] > 1
-                || !(1..=6).contains(&fs[3])
-                || !(1..=6).contains(&fs[4])
-                || fs[5] > 1
-                || fs[6..8].iter().any(|b| *b != 0)
-            {
-                return Err(err(MalformedInput));
-            }
             // Extended patch/sparse/compression/metadata-hash layouts need separate qualification.
             if fs[5] != 0
                 || fs[0x100..0x140].iter().any(|b| *b != 0)
@@ -722,7 +691,7 @@ impl<R: Read + Seek> Parser<'_, R> {
                     || length == 0
                     || length > i64::MAX as u64
                     || offset < last
-                    || add(offset, length)? > b - a
+                    || add(offset, length)? > partition.size
                 {
                     return Err(err(MalformedInput));
                 }
@@ -743,9 +712,6 @@ impl<R: Read + Seek> Parser<'_, R> {
             {
                 return Err(err(MalformedInput));
             }
-        }
-        if !present {
-            return Err(err(MalformedInput));
         }
         Ok(true)
     }

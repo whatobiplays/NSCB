@@ -1,6 +1,9 @@
 //! English presentation strings for the standalone command-line adapter.
 
-use nscb::{ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult};
+use nscb::{
+    ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult, InspectionErrorCode,
+    NcaContentType, NcaDistribution, NcaInspection,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -25,12 +28,108 @@ struct SuccessMessages {
     other: String,
 }
 
+#[derive(Deserialize)]
+struct InspectionMessages {
+    usage: String,
+    preflight_ready: String,
+    preflight_provisioning_required: String,
+    preflight_unknown: String,
+    unsupported_result: String,
+    result: String,
+    partition: String,
+    entry: String,
+    content_program: String,
+    distribution_game_card: String,
+    distribution_download: String,
+    errors: HashMap<String, String>,
+}
+
 fn messages() -> &'static Messages {
     static MESSAGES: OnceLock<Messages> = OnceLock::new();
     MESSAGES.get_or_init(|| {
         serde_json::from_str(include_str!("../../locales/en.json"))
             .expect("bundled English CLI localization resource must be valid")
     })
+}
+
+fn inspection_messages() -> &'static InspectionMessages {
+    static MESSAGES: OnceLock<InspectionMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("inspection.en.json"))
+            .expect("bundled English Inspection localization resource must be valid")
+    })
+}
+
+pub(crate) fn inspection_usage() -> &'static str {
+    &inspection_messages().usage
+}
+
+pub(crate) fn inspection_preflight_ready() -> &'static str {
+    &inspection_messages().preflight_ready
+}
+
+pub(crate) fn inspection_preflight_provisioning_required() -> &'static str {
+    &inspection_messages().preflight_provisioning_required
+}
+
+pub(crate) fn inspection_preflight_unknown() -> &'static str {
+    &inspection_messages().preflight_unknown
+}
+
+pub(crate) fn inspection_unsupported_result() -> &'static str {
+    &inspection_messages().unsupported_result
+}
+
+pub(crate) fn inspection_error(code: InspectionErrorCode) -> &'static str {
+    inspection_messages()
+        .errors
+        .get(code.as_str())
+        .expect("every Inspection error code must have an English CLI message")
+}
+
+pub(crate) fn inspection_result(result: &NcaInspection) -> String {
+    let messages = inspection_messages();
+    let content_type = match result.content_type {
+        NcaContentType::Program => &messages.content_program,
+        _ => &messages.content_program,
+    };
+    let distribution = match result.distribution {
+        NcaDistribution::GameCard => &messages.distribution_game_card,
+        NcaDistribution::Download => &messages.distribution_download,
+        _ => &messages.distribution_download,
+    };
+    let mut output = messages
+        .result
+        .replace("{content_type}", content_type)
+        .replace("{distribution}", distribution)
+        .replace("{program_id}", &result.program_id.to_hex())
+        .replace("{key_generation}", &result.key_generation.to_string())
+        .replace(
+            "{signature_generation}",
+            &result.signature_generation.to_string(),
+        )
+        .replace("{size}", &result.declared_size.to_string());
+    for partition in &result.partitions {
+        output.push('\n');
+        output.push_str(
+            &messages
+                .partition
+                .replace("{index}", &partition.index.to_string())
+                .replace("{size}", &partition.size.to_string())
+                .replace("{offset}", &format!("{:x}", partition.offset))
+                .replace("{entry_count}", &partition.entries.len().to_string()),
+        );
+        for entry in &partition.entries {
+            output.push('\n');
+            output.push_str(
+                &messages
+                    .entry
+                    .replace("{path}", &entry.path)
+                    .replace("{size}", &entry.size.to_string()),
+            );
+        }
+    }
+    output
 }
 
 pub(crate) fn usage() -> &'static str {
@@ -232,5 +331,105 @@ mod tests {
     #[test]
     fn resource_provides_cli_usage() {
         assert_eq!(usage(), "Usage: nscb probe <path> [--json]");
+    }
+
+    #[test]
+    fn inspection_resource_has_a_message_for_every_stable_error_code() {
+        use nscb::InspectionErrorCode as InspectionCode;
+        let codes = [
+            InspectionCode::InvalidCacheDirectory,
+            InspectionCode::InvalidKeyPath,
+            InspectionCode::InputUnavailable,
+            InspectionCode::UnsupportedFormat,
+            InspectionCode::UnsupportedInspectionProfile,
+            InspectionCode::TruncatedInput,
+            InspectionCode::MalformedInput,
+            InspectionCode::InputLimitExceeded,
+            InspectionCode::KeyFileUnavailable,
+            InspectionCode::KeyFileMalformed,
+            InspectionCode::KeyFileLimitExceeded,
+            InspectionCode::MissingHeaderKey,
+            InspectionCode::ProviderCacheMissing,
+            InspectionCode::ProviderArtifactMismatch,
+            InspectionCode::ProviderArtifactIncomplete,
+            InspectionCode::ProviderArchiveInvalid,
+            InspectionCode::ProviderUnsupportedTarget,
+            InspectionCode::ProviderUnqualifiedTarget,
+            InspectionCode::ProviderContainmentUnsupported,
+            InspectionCode::PhysicalFootprintMonitoringUnsupported,
+            InspectionCode::ProvisioningDenied,
+            InspectionCode::ProvisioningFailed,
+            InspectionCode::InputChangedDuringInspection,
+            InspectionCode::KeyFileChangedDuringInspection,
+            InspectionCode::ProviderCacheBusy,
+            InspectionCode::ProviderExecutionBusy,
+            InspectionCode::ProviderLaunchFailed,
+            InspectionCode::ProviderExitedUnsuccessfully,
+            InspectionCode::ProviderCrashed,
+            InspectionCode::ProviderTimedOut,
+            InspectionCode::ProviderOutputExceeded,
+            InspectionCode::ProviderOutputMalformed,
+            InspectionCode::ProviderContentUnreadable,
+            InspectionCode::ProviderPostconditionMismatch,
+            InspectionCode::ProviderInconsistent,
+            InspectionCode::Cancelled,
+            InspectionCode::ProviderManifestInvalid,
+            InspectionCode::CacheLockFailed,
+            InspectionCode::CacheCleanupFailed,
+            InspectionCode::AllocationFailed,
+            InspectionCode::InternalIo,
+            InspectionCode::SignalHandlerFailed,
+        ];
+        for code in codes {
+            assert!(
+                !super::inspection_error(code).is_empty(),
+                "missing message for {code:?}"
+            );
+        }
+        assert_eq!(
+            super::inspection_error(InspectionCode::ProviderExecutionBusy),
+            "This inspection host session already has an active provider execution."
+        );
+    }
+
+    #[test]
+    fn inspection_human_output_is_localized_and_contains_only_normalized_facts() {
+        use nscb::{InspectionEntry, NcaPartition, ProgramId};
+        let result = nscb::NcaInspection {
+            format_version: 3,
+            distribution: nscb::NcaDistribution::GameCard,
+            content_type: nscb::NcaContentType::Program,
+            key_generation: 0,
+            signature_generation: 5,
+            program_id: ProgramId::from_u64(0x0102_0304_0506_0708),
+            content_index: 0,
+            declared_size: 0xe00,
+            partitions: vec![NcaPartition {
+                index: 0,
+                offset: 0xc00,
+                size: 0x200,
+                filesystem: nscb::NcaFilesystem::PartitionFs,
+                hash_type: nscb::NcaHashType::None,
+                encryption: nscb::NcaEncryptionType::None,
+                entries: vec![InspectionEntry {
+                    path: "0/hello.nca".to_owned(),
+                    size: 4,
+                }],
+            }],
+        };
+        let output = super::inspection_result(&result);
+        assert!(output.contains("program ID 0102030405060708"));
+        assert!(output.contains("signature generation 5"));
+        assert!(output.contains("Partition 0: PartitionFs"));
+        assert!(output.contains("0/hello.nca (4 bytes)"));
+        assert!(!output.contains("NSTool"));
+    }
+
+    #[test]
+    fn inspection_usage_documents_human_and_json_invocation() {
+        let usage = super::inspection_usage();
+        assert!(usage.contains("nscb inspect <path> [--keys <path>]"));
+        assert!(usage.contains("[--preflight]"));
+        assert!(usage.contains("[--json]"));
     }
 }

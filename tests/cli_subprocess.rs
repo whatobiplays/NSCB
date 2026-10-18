@@ -152,6 +152,35 @@ fn normal_executable_uses_english_human_presentation() {
     );
 }
 
+#[test]
+fn inspect_rejects_missing_or_option_valued_path_arguments() {
+    let cases: &[(&[&str], bool)] = &[
+        (&["inspect", "input.nca", "--keys", "--json"], true),
+        (&["inspect", "input.nca", "--cache-dir", "--json"], true),
+        (&["inspect", "input.nca", "--keys"], false),
+        (&["inspect", "input.nca", "--cache-dir"], false),
+    ];
+
+    for (arguments, json) in cases {
+        let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+            .args(*arguments)
+            .output()
+            .expect("launch normal nscb executable");
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        if *json {
+            assert!(output.stderr.is_empty());
+            let document: Value =
+                serde_json::from_slice(&output.stdout).expect("one usage-error JSON document");
+            assert_eq!(document["kind"], "error");
+            assert_eq!(document["error"]["code"], "usage_error");
+        } else {
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("nscb inspect"));
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn normal_executable_rejects_a_fifo_without_waiting_for_a_writer() {
