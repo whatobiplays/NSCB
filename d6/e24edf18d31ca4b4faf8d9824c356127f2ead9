@@ -1,0 +1,93 @@
+README.md
+  s_09dceb16f1163e::t_19021b4f7031ef 3,21-84
+  s_09dceb16f1163e::t_7dd4c89a07e505 85
+src/inspection.rs
+  s_09dceb16f1163e::t_ce2285103eec13 1-673,675-1330
+  s_09dceb16f1163e::t_ab91ade464f328 674
+src/localization/english.rs
+  s_09dceb16f1163e::t_de6b3aadb82611 3-6,31-46,55-134,335-357,359-434
+  s_09dceb16f1163e::t_d925e9608d8ac1 358
+docs/testing/inspection-qualification.md
+  s_09dceb16f1163e::t_ebde44adcc1ff3 1-203
+docs/architecture/inspection.md
+  s_09dceb16f1163e::t_19021b4f7031ef 1-218
+src/localization/inspection.en.json
+  s_09dceb16f1163e::t_ab91ade464f328 1-57
+src/cli.rs
+  s_09dceb16f1163e::t_5451845a4f1501 129,136,142,976-978,980
+  s_09dceb16f1163e::t_89078df4551d0d 854,856-858
+  s_09dceb16f1163e::t_e517adcb158775 967-971,979
+  s_09dceb16f1163e::t_128f64fc735c6b 2-5,11-12,28-112,114,130,135,137-138,140-141,143-146,155-214,244-250,753-853,859-953,955-957,963-964,981-1037
+  s_09dceb16f1163e::t_4816ae84415f22 127-128
+  s_09dceb16f1163e::t_cc06d66fb9cd19 113,115-126,131-134,139,147-154
+  s_09dceb16f1163e::t_56e422ad278a3c 972
+  s_09dceb16f1163e::t_8f6bb1489fb8be 961-962,965-966,973-975
+  s_09dceb16f1163e::t_4038d209b037f7 855,954,958-960
+  s_09dceb16f1163e::t_8dec56d9e53f7c 1038
+Cargo.toml
+  s_09dceb16f1163e::t_ab91ade464f328 6,16-17,22-23,25-28,34
+src/lib.rs
+  s_09dceb16f1163e::t_ab91ade464f328 1-2,13-14,16,43-48
+  s_f5b75fc174c523::t_ce353202785de6 49
+docs/providers/nstool-v1.9.2.md
+  s_09dceb16f1163e::t_d625353dfd1ddc 35
+  s_09dceb16f1163e::t_ab91ade464f328 1-34,36-175
+Cargo.lock
+  s_09dceb16f1163e::t_f59051356c8ed2 5-42,52-73,80-99,109-123,134-144,155-213,234-384,397-414,421-441,446-447,453-454,456-481,502-569,624-673,685-718,746-785,792-815,838-846,920-1039,1045-1056
+docs/validation.md
+  s_09dceb16f1163e::t_87e5c3ee1ffb16 78-103
+licenses/nstool-v1.9.2-MIT.txt
+  s_09dceb16f1163e::t_27547fa9c88925 1-22
+licenses/nstool-v1.9.2-TRANSITIVE.md
+  s_09dceb16f1163e::t_b4afa0c202a936 1-24
+providers/nstool-v1.9.2.json
+  s_09dceb16f1163e::t_731cde29b11a45 1-63
+src/engine.rs
+  s_09dceb16f1163e::t_fb1600eebc8746 2-5,26,30-62,86-91,163-191
+src/nca.rs
+  s_09dceb16f1163e::t_64ffbfdb974192 1-464
+src/provider/cache.rs
+  s_09dceb16f1163e::t_c175b2af870c2c 1-2264
+src/provider/download.rs
+  s_09dceb16f1163e::t_39b9b63dbd1173 1-294
+src/provider/keys.rs
+  s_09dceb16f1163e::t_47a0e353e0458b 1-447
+src/provider/manifest.rs
+  s_09dceb16f1163e::t_98c1091b589582 1-271
+src/provider/mod.rs
+  s_09dceb16f1163e::t_6bdbafd1bc36c7 1-1007
+src/provider/nstool.rs
+  s_09dceb16f1163e::t_9e5e46e98d5771 1-1057
+src/provider/process.rs
+  s_09dceb16f1163e::t_5364212838beaa 1-942
+src/recognition.rs
+  s_09dceb16f1163e::t_4e0718bc67d12b 654-664,694
+tests/cli_subprocess.rs
+  s_09dceb16f1163e::t_e421788ea619c1 155-183
+tests/inspection_facade.rs
+  s_09dceb16f1163e::t_8164296751718f 1-19
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d6e24edf18d31ca4b4faf8d9824c356127f2ead9",
+  "prompts": {},
+  "sessions": {
+    "s_09dceb16f1163e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14942-201b-7073-a83c-a449fa666480",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_f5b75fc174c523": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a14c05-9763-7f90-9bc7-8b4deb3560fe",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
