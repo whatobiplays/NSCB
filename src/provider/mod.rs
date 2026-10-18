@@ -887,7 +887,7 @@ mod tests {
         let downloads = Cell::new(0);
         let cache_mutations = Cell::new(0);
 
-        assert_eq!(
+        assert!(matches!(
             inspect_with_containment(
                 &request,
                 &host,
@@ -905,7 +905,7 @@ mod tests {
                 },
             ),
             Err(InspectionErrorCode::ProviderUnqualifiedTarget)
-        );
+        ));
         assert_eq!(containment_probes.get(), 0);
         assert_eq!(child_launches.get(), 0);
         assert_eq!(downloads.get(), 0);
