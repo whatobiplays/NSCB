@@ -110,9 +110,6 @@ impl ProcessLimits {
             stdout,
             stderr,
             allow_uncontained_for_test: true,
-            active_readers: None,
-            force_termination_failure: false,
-            force_stderr_reader_start_failure: false,
             ..Self::default()
         }
     }
