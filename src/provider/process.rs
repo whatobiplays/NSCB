@@ -28,8 +28,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const READ_CHUNK: usize = 8 * 1024;
 const READER_JOIN_GRACE: Duration = Duration::from_secs(2);
 const TERMINATE_GRACE: Duration = Duration::from_millis(250);
+#[cfg(target_os = "macos")]
 const DEFAULT_CPU_SECONDS: u64 = 60;
+#[cfg(target_os = "macos")]
 const DEFAULT_OPEN_FILES: u64 = 64;
+#[cfg(target_os = "macos")]
 const DEFAULT_FILE_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[cfg(test)]
@@ -55,8 +58,11 @@ pub(crate) struct ProcessLimits {
     pub(crate) deadline: Duration,
     pub(crate) stdout: usize,
     pub(crate) stderr: usize,
+    #[cfg(target_os = "macos")]
     cpu_seconds: u64,
+    #[cfg(target_os = "macos")]
     open_files: u64,
+    #[cfg(target_os = "macos")]
     file_size_bytes: u64,
     #[cfg(test)]
     allow_uncontained_for_test: bool,
@@ -74,8 +80,11 @@ impl Default for ProcessLimits {
             deadline: DEFAULT_DEADLINE,
             stdout: DEFAULT_STDOUT_LIMIT,
             stderr: DEFAULT_STDERR_LIMIT,
+            #[cfg(target_os = "macos")]
             cpu_seconds: DEFAULT_CPU_SECONDS,
+            #[cfg(target_os = "macos")]
             open_files: DEFAULT_OPEN_FILES,
+            #[cfg(target_os = "macos")]
             file_size_bytes: DEFAULT_FILE_SIZE_BYTES,
             #[cfg(test)]
             allow_uncontained_for_test: false,

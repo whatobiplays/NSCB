@@ -133,11 +133,6 @@ impl TargetArtifact {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn arch(&self) -> &str {
-        &self.arch
-    }
-
     pub(crate) fn download_url(&self) -> &str {
         &self.download_url
     }
@@ -214,7 +209,7 @@ pub(crate) fn all_targets() -> &'static [TargetArtifact] {
 
 #[cfg(test)]
 mod tests {
-    use super::{Qualification, all_targets, manifest, target_artifact};
+    use super::{Qualification, all_targets, manifest};
     #[test]
     fn manifest_pins_the_exact_release_and_targets() {
         let manifest = manifest().expect("manifest validates");
@@ -252,7 +247,10 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn current_native_target_is_qualified() {
-        assert_eq!(target_artifact().expect("native target").arch(), "aarch64");
+        assert_eq!(
+            super::target_artifact().expect("native target").arch,
+            "aarch64"
+        );
     }
 
     #[cfg(not(any(
@@ -264,7 +262,7 @@ mod tests {
     #[test]
     fn unknown_targets_fail_before_execution() {
         assert_eq!(
-            target_artifact().unwrap_err(),
+            super::target_artifact().unwrap_err(),
             InspectionErrorCode::ProviderUnsupportedTarget
         );
     }
