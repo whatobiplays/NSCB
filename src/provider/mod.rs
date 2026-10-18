@@ -484,13 +484,13 @@ fn classify_parse_error(code: InspectionErrorCode) -> ProviderFailure {
 #[cfg(test)]
 mod tests {
     use super::{
-        PreparedInputs, ProviderFailure, WatchedFile, classify_parse_error, execute_in, inspect,
-        inspect_with_containment, nstool, open_regular, preflight, prepare_inputs,
-        prepare_inputs_with, process,
+        PreparedInputs, ProviderFailure, WatchedFile, classify_parse_error, execute_in,
+        inspect_with_containment, nstool, open_regular, prepare_inputs, prepare_inputs_with,
+        process,
     };
     use crate::inspection::{
         CancellationHandle, InspectionErrorCode, InspectionHost, InspectionRequest,
-        MemoryMonitoringPolicy, ProvisioningPolicy, validate_provider_report,
+        MemoryMonitoringPolicy, validate_provider_report,
     };
     use std::fs;
     use std::num::NonZeroU64;
@@ -498,6 +498,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    use super::preflight;
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    use crate::inspection::ProvisioningPolicy;
 
     #[test]
     fn parser_profile_failures_remain_prerequisite_failures() {
@@ -580,7 +585,32 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[test]
+    fn memory_monitoring_policy_and_status_are_available_without_preflight() {
+        let base = tempfile::tempdir().unwrap();
+        let policy = MemoryMonitoringPolicy::RequirePhysicalFootprintThreshold {
+            threshold_bytes: NonZeroU64::new(1024).unwrap(),
+        };
+        let cache_only_path = base.path().join("cache-only");
+        let managed_path = base.path().join("managed");
+        fs::create_dir(&cache_only_path).unwrap();
+        fs::create_dir(&managed_path).unwrap();
+        let cache_only =
+            InspectionHost::cache_only(&cache_only_path).with_memory_monitoring_policy(policy);
+        let managed =
+            InspectionHost::managed_download(&managed_path).with_memory_monitoring_policy(policy);
+        let threshold_bytes = NonZeroU64::new(1024).unwrap();
+
+        for host in [&cache_only, &managed] {
+            assert_eq!(host.memory_monitoring_policy(), policy);
+            assert_eq!(
+                host.memory_monitoring_status(),
+                crate::inspection::MemoryMonitoringStatus::Unavailable { threshold_bytes }
+            );
+        }
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn unavailable_physical_footprint_monitoring_is_advisory_and_inspection_proceeds() {
         let fixture = fake_fixture();
@@ -675,7 +705,25 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_nca_is_typed_unsupported_in_inspection_and_preflight() {
+    fn plaintext_nca_is_rejected_by_target_independent_input_preparation() {
+        let base = tempfile::tempdir().unwrap();
+        let input = base.path().join("plaintext.nca");
+        fs::write(&input, crate::nca::synthetic_plaintext_supported_nca()).unwrap();
+        let key = base.path().join("prod.keys");
+        fs::write(&key, format!("header_key = {}\n", "42".repeat(32))).unwrap();
+        let request = InspectionRequest::nca(&input, &key);
+
+        assert!(matches!(
+            prepare_inputs(&request),
+            Err(ProviderFailure::Prerequisite(
+                InspectionErrorCode::UnsupportedFormat
+            ))
+        ));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn plaintext_nca_is_unsupported_during_qualified_engine_preflight_and_inspection() {
         let base = tempfile::tempdir().unwrap();
         let input = base.path().join("plaintext.nca");
         fs::write(&input, crate::nca::synthetic_plaintext_supported_nca()).unwrap();
@@ -685,16 +733,22 @@ mod tests {
         let host = InspectionHost::cache_only(base.path().join("cache"));
 
         assert_eq!(
-            preflight(&request, &host).unwrap_err(),
+            crate::Engine::new()
+                .preflight_inspection(&request, &host)
+                .unwrap_err()
+                .code(),
             InspectionErrorCode::UnsupportedFormat
         );
         assert_eq!(
-            inspect(&request, &host).unwrap_err(),
+            crate::Engine::new()
+                .inspect(request, &host)
+                .unwrap_err()
+                .code(),
             InspectionErrorCode::UnsupportedFormat
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn preflight_does_not_report_provisioning_ready_without_child_containment() {
         if !matches!(
@@ -747,7 +801,7 @@ mod tests {
         )
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
     #[test]
     fn default_process_limits_run_the_helper_without_an_address_space_cap() {
         let fixture = fake_fixture();
@@ -764,6 +818,7 @@ mod tests {
         assert!(!fixture.work.path().join("PWNED.nca").exists());
     }
 
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn unsupported_containment_stops_cache_only_and_managed_provisioning() {
         let base = tempfile::tempdir().unwrap();
@@ -812,6 +867,50 @@ mod tests {
             assert_eq!(cache_mutations, 0, "{name}");
             assert!(!cache_root.exists(), "{name}");
         }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn unqualified_provider_stops_before_child_download_or_cache_mutation() {
+        use std::cell::Cell;
+
+        let base = tempfile::tempdir().unwrap();
+        let input = base.path().join("input.nca");
+        fs::write(&input, crate::nca::synthetic_supported_nca()).unwrap();
+        let key = base.path().join("prod.keys");
+        fs::write(&key, format!("header_key = {}\n", "42".repeat(32))).unwrap();
+        let cache_root = base.path().join("managed-cache");
+        let host = InspectionHost::managed_download(&cache_root);
+        let request = InspectionRequest::nca(&input, &key);
+        let containment_probes = Cell::new(0);
+        let child_launches = Cell::new(0);
+        let downloads = Cell::new(0);
+        let cache_mutations = Cell::new(0);
+
+        assert_eq!(
+            inspect_with_containment(
+                &request,
+                &host,
+                || {
+                    containment_probes.set(containment_probes.get() + 1);
+                    Ok(())
+                },
+                |_target, _inputs| {
+                    child_launches.set(child_launches.get() + 1);
+                    downloads.set(downloads.get() + 1);
+                    cache_mutations.set(cache_mutations.get() + 1);
+                    Err(ProviderFailure::Provisioning(
+                        InspectionErrorCode::ProvisioningFailed,
+                    ))
+                },
+            ),
+            Err(InspectionErrorCode::ProviderUnqualifiedTarget)
+        );
+        assert_eq!(containment_probes.get(), 0);
+        assert_eq!(child_launches.get(), 0);
+        assert_eq!(downloads.get(), 0);
+        assert_eq!(cache_mutations.get(), 0);
+        assert!(!cache_root.exists());
     }
 
     #[cfg(unix)]
