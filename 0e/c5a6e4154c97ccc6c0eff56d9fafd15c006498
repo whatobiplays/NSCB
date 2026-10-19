@@ -1,0 +1,25 @@
+tests/test_content_policy.py
+  s_e3161e6924e23a::t_4547d4d0ca3908 254-280
+docs/adr/0016-repository-content-policy.md
+  s_e3161e6924e23a::t_c745c786517a19 44
+tests/content_policy_test_support.py
+  s_e3161e6924e23a::t_4547d4d0ca3908 406-413
+docs/validation.md
+  s_e3161e6924e23a::t_c745c786517a19 38
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0ec5a6e4154c97ccc6c0eff56d9fafd15c006498",
+  "prompts": {},
+  "sessions": {
+    "s_e3161e6924e23a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a151ae-b7f1-7751-a67e-1d6e551b9e7f",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
