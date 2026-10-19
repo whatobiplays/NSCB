@@ -1,47 +1,55 @@
 # Development validation
 
-NSCB uses a repository-owned `Makefile` for consistent local and automated validation. GNU/BSD Make, Git, Python 3.11 or newer, and Rust 1.98.1 are required; `rust-toolchain.toml` pins Rust and includes `rustfmt` and `clippy`. Python policy infrastructure uses only the standard library. All Cargo targets use the checked-in `Cargo.lock`.
+NSCB uses a repository-owned `Makefile` as the canonical validation contract for local development, GitHub Actions, and GPT Repo MCP. GNU or BSD Make, Git, Python 3.11 or newer, and the Rust toolchain pinned in `rust-toolchain.toml` are required. All Cargo commands use the checked-in `Cargo.lock`. Python validation uses only the standard library.
 
 | Validation profile | Make target | Commands |
 | --- | --- | --- |
 | `content-policy` | `make content-policy` | `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_content_policy.py` |
+| `test-content-policy` | `make test-content-policy` | `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_content_policy.py'` |
+| `test-content-policy-git` | `make test-content-policy-git` | `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_content_policy_git.py'` |
 | `typecheck` | `make typecheck` | `cargo check --locked --all-targets --all-features` |
 | `lint` | `make lint` | `cargo fmt --all -- --check`, then `cargo clippy --locked --all-targets --all-features -- -D warnings` |
-| `test` | `make test` | Python policy tests (`PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_content_policy.py'`), fake-only lifecycle tests (`PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_git_ai_isolation.py'`), then `cargo test --locked` |
+| `test` | `make test` | The Git-free `test-content-policy` suite, then `cargo test --locked` |
 | `build` | `make build` | `cargo build --locked` |
-| `smoke` | `make smoke` | `cargo test --locked --test cli_subprocess` (real CLI subprocess tests) |
-| `all` | `make all` | All six profiles above, in the order shown |
-| `all-git-ai-paused` | `make all-git-ai-paused` | Sequentially runs `content-policy`, `typecheck`, `lint`, `test-git-ai-paused`, `build`, and `smoke` in `all` order; the pause wrapper replaces only the Python content-policy suite |
+| `smoke` | `make smoke` | `cargo test --locked --test cli_subprocess` |
+| `all` | `make all` | `content-policy`, `typecheck`, `lint`, `test`, `build`, and `smoke`, in that order |
 
-`make` prints the available targets. `make fmt` **modifies source files** and must not be mapped to a validation profile. `make lint` only checks formatting.
+`make` prints every target. `make fmt` modifies Rust source files and is not a validation target. `make clean` runs `cargo clean` and is intentionally outside `make all`.
 
-Python recipes set `PYTHONDONTWRITEBYTECODE=1` and use `PYTHONDONTWRITEBYTECODE=1 python3 -B` so validation does not leave `.pyc` files in the working tree.
+## Content-policy testing split
 
-The content-policy checker independently inspects stage-zero Git index blobs and current working-tree files, including nonignored untracked paths reported by Git. It validates each snapshot against that snapshot's own `tests/fixtures/registry.json`; one registry cannot authorize or conceal content in the other snapshot. Unresolved Git index conflicts stop the check. It does not walk directories to discover ignored untracked paths or untracked FIFOs and other special files that Git omits. A Git-visible path that is a symlink or special file fails safely. The combined scan is limited to 10,000 file versions across the index and worktree (a path present in both counts twice), 16 MiB per file version (1 MiB for the registry), and 256 MiB total bytes. Each Git command is limited to 64 MiB of stdout, 64 KiB of stderr, and 10 seconds. Any Git stderr causes a sanitized failure; raw warnings are never displayed. Diagnostics contain rule codes and bounded relative paths, never matched content.
+Production `make content-policy` inspects the real Git index and working tree. It reads stage-zero index blobs by object ID, enumerates nonignored untracked paths, scans the worktree independently, and rejects unresolved index conflicts. Production Git commands run with bounded stdout, stderr, time, and repository-safe opening rules. They also set `GIT_NO_REPLACE_OBJECTS=1` and `GIT_NO_LAZY_FETCH=1`.
 
-The registry starts empty. When it is first added as an unstaged, nonignored file, an absent index copy is accepted only while the index contains no binary assets; the worktree copy remains required. Add the registry and any binary fixture together to the Git index before treating the indexed snapshot as a valid registered-fixture state. The checker detects common prohibited filenames and key/credential patterns, but pattern scanning cannot establish that arbitrary content is redistributable or identify every secret. Human review of fixture provenance remains required. See [ADR 0016](adr/0016-repository-content-policy.md) for the registry contract and detection limits.
+Routine `make test-content-policy` must remain usable without creating disposable Git repositories. It supplies the checker with a test-only `InMemoryGitFixture` containing an index, immutable blobs, independent worktree, untracked, ignored, and unmerged registries. The fixture supports only the checker's read-only commands:
 
-`make clean` runs `cargo clean` to remove generated Cargo build artifacts. It does not remove source files or `Cargo.lock`, and is deliberately excluded from the `all` validation profile.
+- `rev-parse --show-toplevel`
+- `ls-files --unmerged -z`
+- `ls-files --stage -z`
+- `ls-files --others --exclude-standard -z`
+- `cat-file -s <object-id>`
+- `cat-file blob <object-id>`
 
-`make all-git-ai-paused` is an explicit opt-in for a full validation run that pauses Git AI only while the Python content-policy suite executes. If Git AI is installed and its daemon is running, the wrapper gracefully shuts down that global service and starts it again after the suite. Other repositories, editors, and tools using Git AI are affected during that interval. If the daemon was already stopped or Git AI is unavailable, the wrapper leaves its state unchanged. The ordinary `make all` and `make test` targets and GitHub Actions never stop Git AI automatically.
+The fixture does not model commits, refs, packs, replacement objects, or a general object database. Routine tests also install a guard that rejects Git initialization, staging, commits, index mutation, replacement objects, and physical `.git` creation from both direct and subprocess execution paths. A fake `git` executable exercises the production command-line entry point without initializing a repository.
 
-The wrapper serializes its own invocations, but its lock cannot prevent another application or Git AI's service manager from restarting the daemon. It detects an unexpected restart during the isolated suite and aborts. Avoid running the opt-in target while other users or automation rely on the global service. SIGINT and SIGTERM trigger bounded cleanup and restoration; SIGKILL, a machine crash, or power loss can interrupt restoration. If the wrapper cannot confirm that its test process group has exited, do not restore the daemon; recover only after group termination is confirmed.
+`make test-content-policy-git` is the required genuine-Git integration profile. It creates disposable repositories and verifies initialization, staging, commits, staged and worktree divergence, tracked, untracked, ignored, deleted, and unmerged behavior, object-ID blob reads, and resistance to `git replace`. It also exercises bounded cleanup diagnostics for disposable repository cleanup. This suite is deliberately excluded from `make test` and `make all`.
 
-If the wrapper reports that restoration failed after it stopped a daemon that was initially running, inspect the service from outside a repository and start it if status confirms it is stopped:
+## Repository content policy
 
-```sh
-(cd / && git-ai bg status)
-(cd / && git-ai bg start)
-(cd / && git-ai bg status)
-```
+The checker applies `tests/fixtures/registry.json` independently to the index and current worktree. It reports findings from either snapshot without displaying matched bytes, registry content, raw Git errors, or absolute host paths. The initial registry is empty. An unstaged new registry is accepted in the index only while the index contains no binary fixtures; the worktree registry remains required once present.
 
-The wrapper returns a failure status when restoration fails. Check the reported initial state before manually starting Git AI, since an initially stopped daemon should remain stopped.
+Resource limits apply across both snapshots: 10,000 file versions, 16 MiB per file version, 64 KiB total stderr per command, 64 MiB total stdout, and 10 seconds per command. A path present in both snapshots counts twice. Any Git stderr output fails closed with a sanitized code. Pattern scanning does not establish copyright status, identify every secret, or validate the truth of provenance statements. Human review remains required. See [ADR 0016](adr/0016-repository-content-policy.md) for the fixture registry and prohibited-content rules.
+
+The native Inspection qualification described below is separate from content-policy enforcement. It does not replace `make content-policy` or `make test-content-policy-git`.
+
+## GitHub Actions
+
+The `validate` job runs `make all` on `ubuntu-24.04` for pushes to `main` and pull requests. A separate required job named `content-policy-git` uses the same pinned checkout action, read-only repository permissions, and a bounded timeout to run `make test-content-policy-git`. Neither job uses `continue-on-error`, broad skips, or an allowed-failure mode.
+
+Repository branch protection is external GitHub configuration. If protection uses explicit required-check names, `content-policy-git` must be enrolled there in addition to `validate`; updating this workflow cannot prove that remote setting.
 
 ## GPT Repo MCP integration
 
-GPT Repo MCP's `repo_validate` accepts named validation profiles, not arbitrary shell commands. Its Make runner requires an explicit mapping in the MCP server's **local** `config.local.json` for the approved NSCB repository.
-
-Merge the following fields into that repository entry's existing `operations` object, preserving any other policy settings:
+`repo_validate` accepts named validation profiles rather than arbitrary shell commands. The approved repository entry in GPT Repo MCP's local `config.local.json` must map profiles to these Make targets while preserving its other policy settings:
 
 ```json
 {
@@ -58,23 +66,22 @@ Merge the following fields into that repository entry's existing `operations` ob
 }
 ```
 
-This fragment is the `operations` object, not an entire MCP configuration. Do not copy the server's local config or credentials into NSCB. Validation also requires the server-side repository operation policy to permit validation; defining the Makefile alone does not enable it.
+That fragment belongs inside the repository's `operations` object. Do not copy local server configuration or credentials into NSCB. Validation also requires the server-side operation policy to permit the selected repository and command.
 
-After updating the server configuration, use `repo_validate` with the approved repository ID, `profile: "all"`, and `dry_run: true` to verify that the selected command is `make all`. Run the same profile without `dry_run` to execute the checks. Individual profiles select their matching `make` target.
-
-**Focused-test limitation:** MCP-declared Make profiles do not support `test_paths`. Omit that field entirely (do not send an empty array). For a focused Rust test invocation, run Cargo directly in a trusted local terminal. Registration-time delegation validation metadata is a separate contract and is not rewritten by these targets.
-
-## CI usage
-
-GitHub Actions runs `make all` on `ubuntu-24.04` for pushes to `main` and pull requests. It installs the Rust channel and components declared in `rust-toolchain.toml`; the Makefile remains the single owner of validation commands. The workflow exercises Linux x86_64 only and does not change the broader platform qualification matrix.
+After updating the server configuration, use `repo_list_roots` to confirm the intended repository ID and exact worktree root. Run `repo_validate` with a dry run first to verify the selected command, then run the approved profile without the dry run. MCP validation profiles do not accept focused test paths; run focused Rust tests directly in a trusted terminal when needed.
 
 ## Recognition validation
 
-Run `cargo test --locked recognition::tests`, the `public_facade` and
-`cli_subprocess` integration targets, then ordinary `make all`. Recognition
-fixtures are deterministic generated source data; no proprietary binaries or
-cryptographic material are required. The global Git AI pause target requires
-separate authorization and is not part of recognition validation.
+Run these focused checks before the full repository gate when changing recognition:
+
+```sh
+cargo test --locked --all-features recognition::tests
+cargo test --locked --all-features --test public_facade
+cargo test --locked --all-features --test cli_subprocess
+make all
+```
+
+Recognition fixtures are deterministic generated source data. No proprietary binaries or cryptographic material are required.
 
 ## Inspection validation
 
@@ -93,11 +100,4 @@ cargo test --locked --all-features cli::inspection_cli_tests
 cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
-The provider cache tests create temporary directories and files; they do not
-modify the repository or a host cache. The fake-provider tests are compiled
-only under `#[cfg(test)]` and exercise direct argv, environment, output bounds,
-signal/nonzero exit, reader cleanup, cancellation, timeout, process reaping,
-known/escaped descendants, input/key mutation, and independent postcondition
-rejection without network access. The native macOS arm64 NSTool run and its
-qualification limits are recorded in
-[Inspection qualification evidence](testing/inspection-qualification.md).
+Provider cache tests create temporary directories and files without changing the repository or host cache. Fake-provider tests are compiled only under `#[cfg(test)]` and cover argv, environment, output bounds, signals, nonzero exits, reader cleanup, cancellation, timeouts, process reaping, descendant processes, input and key mutation, and postcondition rejection without network access. Native NSTool qualification remains limited to macOS arm64 and is recorded in [Inspection qualification evidence](testing/inspection-qualification.md).

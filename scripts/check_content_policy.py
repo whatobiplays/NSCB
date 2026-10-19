@@ -22,7 +22,7 @@ import stat
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, Protocol
 
 
 REGISTRY_PATH = "tests/fixtures/registry.json"
@@ -175,10 +175,116 @@ class ScanBudget:
         self.bytes_read += size
 
 
+class GitCommandRunner(Protocol):
+    """Narrow read-only Git command boundary used by content inspection."""
+
+    def __call__(
+        self,
+        root: Path,
+        arguments: list[str],
+        *,
+        max_output_bytes: int,
+        timeout_seconds: float,
+        nonzero_exit_code: str,
+    ) -> bytes:
+        """Return bounded stdout for one Git query or raise a safe checker failure."""
+        ...
+
+
+def _run_git_command(
+    root: Path,
+    arguments: list[str],
+    *,
+    max_output_bytes: int = MAX_GIT_OUTPUT_BYTES,
+    timeout_seconds: float = MAX_GIT_COMMAND_SECONDS,
+    nonzero_exit_code: str = "GIT_COMMAND_FAILED",
+) -> bytes:
+    """Run one Git query with bounded output, timeout, and safe diagnostics."""
+    if max_output_bytes < 0:
+        raise CheckerFailure("GIT_OUTPUT_LIMIT")
+    if timeout_seconds <= 0:
+        raise CheckerFailure("GIT_COMMAND_TIMEOUT")
+    try:
+        environment = os.environ.copy()
+        environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+        environment["GIT_NO_LAZY_FETCH"] = "1"
+        process = subprocess.Popen(
+            ["git", "-C", str(root), *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            env=environment,
+        )
+    except (OSError, ValueError) as error:
+        raise CheckerFailure("GIT_COMMAND_FAILED") from error
+
+    assert process.stdout is not None and process.stderr is not None
+    output = {"stdout": bytearray(), "stderr": bytearray()}
+    limits = {
+        "stdout": max_output_bytes,
+        "stderr": MAX_GIT_STDERR_BYTES,
+    }
+    selector = selectors.DefaultSelector()
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                raise CheckerFailure("GIT_COMMAND_TIMEOUT")
+            events = selector.select(remaining_time)
+            if not events:
+                raise CheckerFailure("GIT_COMMAND_TIMEOUT")
+            for key, _ in events:
+                stream_name = key.data
+                remaining_output = limits[stream_name] + 1 - len(output[stream_name])
+                chunk = os.read(
+                    key.fileobj.fileno(), min(64 * 1024, remaining_output)
+                )
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                output[stream_name].extend(chunk)
+                if len(output[stream_name]) > limits[stream_name]:
+                    raise CheckerFailure("GIT_OUTPUT_LIMIT")
+        remaining_time = deadline - time.monotonic()
+        if remaining_time <= 0:
+            raise CheckerFailure("GIT_COMMAND_TIMEOUT")
+        try:
+            return_code = process.wait(timeout=remaining_time)
+        except subprocess.TimeoutExpired as error:
+            raise CheckerFailure("GIT_COMMAND_TIMEOUT") from error
+    except CheckerFailure:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        raise
+    except (OSError, ValueError) as error:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        raise CheckerFailure("GIT_COMMAND_FAILED") from error
+    finally:
+        selector.close()
+        process.stdout.close()
+        process.stderr.close()
+
+    if return_code != 0:
+        raise CheckerFailure(nonzero_exit_code)
+    if output["stderr"]:
+        raise CheckerFailure("GIT_COMMAND_WARNING")
+    return bytes(output["stdout"])
+
+
 class ContentPolicyChecker:
     """Inspect repository files and fixture registries in both Git snapshots."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self, root: Path, *, runner: GitCommandRunner = _run_git_command
+    ) -> None:
+        self._runner = runner
         self.requested_root = root
         self.root = self._resolve_repository_root(root)
         self.budget = ScanBudget()
@@ -244,83 +350,14 @@ class ContentPolicyChecker:
         timeout_seconds: float = MAX_GIT_COMMAND_SECONDS,
         nonzero_exit_code: str = "GIT_COMMAND_FAILED",
     ) -> bytes:
-        """Run Git with bounded, timed output and map diagnostics to safe codes."""
-        if max_output_bytes < 0:
-            raise CheckerFailure("GIT_OUTPUT_LIMIT")
-        if timeout_seconds <= 0:
-            raise CheckerFailure("GIT_COMMAND_TIMEOUT")
-        try:
-            environment = os.environ.copy()
-            environment["GIT_NO_REPLACE_OBJECTS"] = "1"
-            environment["GIT_NO_LAZY_FETCH"] = "1"
-            process = subprocess.Popen(
-                ["git", "-C", str(root), *arguments],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-                env=environment,
-            )
-        except (OSError, ValueError) as error:
-            raise CheckerFailure("GIT_COMMAND_FAILED") from error
-
-        assert process.stdout is not None and process.stderr is not None
-        output = {"stdout": bytearray(), "stderr": bytearray()}
-        limits = {
-            "stdout": max_output_bytes,
-            "stderr": MAX_GIT_STDERR_BYTES,
-        }
-        selector = selectors.DefaultSelector()
-        deadline = time.monotonic() + timeout_seconds
-        try:
-            selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-            selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-            while selector.get_map():
-                remaining_time = deadline - time.monotonic()
-                if remaining_time <= 0:
-                    raise CheckerFailure("GIT_COMMAND_TIMEOUT")
-                events = selector.select(remaining_time)
-                if not events:
-                    raise CheckerFailure("GIT_COMMAND_TIMEOUT")
-                for key, _ in events:
-                    stream_name = key.data
-                    remaining_output = limits[stream_name] + 1 - len(output[stream_name])
-                    chunk = os.read(
-                        key.fileobj.fileno(), min(64 * 1024, remaining_output)
-                    )
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    output[stream_name].extend(chunk)
-                    if len(output[stream_name]) > limits[stream_name]:
-                        raise CheckerFailure("GIT_OUTPUT_LIMIT")
-            remaining_time = deadline - time.monotonic()
-            if remaining_time <= 0:
-                raise CheckerFailure("GIT_COMMAND_TIMEOUT")
-            try:
-                return_code = process.wait(timeout=remaining_time)
-            except subprocess.TimeoutExpired as error:
-                raise CheckerFailure("GIT_COMMAND_TIMEOUT") from error
-        except CheckerFailure:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-            raise
-        except (OSError, ValueError) as error:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            raise CheckerFailure("GIT_COMMAND_FAILED") from error
-        finally:
-            selector.close()
-            process.stdout.close()
-            process.stderr.close()
-
-        if return_code != 0:
-            raise CheckerFailure(nonzero_exit_code)
-        if output["stderr"]:
-            raise CheckerFailure("GIT_COMMAND_WARNING")
-        return bytes(output["stdout"])
+        """Run one Git query through the configured read-only command runner."""
+        return self._runner(
+            root,
+            arguments,
+            max_output_bytes=max_output_bytes,
+            timeout_seconds=timeout_seconds,
+            nonzero_exit_code=nonzero_exit_code,
+        )
 
     def _reject_unmerged_index(self) -> None:
         """Stop before reading content if the index contains conflict stages."""
