@@ -251,6 +251,33 @@ class GitGuardTests(unittest.TestCase):
             finally:
                 guard.stop()
 
+    def test_guard_rejects_popen_executable_override_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "git-like"
+            executable.write_text("#!/bin/sh\nmkdir -p .git\n", encoding="utf-8")
+            executable.chmod(0o755)
+            guard = RoutineGitGuard([root])
+            guard.start()
+            try:
+                with self.assertRaises(ProhibitedGitOperation):
+                    subprocess.run(
+                        ["init"],
+                        executable=str(executable),
+                        cwd=root,
+                        check=False,
+                    )
+                with self.assertRaises(ProhibitedGitOperation):
+                    subprocess.Popen(
+                        ["init"],
+                        -1,
+                        "/definitely-not-an-executable",
+                        cwd=root,
+                    )
+                self.assertFalse((root / ".git").exists())
+            finally:
+                guard.stop()
+
 
 class ContentPolicyTests(ContentPolicyTestCase):
     """Exercise checker behavior through the in-memory index and real worktree."""

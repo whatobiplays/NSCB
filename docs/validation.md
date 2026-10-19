@@ -35,7 +35,7 @@ The fixture does not model commits, refs, packs, replacement objects, or a gener
 
 ## Repository content policy
 
-The checker applies `tests/fixtures/registry.json` independently to the index and current worktree. It reports findings from either snapshot without displaying matched bytes, registry content, raw Git errors, or absolute host paths. The initial registry is empty. An unstaged new registry is accepted in the index only while the index contains no binary fixtures; the worktree registry remains required once present.
+The checker applies `tests/fixtures/registry.json` independently to the index and current worktree. It reports findings from either snapshot without displaying matched bytes, registry content, raw Git errors, or absolute host paths. The initial registry is empty. An unstaged new registry is accepted in the index only while the index contains no binary fixtures; the worktree registry remains required.
 
 Resource limits apply across both snapshots: 10,000 file versions, 16 MiB per file version, 64 KiB total stderr per command, 64 MiB total stdout, and 10 seconds per command. A path present in both snapshots counts twice. Any Git stderr output fails closed with a sanitized code. Pattern scanning does not establish copyright status, identify every secret, or validate the truth of provenance statements. Human review remains required. See [ADR 0016](adr/0016-repository-content-policy.md) for the fixture registry and prohibited-content rules.
 

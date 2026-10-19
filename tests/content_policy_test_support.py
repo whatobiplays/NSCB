@@ -403,6 +403,14 @@ class RoutineGitGuard:
         setattr(owner, name, replacement)
 
     def _guard_popen(self, command: object, *args: object, **kwargs: object) -> object:
+        executable = kwargs.get("executable")
+        if executable is None and len(args) > 1:
+            executable = args[1]
+        if executable is not None:
+            # An executable override changes the program without changing argv.
+            raise ProhibitedGitOperation(
+                "routine tests may not override the subprocess executable"
+            )
         self.assert_command_allowed(command, shell=bool(kwargs.get("shell", False)))
         original = self._original("Popen")
         return original(command, *args, **kwargs)
