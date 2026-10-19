@@ -113,13 +113,11 @@ The repository-owned `Makefile` is the canonical entrypoint for local validation
 make all
 ```
 
-Individual profiles are also available through `make content-policy`, `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting, and `make clean` removes Cargo-generated build artifacts. Validation targets never modify source files.
+Individual profiles are also available through `make content-policy`, `make test-content-policy`, `make test-content-policy-git`, `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting, and `make clean` removes Cargo-generated build artifacts. Validation targets never modify source files.
 
-Use `make all-git-ai-paused` when a full validation run should temporarily stop the global Git AI background service while the Python content-policy suite runs. This affects Git AI users across repositories for the duration of that suite. Normal `make all`, `make test`, and GitHub Actions do not pause Git AI. See [development validation](docs/validation.md) for restoration limits, concurrency risks, and recovery steps.
+Routine `make test` and `make all` use a standard-library in-memory index fixture, so they do not initialize disposable repositories or depend on Git daemon lifecycle state. Production `make content-policy` still inspects the real Git index and working tree. Genuine Git behavior has a separate `make test-content-policy-git` suite, which is intentionally excluded from routine validation and runs as the required `content-policy-git` GitHub Actions job.
 
-That opt-in executes the profiles in `make all` order even with `-j`; only the Python content-policy suite uses the pause wrapper.
-
-GitHub Actions runs `make all` on `ubuntu-24.04` for pushes to `main` and pull requests. See [development validation](docs/validation.md) for the exact commands, the MCP profile-to-target mapping, and the server-side configuration required to enable MCP validation. See [the repository content policy](docs/adr/0016-repository-content-policy.md) for fixture provenance and prohibited-content rules.
+GitHub Actions runs `make all` plus the separate Git integration job on `ubuntu-24.04` for pushes to `main` and pull requests. If branch protection uses explicit required-check names, `content-policy-git` must be enrolled there as well. See [development validation](docs/validation.md) for exact commands, the MCP profile-to-target mapping, and server-side configuration. See [the repository content policy](docs/adr/0016-repository-content-policy.md) for fixture provenance and prohibited-content rules.
 
 ## Content recognition
 

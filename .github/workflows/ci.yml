@@ -9,6 +9,20 @@ permissions:
   contents: read
 
 jobs:
+  content-policy-git:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Run genuine Git content-policy integration tests
+        run: make test-content-policy-git
+
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
