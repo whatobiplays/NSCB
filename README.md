@@ -83,6 +83,38 @@ See [Inspection architecture](docs/architecture/inspection.md), [NSTool v1.9.2
 provider qualification](docs/providers/nstool-v1.9.2.md), and [Inspection
 qualification evidence](docs/testing/inspection-qualification.md).
 
+## Content verification
+
+The read-only `Engine::verify` operation returns typed per-check evidence for a
+standalone encrypted NCA3 Program with a clear PartitionFs profile. The
+default `Full` profile executes the structural checks, the filesystem-header
+hash, the fixed-key RSA-PSS signature, NPDM metadata validation, and the
+NPDM-key consistency check. The explicit `Structural` profile runs only the
+structural checks and never claims signature, hash, or authenticity success.
+
+```text
+nscb verify <path> [--profile full|structural] [--keys <path>]
+            [--trust-anchor <path> --anchor-generation <n>] [--json]
+```
+
+`Full` requires a caller-supplied RSA-2048 public key with exponent 65537 in
+PKCS#1 or SubjectPublicKeyInfo encoding, in PEM or DER. The anchor generation
+must equal the NCA header signature generation. A mismatch is a prerequisite
+failure: the signature check remains `not_run` with
+`trust_anchor_generation_mismatch`, and the command exits 3.
+
+A passing result does not prove payload integrity when the partition hash type
+is `None`, does not authenticate the NPDM or ACID chain, does not establish
+Nintendo content authenticity, and does not authorize a device write. Each
+result includes the limitations applicable to its profile and checks.
+
+Exit classes are 0 for a passed result, 2 for usage errors, 3 for a failed
+verification or prerequisite error, 4 for a conflict or input mutation, 6 for
+cancellation, and 7 for internal failures. Exit 8 remains reserved for
+independent batch `CompletedWithIssues` reporting and is never emitted by
+`verify`. See [Verification architecture](docs/architecture/verification.md)
+and [Verification qualification evidence](docs/testing/verification-qualification.md).
+
 ## Input resolution
 
 Use the read-only resolver to preserve ordered explicit paths, discover supported directory candidates, or load a versioned JSON input list:

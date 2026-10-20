@@ -101,3 +101,29 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 Provider cache tests create temporary directories and files without changing the repository or host cache. Fake-provider tests are compiled only under `#[cfg(test)]` and cover argv, environment, output bounds, signals, nonzero exits, reader cleanup, cancellation, timeouts, process reaping, descendant processes, input and key mutation, and postcondition rejection without network access. Native NSTool qualification remains limited to macOS arm64 and is recorded in [Inspection qualification evidence](testing/inspection-qualification.md).
+
+## Verification validation
+
+Verification uses the same repository validation entry point:
+
+```sh
+make all
+```
+
+Focused checks can be run directly:
+
+```sh
+cargo test --locked --all-features verification::tests
+cargo test --locked --all-features --test verification
+cargo test --locked --all-features --test verification_cli
+cargo clippy --locked --all-targets --all-features -- -D warnings
+```
+
+The Engine tests generate synthetic NCA3, PFS0, and NPDM data at runtime.
+RSA key pairs used for signing are ephemeral and test-only; no private key is
+stored in the repository. The public CAVP verification vector is test data
+only. The tests do not require network access, a provider executable, Nintendo
+keys, or proprietary content.
+
+Focused evidence and the limits of the synthetic profile are recorded in
+[Verification qualification evidence](testing/verification-qualification.md).

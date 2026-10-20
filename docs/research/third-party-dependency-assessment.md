@@ -60,3 +60,35 @@ Exact MTP transport mechanics, capacity reporting, installed title inventory, ga
 2. Ticket **#5** must turn the shortlist into an explicit provider **selection/qualification matrix and exact pinned manifest**; its scope includes proving who owns package creation and patch semantics, rather than presuming hactool/NSZ/hacPack collectively provide them.
 3. Tickets **#29–31** should each prove their platform-native MTP adapter with a real DBI session, not simply compile a library. Ticket **#45** is the final all-target gate.
 4. Treat all candidates in this document as provisional until an accepted provider-specific test matrix and license review have been recorded.
+
+## Rust cryptographic dependency
+
+| Capability | Candidate | First-party evidence | License / decision status |
+| --- | --- | --- | --- |
+| RSA-PSS signature verification | `rsa` 0.9.10 (RustCrypto) | https://github.com/RustCrypto/RSA, https://rustsec.org/advisories/RUSTSEC-2023-0071 | MIT/Apache-2.0. Selected for bounded public-key verification. |
+
+`rsa` 0.9.10 is affected by RUSTSEC-2023-0071 / CVE-2023-49092, the Marvin
+timing side channel in RSA private-key operations. Production Verification
+uses only public-key verification: it parses a caller-supplied public key and
+checks RSA-PSS/SHA-256 signatures. It does not perform RSA decryption or
+private-key signing.
+
+Synthetic fixture generation uses private-key signing only inside test code,
+with ephemeral keys generated at runtime. Those keys are not production
+credentials, are never loaded by the CLI, and are not used to process
+untrusted ciphertexts. Test execution time is not a production trust
+decision. The advisory becomes material if production code ever performs
+private-key operations, accepts attacker-chosen ciphertexts for decryption,
+or exposes a remote timing oracle.
+
+Rechecked on 2026-10-19 against the current RustSec advisory and crates.io
+release list. The advisory still lists no patched versions and continues to
+name `rsa` 0.9.10 and 0.10.0-rc.18 as affected. The latest published release
+is 0.10.0-rc.19, a release candidate with no advisory clearance. The
+repository therefore retains the pinned 0.9.10 public-key verification use
+and introduces no production private-key operation.
+
+The repository retains an RSA-PSS/SHA-256 known-answer test from a NIST CAVP
+verification vector and a synthetic positive/negative signature suite.
+Upgrade or replace `rsa` when a fixed release is available and passes the
+same evidence.

@@ -12,6 +12,7 @@ mod file_identity;
 mod input_resolution;
 mod inspection;
 mod nca;
+mod partition_fs;
 mod pfs0;
 mod provider;
 mod recognition;
@@ -21,6 +22,12 @@ mod split_reader;
 mod split_resolution;
 mod split_trust;
 mod strict_json;
+mod verification;
+
+#[cfg(test)]
+#[path = "../tests/support/synthetic_verification.rs"]
+#[allow(dead_code)]
+mod test_synthetic_verification;
 
 pub use recognition::{
     CompressionVariant, ContentRecognitionError, ContentRecognitionErrorCode,
@@ -51,4 +58,11 @@ pub use sha256::{InvalidSha256Digest, SHA256_HEX_LENGTH, Sha256Digest};
 pub use split_trust::{
     LocalSplitTrustStore, SplitTrustReceipt, SplitTrustRestore, SplitTrustStore,
     SplitTrustStoreError, SplitTrustWriter,
+};
+
+pub use verification::{
+    CheckApplicability, CheckExecution, CheckOutcome, PublicKeyEncoding, TrustProvenance,
+    TrustProvenanceKind, VerificationCheck, VerificationCheckId, VerificationError,
+    VerificationErrorCode, VerificationLimitation, VerificationOutcome, VerificationProfile,
+    VerificationReason, VerificationRequest, VerificationResult,
 };

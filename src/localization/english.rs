@@ -2,7 +2,8 @@
 
 use nscb::{
     ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult, InspectionErrorCode,
-    NcaContentType, NcaDistribution, NcaInspection,
+    NcaContentType, NcaDistribution, NcaInspection, VerificationErrorCode, VerificationLimitation,
+    VerificationProfile, VerificationResult,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -57,6 +58,31 @@ fn inspection_messages() -> &'static InspectionMessages {
     MESSAGES.get_or_init(|| {
         serde_json::from_str(include_str!("inspection.en.json"))
             .expect("bundled English Inspection localization resource must be valid")
+    })
+}
+
+#[derive(Deserialize)]
+struct VerificationMessages {
+    usage: String,
+    passed: String,
+    failed: String,
+    limitations: String,
+    profile_full: String,
+    profile_structural: String,
+    signatures_not_checked: String,
+    hash_checks_not_run: String,
+    payload_integrity_not_available: String,
+    npdm_acid_authenticity_unverified: String,
+    authenticity_not_established: String,
+    device_write_authorization_not_evaluated: String,
+    errors: HashMap<String, String>,
+}
+
+fn verification_messages() -> &'static VerificationMessages {
+    static MESSAGES: OnceLock<VerificationMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("verification.en.json"))
+            .expect("bundled English Verification localization resource must be valid")
     })
 }
 
@@ -226,6 +252,94 @@ pub(crate) fn input_resolution_usage() -> &'static str {
 
 pub(crate) fn recognition_usage() -> &'static str {
     &messages().recognition_usage
+}
+
+/// Returns the Verification command syntax.
+pub(crate) fn verification_usage() -> &'static str {
+    &verification_messages().usage
+}
+
+/// Returns the localized message for one Verification failure category.
+pub(crate) fn verification_error(code: VerificationErrorCode) -> &'static str {
+    verification_messages()
+        .errors
+        .get(code.as_str())
+        .expect("every Verification error code must have an English CLI message")
+}
+
+/// Formats one completed Verification for human readers.
+///
+/// The limitations line is always present so a passing Full result cannot be
+/// read as proof of payload integrity, authenticity, or device-write
+/// authorization.
+pub(crate) fn verification_result(result: &VerificationResult) -> String {
+    let messages = verification_messages();
+    let profile = match result.profile {
+        VerificationProfile::Full => &messages.profile_full,
+        VerificationProfile::Structural => &messages.profile_structural,
+        _ => &messages.profile_full,
+    };
+    let required = result
+        .checks
+        .iter()
+        .filter(|check| check.outcome == nscb::CheckOutcome::Passed)
+        .count();
+    let not_applicable = result
+        .checks
+        .iter()
+        .filter(|check| check.outcome == nscb::CheckOutcome::NotApplicable)
+        .count();
+    let failures = result
+        .checks
+        .iter()
+        .filter(|check| check.outcome == nscb::CheckOutcome::Failed)
+        .map(|check| match check.partition {
+            Some(partition) => format!("{} (partition {partition})", check.id.as_str()),
+            None => check.id.as_str().to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let message = if failures.is_empty() {
+        messages
+            .passed
+            .replace("{profile}", profile)
+            .replace("{required}", &required.to_string())
+            .replace("{not_applicable}", &not_applicable.to_string())
+    } else {
+        messages
+            .failed
+            .replace("{profile}", profile)
+            .replace("{failures}", &failures)
+    };
+    let limitations = result
+        .limitations
+        .iter()
+        .map(|limitation| {
+            let text = match limitation {
+                VerificationLimitation::SignaturesNotChecked => &messages.signatures_not_checked,
+                VerificationLimitation::HashChecksNotRun => &messages.hash_checks_not_run,
+                VerificationLimitation::PayloadIntegrityNotAvailable => {
+                    &messages.payload_integrity_not_available
+                }
+                VerificationLimitation::NpdmAcidAuthenticityUnverified => {
+                    &messages.npdm_acid_authenticity_unverified
+                }
+                VerificationLimitation::AuthenticityNotEstablished => {
+                    &messages.authenticity_not_established
+                }
+                VerificationLimitation::DeviceWriteAuthorizationNotEvaluated => {
+                    &messages.device_write_authorization_not_evaluated
+                }
+                _ => &messages.authenticity_not_established,
+            };
+            text.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "{message}\n{}",
+        messages.limitations.replace("{limitations}", &limitations)
+    )
 }
 
 #[cfg(test)]
@@ -431,5 +545,66 @@ mod tests {
         assert!(usage.contains("nscb inspect <path> [--keys <path>]"));
         assert!(usage.contains("[--preflight]"));
         assert!(usage.contains("[--json]"));
+    }
+
+    #[test]
+    fn resource_contains_a_message_for_every_verification_error_code() {
+        use nscb::VerificationErrorCode as VerificationCode;
+        let codes = [
+            VerificationCode::InvalidKeyPath,
+            VerificationCode::InputUnavailable,
+            VerificationCode::UnsupportedFormat,
+            VerificationCode::TruncatedInput,
+            VerificationCode::MalformedInput,
+            VerificationCode::InputLimitExceeded,
+            VerificationCode::KeyFileUnavailable,
+            VerificationCode::KeyFileMalformed,
+            VerificationCode::KeyFileLimitExceeded,
+            VerificationCode::MissingHeaderKey,
+            VerificationCode::MissingTrustAnchor,
+            VerificationCode::MissingAnchorGeneration,
+            VerificationCode::TrustAnchorUnavailable,
+            VerificationCode::TrustAnchorMalformed,
+            VerificationCode::TrustAnchorLimitExceeded,
+            VerificationCode::AnchorNotApplicable,
+            VerificationCode::InputChangedDuringVerification,
+            VerificationCode::KeyFileChangedDuringVerification,
+            VerificationCode::TrustAnchorChangedDuringVerification,
+            VerificationCode::Cancelled,
+            VerificationCode::AllocationFailed,
+            VerificationCode::InternalIo,
+            VerificationCode::SignalHandlerFailed,
+        ];
+        for code in codes {
+            assert!(
+                !super::verification_error(code).is_empty(),
+                "missing message {code:?}"
+            );
+        }
+        let usage = super::verification_usage();
+        assert!(usage.contains("nscb verify <input>"));
+        assert!(usage.contains("[--profile full|structural]"));
+        assert!(usage.contains("[--trust-anchor <path> --anchor-generation <n>]"));
+    }
+
+    #[test]
+    fn verification_human_output_states_every_required_limitation() {
+        let result = nscb::VerificationResult {
+            profile: nscb::VerificationProfile::Full,
+            outcome: nscb::VerificationOutcome::Passed,
+            checks: Vec::new(),
+            limitations: vec![
+                nscb::VerificationLimitation::PayloadIntegrityNotAvailable,
+                nscb::VerificationLimitation::NpdmAcidAuthenticityUnverified,
+                nscb::VerificationLimitation::AuthenticityNotEstablished,
+                nscb::VerificationLimitation::DeviceWriteAuthorizationNotEvaluated,
+            ],
+        };
+        let output = super::verification_result(&result);
+        assert!(output.contains("Verification (full) passed"));
+        assert!(output.contains("partition payload integrity is not available"));
+        assert!(output.contains("the NPDM and ACID are not authenticated"));
+        assert!(output.contains("content authenticity is not established"));
+        assert!(output.contains("device-write authorization was not evaluated"));
     }
 }

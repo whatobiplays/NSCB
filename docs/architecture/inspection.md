@@ -131,6 +131,15 @@ The provider contract follows [ADR-0029](../adr/0029-qualified-native-helper-exe
 
 ## Shared NCA validation
 
+Partition descriptor byte `0x8` begins an eight-byte field that hactool
+documents as padding and Switchbrew documents as reserved. libpietendo names
+the first byte `enabled` and the remaining seven bytes `reserved`, and
+hacPack-family writers have been observed to write `1`. The shared parser
+therefore accepts `0` or `1` in byte `0x8`, requires bytes `0x9` through
+`0xF` to be zero, and treats the field as padding rather than a block count.
+Descriptor span relationships are validated separately, so an invalid layout
+is reported distinctly from an unsupported descriptor byte.
+
 The common NCA3 header and four partition-descriptor checks live in the
 internal `nca` module. Content Recognition uses the same
 `parse_header_block` function before applying its byte-only recognition

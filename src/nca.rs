@@ -1,4 +1,5 @@
-//! Internal parser for the NCA3 header facts used by Inspection.
+//! Internal parser for the NCA3 header facts used by Inspection, Recognition,
+//! and Verification.
 //!
 //! The parser accepts only encrypted NCA headers with the caller-supplied XTS
 //! header key. It deliberately returns only header facts;
@@ -81,6 +82,19 @@ pub(crate) fn read_header(
     file_size: u64,
     header_key: &[u8; 32],
 ) -> Result<Header, HeaderError> {
+    let block = read_header_block(file, file_size, header_key)?;
+    parse_header_block(&block, file_size)
+}
+
+/// Reads and decrypts one NCA3 header block without interpreting its fields.
+///
+/// Verification needs the decrypted bytes for filesystem-header hashes and for
+/// both signatures, while Inspection only needs the parsed header.
+pub(crate) fn read_header_block(
+    file: &mut File,
+    file_size: u64,
+    header_key: &[u8; 32],
+) -> Result<[u8; HEADER_SIZE], HeaderError> {
     if file_size < HEADER_SIZE as u64 {
         return Err(HeaderError::TruncatedInput);
     }
@@ -96,7 +110,7 @@ pub(crate) fn read_header(
     if &block[0x200..0x204] != b"NCA3" {
         return Err(HeaderError::UnsupportedFormat);
     }
-    parse_header_block(&block, file_size)
+    Ok(block)
 }
 
 fn decrypt_header(block: &mut [u8; HEADER_SIZE], key: &[u8; 32]) {
@@ -111,16 +125,67 @@ fn nintendo_tweak(index: u128) -> [u8; 16] {
     index.to_be_bytes()
 }
 
-/// Validates the common NCA3 header and partition descriptors from a complete
-/// header block whose declared size is measured relative to that block.
+/// Header fields that can be validated without relating one partition to
+/// another.
 ///
-/// Recognition uses this same structural validation before applying its own
-/// read-only profile checks. Filesystem-layer layout checks that depend on a
-/// particular support profile remain with the operation that supports it.
-pub(crate) fn parse_header_block(
+/// Splitting header syntax from partition layout lets a caller report which
+/// independent check rejected an input. Most callers want
+/// [`parse_header_block`], which performs both stages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HeaderSyntax {
+    pub(crate) format_version: u8,
+    pub(crate) distribution: Distribution,
+    pub(crate) content_type: ContentType,
+    pub(crate) key_generation: u8,
+    pub(crate) signature_generation: u8,
+    pub(crate) kaek_index: u8,
+    pub(crate) declared_size: u64,
+    pub(crate) program_id: u64,
+    pub(crate) content_index: u32,
+    spans: Vec<PartitionSpan>,
+}
+
+impl HeaderSyntax {
+    /// Returns the descriptor indices of partitions that declare a byte range,
+    /// in descriptor order.
+    pub(crate) fn present_partition_indices(&self) -> Vec<u8> {
+        self.spans
+            .iter()
+            .filter(|span| !span.absent)
+            .map(|span| span.index)
+            .collect()
+    }
+}
+
+/// One partition descriptor and filesystem header still expressed as the
+/// declared page-aligned start and end positions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PartitionSpan {
+    index: u8,
+    offset: u64,
+    end: u64,
+    filesystem: u8,
+    hash_type: u8,
+    encryption: u8,
+    extended: bool,
+    absent: bool,
+}
+
+/// Validates the common NCA3 header fields and each partition descriptor in
+/// isolation from a complete header block whose declared size is measured
+/// relative to that block.
+///
+/// Partition ordering, overlap, file bounds, and trailing absent descriptors
+/// are relationship checks performed by [`complete_header`].
+///
+/// Descriptor bytes `0x8..0x10` are documented as reserved by hactool and
+/// Switchbrew. libpietendo instead names byte `0x8` an `enabled` flag, and
+/// hacPack writes `1` there, so both `0` and `1` are accepted while the
+/// remaining reserved bytes must be zero.
+pub(crate) fn parse_header_syntax(
     block: &[u8; HEADER_SIZE],
     file_size: u64,
-) -> Result<Header, HeaderError> {
+) -> Result<HeaderSyntax, HeaderError> {
     let distribution = match block[0x204] {
         0 => Distribution::Download,
         1 => Distribution::GameCard,
@@ -145,9 +210,7 @@ pub(crate) fn parse_header_block(
         return Err(HeaderError::MalformedInput);
     }
 
-    let mut previous_end = HEADER_SIZE as u64;
-    let mut absent = false;
-    let mut partitions = Vec::new();
+    let mut spans = Vec::new();
     for index in 0..MAX_PARTITIONS {
         let descriptor = &block[0x240 + index * 16..0x250 + index * 16];
         let offset = u32le(&descriptor[..4])
@@ -158,20 +221,23 @@ pub(crate) fn parse_header_block(
             .ok_or(HeaderError::MalformedInput)?;
         let fs = &block[0x400 + index * 0x200..0x600 + index * 0x200];
         if offset == 0 && end == 0 {
-            absent = true;
             if descriptor.iter().any(|byte| *byte != 0) || fs.iter().any(|byte| *byte != 0) {
                 return Err(HeaderError::MalformedInput);
             }
+            spans.push(PartitionSpan {
+                index: index as u8,
+                offset: 0,
+                end: 0,
+                filesystem: 0,
+                hash_type: 0,
+                encryption: 0,
+                extended: false,
+                absent: true,
+            });
             continue;
         }
-        if absent || offset < previous_end || end <= offset || end > file_size {
-            return Err(HeaderError::MalformedInput);
-        }
-        let size = end - offset;
-        if u32le(&descriptor[8..12])
-            .checked_mul(PAGE_SIZE)
-            .is_none_or(|target| target > size)
-            || descriptor[12..].iter().any(|byte| *byte != 0)
+        if descriptor[8] > 1
+            || descriptor[9..].iter().any(|byte| *byte != 0)
             || fs[..2] != [2, 0]
             || fs[2] > 1
             || !(1..=6).contains(&fs[3])
@@ -181,21 +247,18 @@ pub(crate) fn parse_header_block(
         {
             return Err(HeaderError::MalformedInput);
         }
-        previous_end = end;
-        partitions.push(Partition {
+        spans.push(PartitionSpan {
             index: index as u8,
             offset,
-            size,
+            end,
             filesystem: fs[2],
             hash_type: fs[3],
             encryption: fs[4],
             extended: fs[5] != 0,
+            absent: false,
         });
     }
-    if partitions.is_empty() {
-        return Err(HeaderError::MalformedInput);
-    }
-    Ok(Header {
+    Ok(HeaderSyntax {
         format_version: 3,
         distribution,
         content_type,
@@ -205,8 +268,63 @@ pub(crate) fn parse_header_block(
         declared_size,
         program_id: u64le(&block[0x210..0x218]),
         content_index: u32le(&block[0x218..0x21c]) as u32,
+        spans,
+    })
+}
+
+/// Validates the relationships between the partitions described by a parsed
+/// header and returns the validated header.
+pub(crate) fn complete_header(syntax: HeaderSyntax, file_size: u64) -> Result<Header, HeaderError> {
+    let mut previous_end = HEADER_SIZE as u64;
+    let mut absent = false;
+    let mut partitions = Vec::new();
+    for span in &syntax.spans {
+        if span.absent {
+            absent = true;
+            continue;
+        }
+        if absent || span.offset < previous_end || span.end <= span.offset || span.end > file_size {
+            return Err(HeaderError::MalformedInput);
+        }
+        previous_end = span.end;
+        partitions.push(Partition {
+            index: span.index,
+            offset: span.offset,
+            size: span.end - span.offset,
+            filesystem: span.filesystem,
+            hash_type: span.hash_type,
+            encryption: span.encryption,
+            extended: span.extended,
+        });
+    }
+    if partitions.is_empty() {
+        return Err(HeaderError::MalformedInput);
+    }
+    Ok(Header {
+        format_version: syntax.format_version,
+        distribution: syntax.distribution,
+        content_type: syntax.content_type,
+        key_generation: syntax.key_generation,
+        signature_generation: syntax.signature_generation,
+        kaek_index: syntax.kaek_index,
+        declared_size: syntax.declared_size,
+        program_id: syntax.program_id,
+        content_index: syntax.content_index,
         partitions,
     })
+}
+
+/// Validates the common NCA3 header and partition descriptors from a complete
+/// header block whose declared size is measured relative to that block.
+///
+/// Recognition uses this same structural validation before applying its own
+/// read-only profile checks. Filesystem-layer layout checks that depend on a
+/// particular support profile remain with the operation that supports it.
+pub(crate) fn parse_header_block(
+    block: &[u8; HEADER_SIZE],
+    file_size: u64,
+) -> Result<Header, HeaderError> {
+    complete_header(parse_header_syntax(block, file_size)?, file_size)
 }
 
 fn u32le(bytes: &[u8]) -> u64 {
@@ -334,8 +452,10 @@ mod tests {
                     .unwrap()
                     .to_le_bytes(),
             );
-            block[descriptor + 8..descriptor + 12]
-                .copy_from_slice(&u32::try_from(size / 0x200).unwrap().to_le_bytes());
+            // hacPack writes 1 in the descriptor byte that hactool and
+            // Switchbrew call reserved. The shared parser accepts 0 or 1 and
+            // requires the remaining reserved bytes to stay zero.
+            block[descriptor + 8] = 1;
             let fs = 0x400 + index * 0x200;
             block[fs..fs + 2].copy_from_slice(&[2, 0]);
             block[fs + 2] = filesystem;
@@ -375,6 +495,52 @@ mod tests {
         assert_eq!(parsed.kaek_index, 0);
         assert_eq!(parsed.partitions.len(), 4);
         assert_eq!(parsed.partitions[3].offset, 0x1200);
+    }
+
+    #[test]
+    fn accepts_both_documented_descriptor_reserved_byte_conventions() {
+        // hactool and Switchbrew document descriptor bytes 0x8..0x10 as
+        // reserved padding, while libpietendo names byte 0x8 an enabled flag
+        // and hacPack writes 1 there. Neither convention may be rejected.
+        for enabled in [0_u8, 1] {
+            let mut block = fixture(&[(0xc00, 0x200, 1, 1, 1, false)], 0xe00);
+            block[0x248] = enabled;
+            let parsed = super::parse_header_block(&block, 0xe00).unwrap();
+            assert_eq!(parsed.partitions.len(), 1);
+        }
+    }
+
+    #[test]
+    fn rejects_descriptor_bytes_outside_the_supported_reserved_convention() {
+        let mut block = fixture(&[(0xc00, 0x200, 1, 1, 1, false)], 0xe00);
+        block[0x248] = 2;
+        assert_eq!(
+            super::parse_header_block(&block, 0xe00),
+            Err(HeaderError::MalformedInput)
+        );
+
+        for offset in 0x249..0x250 {
+            let mut block = fixture(&[(0xc00, 0x200, 1, 1, 1, false)], 0xe00);
+            block[offset] = 1;
+            assert_eq!(
+                super::parse_header_block(&block, 0xe00),
+                Err(HeaderError::MalformedInput)
+            );
+        }
+    }
+
+    #[test]
+    fn partition_layout_is_validated_separately_from_header_syntax() {
+        let partitions = [
+            (0xe00, 0x200, 1, 1, 1, false),
+            (0xc00, 0x200, 1, 1, 1, false),
+        ];
+        let block = fixture(&partitions, 0x1000);
+        let syntax = super::parse_header_syntax(&block, 0x1000).unwrap();
+        assert_eq!(
+            super::complete_header(syntax, 0x1000),
+            Err(HeaderError::MalformedInput)
+        );
     }
 
     #[test]
