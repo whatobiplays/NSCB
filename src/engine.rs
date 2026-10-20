@@ -60,6 +60,20 @@ impl Engine {
         crate::inspection::inspect(&request, host).map_err(InspectionError::new)
     }
 
+    /// Runs one native, read-only Verification of a supported standalone NCA3
+    /// file.
+    ///
+    /// Verification never launches a provider and never modifies the content,
+    /// key source, or trust anchor. The returned evidence distinguishes checks
+    /// that completed from checks that did not apply to the selected profile or
+    /// could not run.
+    pub fn verify(
+        &self,
+        request: crate::VerificationRequest,
+    ) -> Result<crate::VerificationResult, crate::VerificationError> {
+        crate::verification::verify(request)
+    }
+
     /// Recognizes byte-supported structure without keys, execution authority, or content identity.
     pub fn recognize_content(
         &self,

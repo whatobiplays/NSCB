@@ -5,8 +5,8 @@
 //! only facts that NSCB has normalized and independently validated. It does
 //! not establish authenticity, integrity, Verification success, or the
 //! correctness of decrypted content.
+use crate::partition_fs::{PartitionFsValidation, PartitionFsValidationError};
 use serde::{Serialize, Serializer};
-use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
@@ -710,10 +710,6 @@ impl fmt::Display for InspectionError {
 impl std::error::Error for InspectionError {}
 
 const MAX_PARTITIONS: usize = 4;
-const MAX_TOTAL_ENTRIES: usize = 65_536;
-const MAX_TOTAL_NAME_BYTES: usize = 16 * 1024 * 1024;
-const MAX_TOTAL_PATH_BYTES: usize = 16 * 1024 * 1024;
-const MAX_PATH_SEGMENTS: usize = 62;
 const MIN_PARTITION_OFFSET: u64 = 0xc00;
 const PARTITION_ALIGNMENT: u64 = 0x200;
 
@@ -738,55 +734,20 @@ pub(crate) fn validate_provider_report(
     validate_nca_profile(header)?;
     corroborate_header(facts, header)?;
 
-    let mut total_entries = 0_usize;
-    let mut total_name_bytes = 0_usize;
-    let mut expected_directories = HashSet::new();
-    let mut expected_files = HashSet::new();
-    let mut total_path_bytes = 0_usize;
+    let mut validation = PartitionFsValidation::default();
     let mut partitions = Vec::new();
     for partition in &header.partitions {
-        let partition_directory = partition.index.to_string();
-        charge_expected_path(&mut total_path_bytes, partition_directory.len())?;
-        expected_directories
-            .try_reserve(1)
-            .map_err(|_| InspectionErrorCode::AllocationFailed)?;
-        expected_directories.insert(partition_directory);
-
-        let mut entries = BTreeMap::new();
-        {
-            let mut span = SpanReader::new(report.input.file(), partition.offset, partition.size);
-            let probe = crate::pfs0::probe(&mut span, partition.size).map_err(map_pfs_error)?;
-            for entry in probe.entries {
-                let normalized = normalize_entry_name(&entry.name)?;
-                total_entries = total_entries
-                    .checked_add(1)
-                    .ok_or(InspectionErrorCode::InputLimitExceeded)?;
-                if total_entries > MAX_TOTAL_ENTRIES {
-                    return Err(InspectionErrorCode::InputLimitExceeded);
-                }
-                total_name_bytes = total_name_bytes
-                    .checked_add(normalized.len())
-                    .ok_or(InspectionErrorCode::InputLimitExceeded)?;
-                if total_name_bytes > MAX_TOTAL_NAME_BYTES {
-                    return Err(InspectionErrorCode::InputLimitExceeded);
-                }
-                let mut entry_path = String::new();
-                entry_path
-                    .try_reserve_exact(normalized.len())
-                    .map_err(|_| InspectionErrorCode::AllocationFailed)?;
-                entry_path.push_str(&normalized);
-                if entries.insert(entry_path, entry.size).is_some() {
-                    return Err(InspectionErrorCode::MalformedInput);
-                }
-                add_expected_path(
-                    partition.index,
-                    &normalized,
-                    &mut expected_directories,
-                    &mut expected_files,
-                    &mut total_path_bytes,
-                )?;
-            }
-        }
+        let mut span = SpanReader::new(report.input.file(), partition.offset, partition.size);
+        let probe = crate::pfs0::probe(&mut span, partition.size).map_err(map_pfs_error)?;
+        let entries = validation
+            .validate_partition(
+                partition.index,
+                probe
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.name.as_str(), entry.size)),
+            )
+            .map_err(map_partition_fs_error)?;
         partitions.push(NcaPartition {
             index: partition.index,
             offset: partition.offset,
@@ -800,10 +761,12 @@ pub(crate) fn validate_provider_report(
                 .collect(),
         });
     }
-    if total_entries == 0 {
+    if validation.total_entries() == 0 {
         return Err(InspectionErrorCode::ProviderContentUnreadable);
     }
-    if facts.tree_directories != expected_directories || facts.tree_files != expected_files {
+    if validation.expected_directories() != &facts.tree_directories
+        || validation.expected_files() != &facts.tree_files
+    {
         return Err(InspectionErrorCode::ProviderPostconditionMismatch);
     }
     if !report.input.unchanged() {
@@ -887,77 +850,6 @@ fn corroborate_header(
     Ok(())
 }
 
-fn add_expected_path(
-    partition: u8,
-    path: &str,
-    directories: &mut HashSet<String>,
-    files: &mut HashSet<String>,
-    total_path_bytes: &mut usize,
-) -> Result<(), InspectionErrorCode> {
-    let mut current = partition.to_string();
-    current
-        .try_reserve_exact(path.len().saturating_add(1))
-        .map_err(|_| InspectionErrorCode::AllocationFailed)?;
-    let mut segments = path.split('/').peekable();
-    let mut segment_count = 0_usize;
-    while let Some(segment) = segments.next() {
-        segment_count = segment_count
-            .checked_add(1)
-            .ok_or(InspectionErrorCode::InputLimitExceeded)?;
-        if segment_count > MAX_PATH_SEGMENTS {
-            return Err(InspectionErrorCode::InputLimitExceeded);
-        }
-        current.push('/');
-        current.push_str(segment);
-        if segments.peek().is_some() && !directories.contains(&current) {
-            charge_expected_path(total_path_bytes, current.len())?;
-            directories
-                .try_reserve(1)
-                .map_err(|_| InspectionErrorCode::AllocationFailed)?;
-            let mut directory = String::new();
-            directory
-                .try_reserve_exact(current.len())
-                .map_err(|_| InspectionErrorCode::AllocationFailed)?;
-            directory.push_str(&current);
-            directories.insert(directory);
-        }
-    }
-    charge_expected_path(total_path_bytes, current.len())?;
-    files
-        .try_reserve(1)
-        .map_err(|_| InspectionErrorCode::AllocationFailed)?;
-    files.insert(current);
-    Ok(())
-}
-
-fn charge_expected_path(total: &mut usize, amount: usize) -> Result<(), InspectionErrorCode> {
-    *total = total
-        .checked_add(amount)
-        .ok_or(InspectionErrorCode::InputLimitExceeded)?;
-    if *total > MAX_TOTAL_PATH_BYTES {
-        return Err(InspectionErrorCode::InputLimitExceeded);
-    }
-    Ok(())
-}
-
-fn normalize_entry_name(name: &str) -> Result<String, InspectionErrorCode> {
-    if name.is_empty()
-        || name.starts_with('/')
-        || name.ends_with('/')
-        || name.contains("//")
-        || name.contains('\\')
-        || name.chars().any(char::is_control)
-    {
-        return Err(InspectionErrorCode::UnsupportedInspectionProfile);
-    }
-    for segment in name.split('/') {
-        if segment.is_empty() || segment == "." || segment == ".." || segment.trim() != segment {
-            return Err(InspectionErrorCode::UnsupportedInspectionProfile);
-        }
-    }
-    Ok(name.to_owned())
-}
-
 fn map_pfs_error(error: crate::ContainerProbeError) -> InspectionErrorCode {
     use crate::ContainerProbeErrorCode as Code;
     match error.code() {
@@ -972,7 +864,23 @@ fn map_pfs_error(error: crate::ContainerProbeError) -> InspectionErrorCode {
     }
 }
 
-struct SpanReader<'a> {
+fn map_partition_fs_error(error: PartitionFsValidationError) -> InspectionErrorCode {
+    match error {
+        PartitionFsValidationError::UnsupportedProfile => {
+            InspectionErrorCode::UnsupportedInspectionProfile
+        }
+        PartitionFsValidationError::MalformedInput => InspectionErrorCode::MalformedInput,
+        PartitionFsValidationError::InputLimitExceeded => InspectionErrorCode::InputLimitExceeded,
+        PartitionFsValidationError::AllocationFailed => InspectionErrorCode::AllocationFailed,
+    }
+}
+
+/// A bounded read and seek view over one byte span of an open file.
+///
+/// Inspection and Verification both use this reader so a nested container can
+/// be parsed with offsets relative to its own partition and no read can escape
+/// the declared span.
+pub(crate) struct SpanReader<'a> {
     file: &'a mut std::fs::File,
     start: u64,
     length: u64,
@@ -980,7 +888,7 @@ struct SpanReader<'a> {
 }
 
 impl<'a> SpanReader<'a> {
-    fn new(file: &'a mut std::fs::File, start: u64, length: u64) -> Self {
+    pub(crate) fn new(file: &'a mut std::fs::File, start: u64, length: u64) -> Self {
         Self {
             file,
             start,
@@ -1102,60 +1010,6 @@ mod tests {
         InspectionErrorCode::InternalIo,
         InspectionErrorCode::SignalHandlerFailed,
     ];
-
-    #[test]
-    fn deeply_segmented_pfs0_entry_is_rejected_before_tree_expansion() {
-        let path = std::iter::repeat_n("x", super::MAX_PATH_SEGMENTS + 1)
-            .collect::<Vec<_>>()
-            .join("/");
-        let mut directories = std::collections::HashSet::new();
-        let mut files = std::collections::HashSet::new();
-        let mut total_path_bytes = 0;
-
-        assert!(matches!(
-            super::add_expected_path(
-                0,
-                &path,
-                &mut directories,
-                &mut files,
-                &mut total_path_bytes
-            ),
-            Err(InspectionErrorCode::InputLimitExceeded)
-        ));
-    }
-
-    #[test]
-    fn generated_pfs0_prefixes_obey_the_cumulative_path_byte_limit() {
-        let mut directories = std::collections::HashSet::new();
-        let mut files = std::collections::HashSet::new();
-        let mut total_path_bytes = 0;
-        let mut raw_name_bytes = 0;
-        let mut result = Ok(());
-
-        for index in 0..60_000 {
-            let path = format!(
-                "directory-{index:05}-{}/file-{index:05}-{}",
-                "d".repeat(100),
-                "f".repeat(100)
-            );
-            raw_name_bytes += path.len();
-            result = super::add_expected_path(
-                0,
-                &path,
-                &mut directories,
-                &mut files,
-                &mut total_path_bytes,
-            );
-            if result.is_err() {
-                break;
-            }
-        }
-        assert!(raw_name_bytes < super::MAX_TOTAL_NAME_BYTES);
-        assert!(matches!(
-            result,
-            Err(InspectionErrorCode::InputLimitExceeded)
-        ));
-    }
 
     #[test]
     fn every_code_has_a_unique_wire_name_and_consistent_class() {

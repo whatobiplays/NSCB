@@ -6,7 +6,7 @@
 //! of those values.
 mod cache;
 mod download;
-mod keys;
+pub(crate) mod keys;
 mod manifest;
 mod nstool;
 mod process;

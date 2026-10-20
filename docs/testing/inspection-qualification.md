@@ -201,3 +201,97 @@ cargo build --locked
 Native production qualification requires a supported macOS arm64 host where
 the child resource limits can be enforced. A standalone NSTool run is not a
 substitute for this qualification.
+
+## Issue #8 shared-parser regression rerun
+
+The shared NCA parser changed partition descriptor handling for Issue #8.
+The native macOS arm64 Inspection qualification was rerun from the Issue #8
+worktree on 2026-10-18 with the same repository-owned synthetic fixture and
+pinned NSTool v1.9.2 artifact. The worktree base commit was
+`f82391a72e4a751c444fab8b2cbc845c06a812d6` with the uncommitted Issue #8
+changes applied; the host used Rust 1.99.0.
+
+Engine preflight on a fresh cache returned `provider_cache_missing` without
+creating the cache. Managed preflight returned `ProvisioningRequired`.
+Managed inspection downloaded and installed the pinned artifact, whose cached
+executable remained 5,946,680 bytes with SHA-256
+`381343160daea53ae70205885bb111518643571c971aef3c695dc1a63aa2343e`.
+The normalized result matched the earlier qualification: NCA3, game-card
+distribution, Program content, key generation 8, signature generation 5,
+program ID `0102030405060708`, and one 512-byte PartitionFs partition
+containing `hello.nca` (4 bytes).
+
+Cache-only preflight returned `Ready`, and the CLI preflight JSON, preflight
+human, inspection JSON, and inspection human modes each exited 0 with the
+expected facts. The synthetic input SHA-256
+`9b6670151efff00f4e54b24872de57914d48cc8d389b7dfc7e277dc29fad7538`
+and key-file SHA-256
+`8b5ac5df58721de3fb4bff9a4cf32e8bc1cbda1780f545f4c723f51ce26f8895`
+were unchanged before and after the run.
+
+Evidence is stored outside the repository at
+`/private/tmp/nscb-issue8-native-inspection-qualification/`. This rerun
+qualifies only the existing synthetic `nca.inspect` flow on the tested host.
+It does not qualify Verification, other content families, memory containment,
+or other targets.
+
+### Post-PR #59 forward-port rerun
+
+The native macOS arm64 Inspection regression was repeated on 2026-10-19 from
+the clean post-PR #59 forward-port worktree at baseline
+`29a4259d507d327d0029a24cb799f10a0b23d272` with the uncommitted Issue #8
+changes applied. The host ran macOS 27.0.1 arm64 with Rust 1.99.1.
+
+A fresh cache returned `provider_cache_missing` for cache-only preflight and
+`ProvisioningRequired` for managed preflight; neither preflight created the
+cache. Managed Inspection downloaded and installed the pinned NSTool v1.9.2
+artifact. The cached executable was 5,946,680 bytes with SHA-256
+`381343160daea53ae70205885bb111518643571c971aef3c695dc1a63aa2343e`.
+
+Managed and cache-only Engine Inspection both returned NCA3, game-card
+distribution, Program content, key generation 8, signature generation 5,
+program ID `0102030405060708`, and one 512-byte PartitionFs partition
+containing `hello.nca` (4 bytes). Cache-only preflight after provisioning
+returned `Ready`. CLI preflight JSON, preflight human, Inspection JSON, and
+Inspection human modes each exited 0 with no stderr.
+
+The synthetic input SHA-256
+`9b6670151efff00f4e54b24872de57914d48cc8d389b7dfc7e277dc29fad7538`
+and key-file SHA-256
+`8b5ac5df58721de3fb4bff9a4cf32e8bc1cbda1780f545f4c723f51ce26f8895`
+were unchanged before and after the run. Evidence is stored outside the
+repository at
+`/Users/daniel/.codex/qualification-evidence/issue-8-post-pr59/03-validation/native/`.
+
+This rerun qualifies only the existing synthetic `nca.inspect` flow on the
+tested host. It does not qualify Verification, other content families, memory
+containment, or other targets.
+
+### Corrective requalification
+
+The same native macOS arm64 Inspection regression was repeated on 2026-10-19
+against the corrective candidate. The host ran macOS 27.0.1 arm64 with Rust
+1.99.1. A fresh cache returned `provider_cache_missing` for cache-only
+preflight and `ProvisioningRequired` for managed preflight without creating
+the cache. Managed Inspection installed the pinned NSTool v1.9.2 artifact;
+the cached executable was 5,946,680 bytes with SHA-256
+`381343160daea53ae70205885bb111518643571c971aef3c695dc1a63aa2343e`.
+
+Managed and cache-only Engine Inspection both returned NCA3, game-card
+distribution, Program content, key generation 8, signature generation 5,
+program ID `0102030405060708`, and one 512-byte PartitionFs partition
+containing `hello.nca` (4 bytes). Cache-only preflight after provisioning
+returned `Ready`. CLI preflight JSON, preflight human, Inspection JSON, and
+Inspection human modes each exited 0 with no stderr.
+
+The synthetic input SHA-256
+`9b6670151efff00f4e54b24872de57914d48cc8d389b7dfc7e277dc29fad7538`
+and key-file SHA-256
+`8b5ac5df58721de3fb4bff9a4cf32e8bc1cbda1780f545f4c723f51ce26f8895`
+were unchanged before and after the run. Evidence is stored outside the
+repository at
+`/Users/daniel/.codex/qualification-evidence/issue-8-post-pr59-corrective-1/03-validation/native/`.
+
+This rerun qualifies only the existing synthetic `nca.inspect` flow on the
+tested host. It does not qualify Verification, other content families, memory
+containment, or other targets.

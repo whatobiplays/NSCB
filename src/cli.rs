@@ -2,7 +2,8 @@ use nscb::{
     CancellationHandle, ContainerProbeError, ContainerProbeErrorCode, Engine,
     InputResolutionCapabilities, InputResolutionRequest, InputSelectionSource, InspectionErrorCode,
     InspectionHost, InspectionPreflightStatus, InspectionRequest, InspectionResult,
-    LocalSplitTrustStore, SplitQualificationKind,
+    LocalSplitTrustStore, SplitQualificationKind, VerificationErrorCode, VerificationProfile,
+    VerificationRequest,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -284,6 +285,27 @@ mod inspection_cli_tests {
             "The content input could not be read.\n"
         );
     }
+
+    #[test]
+    fn verification_error_renderer_preserves_conflict_cancelled_and_internal_exits() {
+        for (code, expected) in [
+            (
+                nscb::VerificationErrorCode::InputChangedDuringVerification,
+                4,
+            ),
+            (nscb::VerificationErrorCode::Cancelled, 6),
+            (nscb::VerificationErrorCode::InternalIo, 7),
+        ] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            assert_eq!(
+                super::emit_verification_error(&mut stdout, &mut stderr, code, true),
+                expected
+            );
+            assert!(!stdout.is_empty());
+            assert!(stderr.is_empty());
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -327,6 +349,13 @@ pub(crate) fn run(
         .is_some_and(|argument| argument == OsStr::new("resolve"))
     {
         return run_input_resolution(args, engine, stdout, stderr);
+    }
+
+    if args
+        .first()
+        .is_some_and(|argument| argument == OsStr::new("verify"))
+    {
+        return run_verification(args, engine, stdout, stderr);
     }
 
     let json_requested = args.iter().any(|argument| argument == OsStr::new("--json"));
@@ -1068,6 +1097,250 @@ fn emit_inspection_error(
         stderr,
         "{}",
         crate::localization::english::inspection_error(code)
+    )
+    .is_ok()
+    {
+        exit
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+struct VerificationInvocation {
+    input: PathBuf,
+    key_file: Option<PathBuf>,
+    profile: VerificationProfile,
+    trust_anchor: Option<PathBuf>,
+    anchor_generation: Option<u8>,
+    json: bool,
+}
+
+fn parse_verification(args: &[OsString]) -> Result<VerificationInvocation, ()> {
+    if args.first().is_none_or(|arg| arg != OsStr::new("verify")) {
+        return Err(());
+    }
+    let mut input = None;
+    let mut key_file = None;
+    let mut profile = VerificationProfile::Full;
+    let mut profile_set = false;
+    let mut trust_anchor = None;
+    let mut anchor_generation = None;
+    let mut json = false;
+    let mut iter = args.iter().skip(1);
+    while let Some(argument) = iter.next() {
+        if argument == OsStr::new("--json") {
+            if json {
+                return Err(());
+            }
+            json = true;
+        } else if argument == OsStr::new("--profile") {
+            if profile_set {
+                return Err(());
+            }
+            let value = iter.next().ok_or(())?;
+            profile = match value.to_str() {
+                Some("full") => VerificationProfile::Full,
+                Some("structural") => VerificationProfile::Structural,
+                _ => return Err(()),
+            };
+            profile_set = true;
+        } else if argument == OsStr::new("--keys") {
+            if key_file.is_some() {
+                return Err(());
+            }
+            let value = iter.next().ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            key_file = Some(PathBuf::from(value));
+        } else if argument == OsStr::new("--trust-anchor") {
+            if trust_anchor.is_some() {
+                return Err(());
+            }
+            let value = iter.next().ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            trust_anchor = Some(PathBuf::from(value));
+        } else if argument == OsStr::new("--anchor-generation") {
+            if anchor_generation.is_some() {
+                return Err(());
+            }
+            let value = iter.next().ok_or(())?;
+            anchor_generation = Some(value.to_str().ok_or(())?.parse::<u8>().map_err(|_| ())?);
+        } else if argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else if input.is_none() {
+            input = Some(PathBuf::from(argument));
+        } else {
+            return Err(());
+        }
+    }
+    Ok(VerificationInvocation {
+        input: input.ok_or(())?,
+        key_file,
+        profile,
+        trust_anchor,
+        anchor_generation,
+        json,
+    })
+}
+
+fn run_verification(
+    args: &[OsString],
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let json_requested = args.iter().any(|argument| argument == OsStr::new("--json"));
+    let invocation = match parse_verification(args) {
+        Ok(invocation) => invocation,
+        Err(()) => {
+            if json_requested {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            return if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::verification_usage()
+            )
+            .is_ok()
+            {
+                EXIT_USAGE
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    if invocation.profile == VerificationProfile::Structural
+        && (invocation.trust_anchor.is_some() || invocation.anchor_generation.is_some())
+    {
+        if invocation.json {
+            return emit_error(stdout, "usage_error", EXIT_USAGE);
+        }
+        return if writeln!(
+            stderr,
+            "{}",
+            crate::localization::english::verification_usage()
+        )
+        .is_ok()
+        {
+            EXIT_USAGE
+        } else {
+            EXIT_INTERNAL
+        };
+    }
+    let key_file =
+        match resolve_inspection_key_file(invocation.key_file, None, inspection_home_directory()) {
+            Ok(path) => path,
+            Err(_) => {
+                return emit_verification_error(
+                    stdout,
+                    stderr,
+                    VerificationErrorCode::InvalidKeyPath,
+                    invocation.json,
+                );
+            }
+        };
+    let cancellation = match inspection_cancellation() {
+        Ok(handle) => handle,
+        Err(_) => {
+            return emit_verification_error(
+                stdout,
+                stderr,
+                VerificationErrorCode::SignalHandlerFailed,
+                invocation.json,
+            );
+        }
+    };
+    let request = match invocation.profile {
+        VerificationProfile::Full => {
+            let Some(trust_anchor) = invocation.trust_anchor else {
+                return emit_verification_error(
+                    stdout,
+                    stderr,
+                    VerificationErrorCode::MissingTrustAnchor,
+                    invocation.json,
+                );
+            };
+            let Some(anchor_generation) = invocation.anchor_generation else {
+                return emit_verification_error(
+                    stdout,
+                    stderr,
+                    VerificationErrorCode::MissingAnchorGeneration,
+                    invocation.json,
+                );
+            };
+            VerificationRequest::full_nca(
+                invocation.input,
+                key_file,
+                trust_anchor,
+                anchor_generation,
+            )
+        }
+        _ => VerificationRequest::structural_nca(invocation.input, key_file),
+    }
+    .with_cancellation(cancellation);
+    match engine.verify(request) {
+        Ok(result) if invocation.json => {
+            let exit = verification_exit(&result);
+            if write_json(
+                &SuccessDocument {
+                    schema_version: 1,
+                    kind: "verification.result",
+                    nscb_version: env!("CARGO_PKG_VERSION"),
+                    result: &result,
+                },
+                stdout,
+            ) {
+                exit
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Ok(result) => {
+            let exit = verification_exit(&result);
+            if writeln!(
+                stdout,
+                "{}",
+                crate::localization::english::verification_result(&result)
+            )
+            .is_ok()
+            {
+                exit
+            } else {
+                report_output_failure(stderr)
+            }
+        }
+        Err(error) => emit_verification_error(stdout, stderr, error.code(), invocation.json),
+    }
+}
+
+fn verification_exit(result: &nscb::VerificationResult) -> i32 {
+    match result.outcome {
+        nscb::VerificationOutcome::Passed => EXIT_SUCCESS,
+        nscb::VerificationOutcome::Failed => EXIT_INPUT,
+        _ => EXIT_INPUT,
+    }
+}
+
+fn emit_verification_error(
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    code: VerificationErrorCode,
+    json: bool,
+) -> i32 {
+    let exit = code.exit_code();
+    if json {
+        return emit_error(stdout, code.as_str(), exit);
+    }
+    if writeln!(
+        stderr,
+        "{}",
+        crate::localization::english::verification_error(code)
     )
     .is_ok()
     {
