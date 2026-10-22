@@ -1,10 +1,13 @@
-//! Runtime-neutral Rust facade for bounded, read-only Probe, Recognition,
-//! input-resolution, and qualified Inspection operations.
+//! Runtime-neutral Rust facade for bounded Probe, Recognition,
+//! input-resolution, qualified Inspection, and safe copy-through operations.
 //!
 //! Container Probe validates outer PFS0 framing without reading payloads.
 //! Recognition examines bounded structural metadata and reports positive families,
 //! uncertainty, and package/card structural eligibility without execution authority.
 //! Neither operation establishes title identity, authenticity, or Verification.
+//! Copy-through plans are immutable in-memory capabilities and publish only
+//! independently validated bytes through the host filesystem's atomic rename
+//! or link operations.
 
 mod engine;
 mod error;
@@ -12,6 +15,7 @@ mod file_identity;
 mod input_resolution;
 mod inspection;
 mod nca;
+mod operation;
 mod partition_fs;
 mod pfs0;
 mod provider;
@@ -39,6 +43,13 @@ pub use engine::{
     ContainerFormat, ContainerProbeEntry, ContainerProbeRequest, ContainerProbeResult, Engine,
 };
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
+pub use operation::{
+    ConflictPolicy, CopyThroughRequest, DestinationBaseline, JobState, OperationArtifact,
+    OperationArtifactRole, OperationError, OperationFailure, OperationFailureCode,
+    OperationMilestone, OperationOutcome, OperationPlan, OperationPlanSnapshot, OperationResult,
+    OperationSession, OperationSessionPhase, OperationSessionSnapshot, OperationSessionStatus,
+    PlannedArtifact, PlannedEffect, PlannedSource, StagingStrategy,
+};
 
 pub use input_resolution::{
     DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputProvenance, InputResolutionCapabilities,
