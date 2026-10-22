@@ -16,6 +16,14 @@ NSCB uses a repository-owned `Makefile` as the canonical validation contract for
 
 `make` prints every target. `make fmt` modifies Rust source files and is not a validation target. `make clean` runs `cargo clean` and is intentionally outside `make all`.
 
+Issue #9 copy-through tests run only on macOS. A successful `make all` on
+another operating system verifies the repository's portable tests and the
+fail-closed platform guard; it does not qualify copy-through publication
+there. Replace also requires the destination volume to report Darwin's
+`VOL_CAP_INT_RENAME_SWAP` capability and the actual atomic exchange call to
+succeed. The test results do not establish network-filesystem behavior or
+crash durability.
+
 ## Content-policy testing split
 
 Production `make content-policy` inspects the real Git index and working tree. It reads stage-zero index blobs by object ID, enumerates nonignored untracked paths, scans the worktree independently, and rejects unresolved index conflicts. Production Git commands run with bounded stdout, stderr, time, and repository-safe opening rules. They also set `GIT_NO_REPLACE_OBJECTS=1` and `GIT_NO_LAZY_FETCH=1`.
@@ -69,6 +77,11 @@ Repository branch protection is external GitHub configuration. If protection use
 That fragment belongs inside the repository's `operations` object. Do not copy local server configuration or credentials into NSCB. Validation also requires the server-side operation policy to permit the selected repository and command.
 
 After updating the server configuration, use `repo_list_roots` to confirm the intended repository ID and exact worktree root. Run `repo_validate` with a dry run first to verify the selected command, then run the approved profile without the dry run. MCP validation profiles do not accept focused test paths; run focused Rust tests directly in a trusted terminal when needed.
+
+The repository qualification uses `rustup run 1.98.1` for Cargo commands.
+`make all` otherwise uses the active Cargo toolchain. GPT Repo MCP `all`
+executes under the MCP server's effective Rust toolchain, so its validation ID
+and Rust version are separate evidence from the Rust 1.98.1 run.
 
 ## Recognition validation
 
@@ -127,3 +140,74 @@ keys, or proprietary content.
 
 Focused evidence and the limits of the synthetic profile are recorded in
 [Verification qualification evidence](testing/verification-qualification.md).
+
+## Copy-through publication validation
+
+Final-hash and pre-syscall checkpoints assert that the shared session remains
+`Executing` and accepts cancellation through final source and destination
+validation. The atomic-syscall checkpoint asserts `Promoting` and refused
+cancellation. After that checkpoint, the staging inode and persistent lock
+marker are rechecked before the path-based syscall. Post-publication checks and
+final inventory run in `Completing`; the wrapper enters that phase before
+cleanup, competitor capture, inventory, or result assembly. Cancellation
+accepted at the pre-finalization handoff produces `Cancelled`, while later
+cancellation is refused.
+
+The copy-through suites use Rust 1.98.1 and cover planned-length copying,
+independent staged-output validation, source and destination mutation,
+cooperative source locking, same-parent destination coordination, atomic Fail,
+explicit qualified Replace, retention accounting, cleanup evidence, and stale
+plan rejection. They run on macOS; other targets verify the typed
+`UnsupportedCapability` guard and do not qualify copy-through publication.
+
+The retained-verified-competitor case proves that an independently captured
+alias matching the earlier observation remains inventoried and counted after a
+later destination pathname change. The descriptor used to inspect the
+competitor remains open through alias creation and verification, preventing
+inode reuse during that interval. The equal-content pre-link replacement test
+proves that substitution before alias creation returns `PublicationUncertain`,
+leaves the observed competitor unretained and uncounted, and can still record
+complete evidence for the replacement alias with `retained() == false`. Current
+path and content fields are refreshed independently from historical evidence;
+only artifacts marked retained contribute to `retained_storage_bytes()`.
+
+The operation integration suite replaces the permission-dependent destination
+directory test with a deterministic change from the planned directory to a
+regular file. Execution rejects the stale plan before staging and creates no
+artifacts, so the test no longer passes vacuously when the host filesystem does
+not enforce a directory's write permission for the current user. A separate
+execution-level case places a directory at the planned destination-lock path;
+the real execution path reports `DestinationUnavailable` before staging and
+creates no artifacts.
+
+`UncertainEntry` is an inventory role rather than a declaration that every
+identity field is unknown or that the entry is retained. It covers retained
+aliases, unretained path-linked aliases with complete self-evidence, and
+genuinely uncertain entries. Callers must inspect `retained()` for the
+retention claim and the evidence fields for what is known. Unretained records
+are excluded from `retained_storage_bytes()` even when their alias identity,
+length, and digest are complete.
+
+Run the focused and repository checks with the pinned compiler:
+
+```sh
+rustup run 1.98.1 cargo test --locked --lib operation::tests
+rustup run 1.98.1 cargo test --locked --test operations
+rustup run 1.98.1 make all
+make test-content-policy-git
+```
+
+The genuine-Git content-policy suite is separate from `make all`. Run the GPT
+Repo MCP `all` profile through its supported dry-run and execution workflow
+against this exact candidate root. MCP does not accept focused commands and
+executes under its server-effective Rust toolchain; record that validation ID
+and version separately from the Rust 1.98.1 results.
+
+Staging, recovery, displaced, and uncertain artifacts are retained and
+inventoried because path-only deletion cannot be conditioned on identity.
+Manual reconciliation must not mutate artifact contents and must prove
+ownership, parent identity, unchanged file identity, and content before any
+removal. Detailed inventory fields and platform limits are recorded in
+[publication qualification](testing/publication-qualification.md); publication
+guarantees and the ADR 0008 scope are recorded in
+[publication architecture](architecture/publication.md).

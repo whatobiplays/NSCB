@@ -3,6 +3,9 @@ use crate::inspection::{
     InspectionError, InspectionErrorCode, InspectionHost, InspectionPreflightStatus,
     InspectionRequest, InspectionResult,
 };
+use crate::operation::{
+    CopyThroughRequest, OperationError, OperationPlan, OperationResult, OperationSession,
+};
 use crate::pfs0;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -23,13 +26,40 @@ impl ContainerProbeRequest {
     }
 }
 
-/// A runtime-neutral facade for supported read-only Engine operations.
+/// A runtime-neutral facade for container probing, recognition, resolution,
+/// inspection, verification, and copy-through operations. Copy-through planning
+/// is read-only; executing a plan performs filesystem publication.
 pub struct Engine;
 
 impl Engine {
     /// Creates an engine without global state, persistent storage, or a runtime requirement.
     pub const fn new() -> Self {
         Self
+    }
+
+    /// Resolves a copy-through request into an immutable, inspectable plan.
+    ///
+    /// Planning reads the source and destination state but does not modify
+    /// either path. The returned plan is an in-memory capability consumed by
+    /// `execute_operation`.
+    pub fn plan_copy_through(
+        &self,
+        request: CopyThroughRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_copy_through(request)
+    }
+
+    /// Executes one plan using admission and cancellation state from `session`.
+    ///
+    /// Clones of a session share operation admission. Separate sessions remain
+    /// independent; destination publication is coordinated by the planned
+    /// parent-directory lock.
+    pub fn execute_operation(
+        &self,
+        plan: OperationPlan,
+        session: &OperationSession,
+    ) -> OperationResult {
+        crate::operation::execute_operation(plan, session)
     }
 
     /// Validates request and provider prerequisites without launching a helper.

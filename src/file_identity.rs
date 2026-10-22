@@ -6,6 +6,8 @@
 //! of the path before and after reading. Platforms that cannot report a stable
 //! file identity fail Split qualification closed.
 
+#[cfg(target_os = "macos")]
+use crate::sha256::Sha256Digest;
 use std::fs::{File, Metadata};
 use std::path::Path;
 use std::time::SystemTime;
@@ -15,6 +17,36 @@ use std::time::SystemTime;
 pub(crate) struct FileIdentity {
     first: u64,
     second: u64,
+}
+
+impl FileIdentity {
+    /// Returns the filesystem or volume identifier reported by the host.
+    #[cfg(target_os = "macos")]
+    pub(crate) const fn device(self) -> u64 {
+        self.first
+    }
+
+    /// Returns the file identifier reported by the host.
+    #[cfg(target_os = "macos")]
+    pub(crate) const fn inode(self) -> u64 {
+        self.second
+    }
+
+    /// Returns an opaque digest suitable for exposing identity evidence publicly.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn fingerprint(self) -> Sha256Digest {
+        let mut bytes = [0_u8; 29];
+        bytes[..13].copy_from_slice(b"nscb-file-id\0");
+        bytes[13..21].copy_from_slice(&self.first.to_be_bytes());
+        bytes[21..29].copy_from_slice(&self.second.to_be_bytes());
+        Sha256Digest::digest(&bytes)
+    }
+
+    /// Reports whether two filesystem identities belong to the same volume.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn same_filesystem_as(self, other: Self) -> bool {
+        self.first == other.first
+    }
 }
 
 /// Metadata that must remain stable while a file is inspected or read.

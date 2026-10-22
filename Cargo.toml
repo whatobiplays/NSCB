@@ -3,7 +3,7 @@ name = "nscb"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.98.1"
-description = "A bounded, read-only Probe, Recognition, input-resolution, and qualified Inspection library for NSCB"
+description = "A bounded Engine library for Probe, Recognition, input resolution, qualified Inspection, and validated local copy-through publication"
 
 [lib]
 path = "src/lib.rs"

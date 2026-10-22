@@ -1,6 +1,6 @@
 # NSCB
 
-This repository contains bounded, read-only Rust Engine capabilities for PFS0 probing, content recognition, deterministic input resolution, and qualified NCA inspection.
+This repository contains bounded Rust Engine capabilities for PFS0 probing, content recognition, deterministic input resolution, qualified NCA inspection, and validated local copy-through publication.
 
 ## Container Probe
 
@@ -133,9 +133,87 @@ See [Input selection and resolution](docs/input-selection.md) for the Rust API, 
 
 Split receipts are host-local. Preserve the store root and its sibling continuity file as a unit: a copied root without local continuity evidence, a rolled-back authority index, or a receipt from another store fails closed. Recover a lost store root with `LocalSplitTrustStore::restore_from_snapshot`, which runs under the store lock and preserves later local revocations. Issuance and revocation are lock-serialized and journaled before state files are replaced. Newly created directories are synchronized on Unix; Windows uses write-through file replacement, but ordering of newly created directories is not qualified there.
 
+## Safe copy-through publication
+
+`Engine::plan_copy_through` resolves one ordinary regular file for copy-through
+to a host-selected destination. Planning records the source identity, metadata,
+byte length, SHA-256 evidence, destination baseline, selected workspace, and
+parent identity without modifying either path. Execution revalidates that plan.
+The host supplies a non-persistent default workspace; a request may select an
+explicit workspace instead. A host-default workspace on another filesystem can
+use a qualified destination-local fallback, while an explicit cross-filesystem
+override fails with `UnsupportedCapability`.
+
+`ConflictPolicy::Fail` is the default. An absent destination is published with
+atomic no-clobber `linkat`, so a concurrently created entry is never replaced.
+`ConflictPolicy::Replace` is explicit and is available only when the destination
+volume advertises `VOL_CAP_INT_RENAME_SWAP` and the actual
+`renameatx_np(RENAME_SWAP)` exchange succeeds. Execution revalidates the source,
+destination baseline, staging identity, and destination-parent coordination
+before promotion. The exchange remains name-atomic and is not
+identity-conditional.
+
+Before staging, execution holds a cooperative shared lock on the source and a
+persistent advisory marker coordinates NSCB operations that share a destination
+parent directory. These mechanisms coordinate only NSCB participants. A
+noncooperating same-user process can change a source or destination pathname
+between the final check and the publication syscall.
+
+Retained accounting separates evidence from a retained claim. Under Fail, a
+late destination competitor is retained and counted only when its independently
+captured alias matches the identity, length, and digest observed for that
+publication attempt and the artifact reports `retained() == true`. Under
+Replace, the atomic exchange captures the entry actually displaced and verifies
+it as a distinct `DisplacedDestination` artifact; that entry may differ from the
+planned baseline, and its own post-swap identity and content evidence is what
+supports retention. In both cases, byte accounting requires `retained() ==
+true` and sufficient identity and length evidence. A path-linked competitor
+that does not match its earlier observation can still be inventoried as an
+`UncertainEntry` with complete evidence for the object actually linked;
+`retained()` is then `false` and its bytes are excluded. A matching private
+alias remains retained and counted if the destination pathname changes after
+the alias is created. The descriptor used to inspect the competitor stays open
+until the pathname link and the private alias have both been verified, so the
+observed inode cannot be reallocated during that interval. If the Fail
+competitor is removed, substituted, unreadable, or otherwise cannot be verified
+before capture, execution returns `PublicationUncertain`; the earlier observed
+inode receives no retained claim and its bytes are not counted. This
+observed-only boundary is accepted for copy-through v1 and does not promise
+preservation of bytes independently removed or modified by a noncooperating
+process.
+
+Retained staging, recovery, displaced, and uncertain artifacts are inventoried
+because path-only removal cannot be conditioned on an expected identity.
+`UncertainEntry` is an inventory category, not a claim that all identity and
+content fields are absent or that the entry is retained. It can describe a
+retained verified alias, an unretained path-linked alias with complete
+self-evidence, or a genuinely uncertain entry that lacks ownership evidence.
+Callers must check both `retained()` and the evidence fields. Hosts must present
+the retained-byte estimate and artifact inventory and provide manual
+reconciliation.
+Reconciliation must not edit or truncate
+artifact contents. Any future removal must first establish ownership, parent
+identity, unchanged file identity, and content evidence; uncertain artifacts
+must remain in place. No `PublicationUncertain` result triggers automatic
+rollback through potentially published or uncertain data.
+
+Copy-through v1 is qualified only on the tested local macOS filesystem
+configuration. Linux, Windows, network filesystems, and unverified volume or
+mount configurations remain unqualified. See
+[publication architecture](docs/architecture/publication.md),
+[publication qualification](docs/testing/publication-qualification.md), and
+[ADR-0030](docs/adr/0030-darwin-copy-through-qualification.md) for details.
+
 ## Build and validation
 
-Rust 1.98.1 is pinned as both the development toolchain and minimum supported Rust version. Dependency versions are recorded in `Cargo.lock`.
+Rust 1.98.1 is pinned as both the development toolchain and the minimum
+supported Rust version. Dependency versions are recorded in `Cargo.lock`.
+`rust-toolchain.toml` selects that pinned toolchain when rustup dispatches
+Cargo. A `make all` run instead uses whichever Cargo toolchain is active in
+the invoking environment. Run `rustup run 1.98.1 make all` for Rust 1.98.1
+qualification. GPT Repo MCP `all` executes under the MCP server's effective
+Rust toolchain and must be recorded as separate evidence; it is not Rust
+1.98.1 evidence unless the server actually selected 1.98.1.
 
 The content-policy checker and its tests use only the Python 3.11+ standard library. It checks prohibited-content patterns and verifies provenance for every binary fixture against both the Git index and working tree. The initial fixture registry is intentionally empty because the repository contains no binary fixtures.
 
