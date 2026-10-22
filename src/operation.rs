@@ -5,7 +5,9 @@
 //! state, writes to a private staging file, validates the staged bytes, and
 //! only then promotes the file into the destination.
 //!
-use crate::file_identity::{FileIdentity, FileSnapshot, file_snapshot, handle_identity};
+use crate::file_identity::{FileIdentity, FileSnapshot};
+#[cfg(target_os = "macos")]
+use crate::file_identity::{file_snapshot, handle_identity};
 #[cfg(target_os = "macos")]
 use crate::input_resolution::{
     InputResolutionErrorCode, InputResolutionRequest, looks_like_split_segment,
@@ -13,28 +15,46 @@ use crate::input_resolution::{
 use crate::sha256::Sha256Digest;
 #[cfg(target_os = "macos")]
 use crate::split_resolution::{directory_has_canonical_member, has_adjacent_sidecar};
+#[cfg(target_os = "macos")]
 use fs2::FileExt as _;
 use serde::Serialize;
+#[cfg(target_os = "macos")]
 use sha2::{Digest as _, Sha256};
-use std::ffi::{CString, OsStr, OsString};
+#[cfg(target_os = "macos")]
+use std::ffi::CString;
+#[cfg(target_os = "macos")]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+#[cfg(target_os = "macos")]
+use std::fs::File;
+#[cfg(target_os = "macos")]
+use std::fs::{self, OpenOptions};
+#[cfg(target_os = "macos")]
+use std::io;
+#[cfg(target_os = "macos")]
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::OpenOptionsExt;
 
+#[cfg(target_os = "macos")]
 const IO_BUFFER_SIZE: usize = 64 * 1024;
+#[cfg(target_os = "macos")]
 const MAX_STAGE_NAME_ATTEMPTS: usize = 128;
+#[cfg(target_os = "macos")]
 const LOCK_FILE_OPEN_ATTEMPTS: usize = 16;
+#[cfg(target_os = "macos")]
 const MINIMUM_FREE_SPACE_RESERVE: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "macos")]
 static NEXT_ARTIFACT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Selects how an operation handles a destination that already exists.
@@ -817,15 +837,25 @@ impl OperationPlanSnapshot {
 /// inspection-only and does not contain enough authority to reconstruct a plan.
 pub struct OperationPlan {
     snapshot: OperationPlanSnapshot,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     source: ResolvedFile,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     source_baseline: FileEvidence,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     workspace: ResolvedDirectory,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     destination: ResolvedFile,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     destination_baseline: Option<FileEvidence>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     already_up_to_date: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stage_directory_name: Option<OsString>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stage_file_name: Option<OsString>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     backup_name: Option<OsString>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     published_recovery_name: Option<OsString>,
 }
 
@@ -936,6 +966,7 @@ impl OperationSessionSnapshot {
 
 #[derive(Debug, Default)]
 struct SessionState {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     generation: u64,
     phase: OperationSessionPhase,
     status: OperationSessionStatus,
@@ -945,7 +976,7 @@ struct SessionState {
     failure: Option<OperationFailureCode>,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutionCheckpoint {
     SourceLockWait,
@@ -1027,6 +1058,7 @@ impl OperationSession {
             .unwrap_or(true)
     }
 
+    #[cfg(target_os = "macos")]
     fn admit(&self) -> Result<AdmissionGuard, OperationFailureCode> {
         let mut state = self
             .state
@@ -1053,6 +1085,7 @@ impl OperationSession {
         })
     }
 
+    #[cfg(target_os = "macos")]
     fn cancellation_requested(&self) -> Result<bool, OperationFailureCode> {
         self.state
             .lock()
@@ -1060,6 +1093,7 @@ impl OperationSession {
             .map_err(|_| OperationFailureCode::SessionUnavailable)
     }
 
+    #[cfg(target_os = "macos")]
     fn begin_promotion(&self) -> Result<bool, OperationFailureCode> {
         let mut state = self
             .state
@@ -1075,6 +1109,7 @@ impl OperationSession {
         Ok(true)
     }
 
+    #[cfg(target_os = "macos")]
     fn finish_promotion(&self) -> Result<(), OperationFailureCode> {
         let mut state = self
             .state
@@ -1087,6 +1122,7 @@ impl OperationSession {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn begin_finalization(&self) -> Result<bool, OperationFailureCode> {
         let mut state = self
             .state
@@ -1101,6 +1137,7 @@ impl OperationSession {
         Ok(!cancellation_accepted)
     }
 
+    #[cfg(target_os = "macos")]
     fn begin_completion(&self) -> Result<bool, OperationFailureCode> {
         let mut state = self
             .state
@@ -1116,6 +1153,7 @@ impl OperationSession {
         Ok(true)
     }
 
+    #[cfg(target_os = "macos")]
     fn record_milestone(&self, milestone: OperationMilestone) {
         if let Ok(mut state) = self.state.lock() {
             state.milestone = Some(milestone);
@@ -1123,12 +1161,14 @@ impl OperationSession {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct AdmissionGuard {
     state: Arc<Mutex<SessionState>>,
     generation: u64,
     active: bool,
 }
 
+#[cfg(target_os = "macos")]
 impl AdmissionGuard {
     fn finish(&mut self, result: &OperationResult) {
         if let Ok(mut state) = self.state.lock()
@@ -1149,6 +1189,7 @@ impl AdmissionGuard {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for AdmissionGuard {
     fn drop(&mut self) {
         if !self.active {
@@ -1176,19 +1217,29 @@ impl Drop for AdmissionGuard {
 
 #[derive(Clone, Debug)]
 struct ResolvedFile {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     requested_parent: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     parent: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     name: OsString,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     path: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     parent_identity: FileIdentity,
 }
 
 #[derive(Clone, Debug)]
 struct ResolvedDirectory {
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     requested: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     path: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     identity: Option<FileIdentity>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     creation_parent: Option<PathBuf>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     creation_parent_identity: Option<FileIdentity>,
 }
 
@@ -1206,13 +1257,15 @@ pub(crate) fn plan_copy_through(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = request;
-        return Err(OperationError::new(
+        Err(OperationError::new(
             OperationFailureCode::UnsupportedCapability,
-        ));
+        ))
     }
 
     #[cfg(target_os = "macos")]
-    plan_copy_through_unix(request)
+    {
+        plan_copy_through_unix(request)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1466,7 +1519,7 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn planned_artifact_name(
     parent: &Path,
     role: &str,
@@ -1550,7 +1603,7 @@ fn reject_split_input(path: &Path) -> Result<(), OperationError> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn resolve_file(
     path: &Path,
     unavailable: OperationFailureCode,
@@ -1579,7 +1632,7 @@ fn resolve_file(
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn resolve_directory(path: &Path) -> Result<ResolvedDirectory, OperationError> {
     let requested = absolute_path(path)
         .map_err(|_| OperationError::new(OperationFailureCode::WorkspaceUnavailable))?;
@@ -1639,6 +1692,7 @@ fn resolve_directory(path: &Path) -> Result<ResolvedDirectory, OperationError> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn select_staging_strategy(
     selection: WorkspaceSelection,
     same_qualified_filesystem: bool,
@@ -1651,6 +1705,7 @@ fn select_staging_strategy(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn destination_local_workspace(
     destination_parent: &Path,
     destination_parent_identity: FileIdentity,
@@ -1664,6 +1719,7 @@ fn destination_local_workspace(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn select_staging_workspace(
     selection: WorkspaceSelection,
     requested_workspace: ResolvedDirectory,
@@ -1701,11 +1757,6 @@ fn qualified_local_apfs_volume(directory: &File) -> bool {
         && status.f_flags & libc::MNT_RDONLY as u32 == 0
 }
 
-#[cfg(not(target_os = "macos"))]
-fn qualified_local_apfs_volume(_directory: &File) -> bool {
-    false
-}
-
 #[cfg(target_os = "macos")]
 fn require_directory_writable(directory: &File) -> Result<(), OperationFailureCode> {
     let dot = c_name(OsStr::new(".")).map_err(|_| OperationFailureCode::UnsafePath)?;
@@ -1729,11 +1780,7 @@ fn require_directory_writable(directory: &File) -> Result<(), OperationFailureCo
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn require_directory_writable(_directory: &File) -> Result<(), OperationFailureCode> {
-    Err(OperationFailureCode::UnsupportedCapability)
-}
-
+#[cfg(target_os = "macos")]
 fn absolute_path(path: &Path) -> io::Result<PathBuf> {
     if path.is_absolute() {
         Ok(path.to_path_buf())
@@ -1742,16 +1789,18 @@ fn absolute_path(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn is_filesystem_root(path: &Path) -> bool {
     path.parent().is_none()
 }
 
+#[cfg(target_os = "macos")]
 fn required_identity(file: &File) -> Result<FileIdentity, OperationError> {
     handle_identity(file)
         .ok_or_else(|| OperationError::new(OperationFailureCode::UnsupportedCapability))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn open_directory(path: &Path) -> io::Result<File> {
     let directory = OpenOptions::new()
         .read(true)
@@ -1766,7 +1815,7 @@ fn open_directory(path: &Path) -> io::Result<File> {
     Ok(directory)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn open_file_at(directory: &File, name: &OsStr) -> io::Result<File> {
     let name = c_name(name)?;
     // SAFETY: `directory` is an open directory handle and `name` is a
@@ -1794,7 +1843,7 @@ fn open_file_at(directory: &File, name: &OsStr) -> io::Result<File> {
     Ok(file)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn create_file_at(directory: &File, name: &OsStr) -> io::Result<File> {
     let name = c_name(name)?;
     // SAFETY: `directory` is an open directory handle and `name` is a
@@ -1816,7 +1865,7 @@ fn create_file_at(directory: &File, name: &OsStr) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(descriptor) })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn open_lock_file_at(directory: &File, name: &OsStr) -> io::Result<File> {
     let name = c_name(name)?;
     let mut last_error = None;
@@ -1857,7 +1906,7 @@ fn open_lock_file_at(directory: &File, name: &OsStr) -> io::Result<File> {
     Err(last_error.unwrap_or_else(|| io::Error::from(io::ErrorKind::NotFound)))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn hard_link_at(
     from_directory: &File,
     from: &OsStr,
@@ -1914,19 +1963,6 @@ fn rename_swap_at(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn rename_swap_at(
-    _from_directory: &File,
-    _from: &OsStr,
-    _to_directory: &File,
-    _to: &OsStr,
-) -> io::Result<()> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "atomic identity-preserving replacement is unavailable on this platform",
-    ))
-}
-
 #[cfg(target_os = "macos")]
 fn qualify_rename_swap(directory: &File) -> Result<(), OperationFailureCode> {
     if volume_supports_rename_swap(directory) {
@@ -1934,11 +1970,6 @@ fn qualify_rename_swap(directory: &File) -> Result<(), OperationFailureCode> {
     } else {
         Err(OperationFailureCode::UnsupportedCapability)
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn qualify_rename_swap(_directory: &File) -> Result<(), OperationFailureCode> {
-    Err(OperationFailureCode::UnsupportedCapability)
 }
 
 #[cfg(target_os = "macos")]
@@ -1980,13 +2011,13 @@ fn volume_supports_rename_swap(directory: &File) -> bool {
     capabilities.valid[interface] & bit != 0 && capabilities.capabilities[interface] & bit != 0
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn c_name(name: &OsStr) -> io::Result<CString> {
     CString::new(name.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn inspect_destination(
     directory: &File,
     name: &OsStr,
@@ -1994,7 +2025,7 @@ fn inspect_destination(
     inspect_destination_with_checkpoint(directory, name, || {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn inspect_destination_with_checkpoint(
     directory: &File,
     name: &OsStr,
@@ -2021,10 +2052,12 @@ fn inspect_destination_with_checkpoint(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn inspect_file(file: &mut File) -> Result<FileEvidence, OperationFailureCode> {
     inspect_file_with_checkpoint(file, || {})
 }
 
+#[cfg(target_os = "macos")]
 fn inspect_file_with_checkpoint(
     file: &mut File,
     checkpoint: impl FnMut(),
@@ -2038,6 +2071,7 @@ fn inspect_file_with_checkpoint(
     inspect_file_with_length_and_checkpoint(file, metadata.len(), checkpoint)
 }
 
+#[cfg(target_os = "macos")]
 fn inspect_file_with_length_and_checkpoint(
     file: &mut File,
     planned_length: u64,
@@ -2072,6 +2106,7 @@ fn inspect_file_with_length_and_checkpoint(
     })
 }
 
+#[cfg(target_os = "macos")]
 fn hash_open_file_with_length_and_checkpoint(
     file: &mut File,
     planned_length: u64,
@@ -2107,6 +2142,7 @@ fn hash_open_file_with_length_and_checkpoint(
     ))
 }
 
+#[cfg(target_os = "macos")]
 fn files_equal(left: &mut File, right: &mut File, planned_length: u64) -> io::Result<bool> {
     left.seek(SeekFrom::Start(0))?;
     right.seek(SeekFrom::Start(0))?;
@@ -2129,6 +2165,7 @@ fn files_equal(left: &mut File, right: &mut File, planned_length: u64) -> io::Re
     Ok(left.read(&mut probe)? == 0 && right.read(&mut probe)? == 0)
 }
 
+#[cfg(target_os = "macos")]
 fn files_equal_with_checkpoint(
     left: &mut File,
     right: &mut File,
@@ -2168,6 +2205,7 @@ fn files_equal_with_checkpoint(
     Ok(true)
 }
 
+#[cfg(target_os = "macos")]
 fn verify_file_evidence_with_checkpoint(
     file: &mut File,
     expected: &FileEvidence,
@@ -2182,6 +2220,7 @@ fn verify_file_evidence_with_checkpoint(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn verify_file_evidence(
     file: &mut File,
     expected: &FileEvidence,
@@ -2194,7 +2233,7 @@ fn verify_file_evidence(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn validate_file_route(file: &ResolvedFile) -> Result<(), OperationFailureCode> {
     let current_parent =
         fs::canonicalize(&file.requested_parent).map_err(|_| OperationFailureCode::StalePlan)?;
@@ -2208,7 +2247,7 @@ fn validate_file_route(file: &ResolvedFile) -> Result<(), OperationFailureCode> 
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn validate_directory_route(
     directory: &ResolvedDirectory,
     runtime_identity: Option<FileIdentity>,
@@ -2277,6 +2316,7 @@ fn validate_directory_route(
 /// The marker is opened relative to the already validated parent directory
 /// descriptor. Every destination in that directory therefore uses the same
 /// entry, including final path spellings that the filesystem treats as aliases.
+#[cfg(target_os = "macos")]
 fn destination_lock_name(_path: &Path) -> OsString {
     ".nscb-operation-directory.lock".into()
 }
@@ -2289,11 +2329,11 @@ pub(crate) fn execute_operation(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (plan, session);
-        return failed_result(
+        failed_result(
             vec![OperationMilestone::Planned],
             OperationFailureCode::UnsupportedCapability,
             false,
-        );
+        )
     }
 
     #[cfg(target_os = "macos")]
@@ -2305,7 +2345,7 @@ pub(crate) fn execute_operation(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn execute_with_producer<P>(
     plan: OperationPlan,
     session: &OperationSession,
@@ -2317,7 +2357,7 @@ where
     execute_with_producer_and_checkpoint(plan, session, producer, |_| {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn execute_with_producer_and_checkpoint<P, H>(
     plan: OperationPlan,
     session: &OperationSession,
@@ -2469,6 +2509,7 @@ fn failed_result(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn required_storage_bytes(
     source_length: u64,
     destination_backup_length: Option<u64>,
@@ -2480,6 +2521,7 @@ fn required_storage_bytes(
         .ok_or(OperationFailureCode::InsufficientStorage)
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_storage_capacity(
     available: u64,
     source_length: u64,
@@ -2495,7 +2537,7 @@ fn ensure_storage_capacity(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn check_storage_capacity(
     workspace_directory: &File,
     plan: &OperationPlan,
@@ -2516,7 +2558,7 @@ fn check_storage_capacity(
     )
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn available_space_on_open_directory(directory: &File) -> Result<u64, OperationFailureCode> {
     let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: `directory` remains open for the call, and `status` points to
@@ -2527,13 +2569,7 @@ fn available_space_on_open_directory(directory: &File) -> Result<u64, OperationF
     }
     // SAFETY: fstatfs returned success and initialized the complete structure.
     let status = unsafe { status.assume_init() };
-    #[cfg(target_os = "macos")]
     let (available_blocks, block_size) = (status.f_bavail, u64::from(status.f_bsize));
-    #[cfg(not(target_os = "macos"))]
-    let (available_blocks, block_size) = (
-        u64::try_from(status.f_bavail).map_err(|_| OperationFailureCode::UnsupportedCapability)?,
-        u64::try_from(status.f_bsize).map_err(|_| OperationFailureCode::UnsupportedCapability)?,
-    );
     if block_size == 0 {
         return Err(OperationFailureCode::UnsupportedCapability);
     }
@@ -2542,7 +2578,7 @@ fn available_space_on_open_directory(directory: &File) -> Result<u64, OperationF
         .ok_or(OperationFailureCode::UnsupportedCapability)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct ExecutionOutputs<'a> {
     milestones: &'a mut Vec<OperationMilestone>,
     artifacts: &'a mut Vec<OwnedArtifact>,
@@ -2550,7 +2586,7 @@ struct ExecutionOutputs<'a> {
     source_lock: &'a mut Option<SourceLockGuard>,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn execute_unix<P>(
     plan: &OperationPlan,
     session: &OperationSession,
@@ -2940,7 +2976,7 @@ where
     Ok(result)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_directory_identity(
     directory: &File,
     expected: FileIdentity,
@@ -2952,7 +2988,7 @@ fn verify_directory_identity(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn validate_plan_routes(
     plan: &OperationPlan,
     workspace_runtime_identity: Option<FileIdentity>,
@@ -2963,7 +2999,7 @@ fn validate_plan_routes(
         .map_err(|_| OperationFailureCode::StalePlan)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn ensure_destination_baseline(
     plan: &OperationPlan,
     destination_directory: &File,
@@ -2971,7 +3007,7 @@ fn ensure_destination_baseline(
     ensure_destination_baseline_with_checkpoint(plan, destination_directory, || {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn ensure_destination_baseline_with_checkpoint(
     plan: &OperationPlan,
     destination_directory: &File,
@@ -2989,7 +3025,7 @@ fn ensure_destination_baseline_with_checkpoint(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_destination_evidence(
     file: &mut File,
     expected: &FileEvidence,
@@ -3002,7 +3038,7 @@ fn verify_destination_evidence(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_destination_entry(
     directory: &File,
     name: &OsStr,
@@ -3013,7 +3049,7 @@ fn verify_destination_entry(
     verify_destination_evidence(&mut file, expected)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_destination_on_current_route(
     plan: &OperationPlan,
     expected: &FileEvidence,
@@ -3023,7 +3059,7 @@ fn verify_destination_on_current_route(
     validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::DestinationChanged)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn open_destination_parent_on_current_route(
     plan: &OperationPlan,
 ) -> Result<File, OperationFailureCode> {
@@ -3035,7 +3071,7 @@ fn open_destination_parent_on_current_route(
     Ok(directory)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_published_destination_on_current_route(
     plan: &OperationPlan,
     identity: FileIdentity,
@@ -3046,14 +3082,14 @@ fn verify_published_destination_on_current_route(
     validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::PublicationUncertain)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn same_file_identity_and_content(observed: &FileEvidence, expected: &FileEvidence) -> bool {
     observed.identity == expected.identity
         && observed.snapshot.len == expected.snapshot.len
         && observed.sha256 == expected.sha256
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn check_cancelled(session: &OperationSession) -> Result<(), OperationFailureCode> {
     if session
         .cancellation_requested()
@@ -3065,7 +3101,7 @@ fn check_cancelled(session: &OperationSession) -> Result<(), OperationFailureCod
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 fn copy_source_to_stage(
     source: &mut File,
     stage: &mut File,
@@ -3078,7 +3114,7 @@ fn copy_source_to_stage(
     copy_source_to_stage_with_length(source, stage, planned_length, session)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn copy_source_to_stage_with_length(
     source: &mut File,
     stage: &mut File,
@@ -3088,7 +3124,7 @@ fn copy_source_to_stage_with_length(
     copy_source_to_stage_with_length_and_checkpoint(source, stage, planned_length, session, || {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn copy_source_to_stage_with_length_and_checkpoint(
     source: &mut File,
     stage: &mut File,
@@ -3140,7 +3176,7 @@ fn copy_source_to_stage_with_length_and_checkpoint(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn acquire_destination_lock(
     directory: &File,
     name: &OsStr,
@@ -3187,7 +3223,7 @@ fn acquire_destination_lock(
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn validate_destination_lock(
     lock: &DestinationLock,
     directory: &File,
@@ -3215,7 +3251,7 @@ fn validate_destination_lock(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn acquire_source_lock(
     source_file: &File,
     source_directory: &File,
@@ -3250,13 +3286,13 @@ fn acquire_source_lock(
         .map_err(|_| OperationFailureCode::SourceChanged)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct SourceLockGuard {
     /// Locked source descriptor held until terminal result construction ends.
     file: File,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn create_artifact(
     directory: &File,
     directory_path: &Path,
@@ -3306,7 +3342,7 @@ fn create_artifact(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn create_private_stage_directory(
     parent: &File,
     parent_path: &Path,
@@ -3377,7 +3413,7 @@ fn create_private_stage_directory(
     Ok(directory)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn make_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
     let name = c_name(name)?;
     // SAFETY: the descriptor refers to an open directory and the C string is
@@ -3391,7 +3427,7 @@ fn make_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
     let name = c_name(name)?;
     // SAFETY: the descriptor refers to an open directory; flags prevent
@@ -3411,7 +3447,7 @@ fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn create_destination_backup(
     plan: &OperationPlan,
     destination_directory: &File,
@@ -3498,9 +3534,9 @@ fn create_destination_backup(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn next_artifact_name(role: &str) -> Result<OsString, OperationFailureCode> {
-    #[cfg(all(test, unix))]
+    #[cfg(all(test, target_os = "macos"))]
     if let Some(name) = TEST_ARTIFACT_NAME_QUEUE.with(|queue| queue.borrow_mut().pop_front()) {
         return Ok(name);
     }
@@ -3508,7 +3544,7 @@ fn next_artifact_name(role: &str) -> Result<OsString, OperationFailureCode> {
     random_artifact_name(role)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn random_artifact_name(role: &str) -> Result<OsString, OperationFailureCode> {
     let mut entropy =
         File::open("/dev/urandom").map_err(|_| OperationFailureCode::UnsupportedCapability)?;
@@ -3524,12 +3560,12 @@ fn random_artifact_name(role: &str) -> Result<OsString, OperationFailureCode> {
     Ok(format!(".nscb-{role}-{}-{id}-{nonce}", std::process::id()).into())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn cleanup_artifacts(artifacts: &mut [OwnedArtifact]) -> bool {
     cleanup_artifacts_with_probe(artifacts, |_| {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn cleanup_artifacts_with_probe(
     artifacts: &mut [OwnedArtifact],
     mut after_probe: impl FnMut(&OwnedArtifact),
@@ -3562,14 +3598,14 @@ fn cleanup_artifacts_with_probe(
     !artifacts.is_empty()
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OwnedArtifactKind {
     File,
     Directory,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 #[derive(Debug)]
 struct OwnedArtifact {
     id: u64,
@@ -3589,7 +3625,7 @@ struct OwnedArtifact {
     keep: bool,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn retain_late_destination_competitors(
     artifacts: &mut Vec<OwnedArtifact>,
     cleanup_artifact_retained: &mut bool,
@@ -3831,14 +3867,14 @@ fn retain_late_destination_competitors(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 fn artifact_inventory(
     artifacts: &[OwnedArtifact],
 ) -> (Vec<OperationArtifact>, Option<OperationFailureCode>) {
     artifact_inventory_with_checkpoint(artifacts, &mut |_| {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn artifact_inventory_with_checkpoint(
     artifacts: &[OwnedArtifact],
     checkpoint: &mut dyn FnMut(ExecutionCheckpoint),
@@ -4101,7 +4137,7 @@ fn artifact_inventory_with_checkpoint(
     (operation_artifacts, inventory_failure)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn refresh_owned_file_identity(
     artifacts: &[OwnedArtifact],
     identity: FileIdentity,
@@ -4132,7 +4168,7 @@ fn refresh_owned_file_identity(
     observed_length.map(|length| (Some(length), None))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn next_artifact_id(artifacts: &[OwnedArtifact]) -> u64 {
     artifacts
         .iter()
@@ -4142,7 +4178,7 @@ fn next_artifact_id(artifacts: &[OwnedArtifact]) -> u64 {
         .saturating_add(1)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn parent_artifact_id_for_path(
     artifacts: &[OwnedArtifact],
     path: &Path,
@@ -4159,7 +4195,7 @@ fn parent_artifact_id_for_path(
 }
 
 /// Holds the validated paths and staging evidence needed during publication.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct PublicationContext<'a> {
     plan: &'a OperationPlan,
     source_directory: &'a File,
@@ -4180,7 +4216,7 @@ struct PublicationContext<'a> {
 }
 
 /// Immutable evidence and handles shared by both final pre-promotion checks.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct PromotionValidation<'a> {
     plan: &'a OperationPlan,
     workspace_runtime_identity: Option<FileIdentity>,
@@ -4192,7 +4228,7 @@ struct PromotionValidation<'a> {
     staged: &'a FileEvidence,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn validate_promotion_operands(
     validation: &PromotionValidation<'_>,
 ) -> Result<(), OperationFailureCode> {
@@ -4234,7 +4270,7 @@ fn validate_promotion_operands(
     validate_destination_lock(destination_lock, destination_directory, plan)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn revalidate_before_promotion(
     validation: &PromotionValidation<'_>,
     source_directory: &File,
@@ -4283,7 +4319,7 @@ fn revalidate_before_promotion(
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn record_published_destination(
     plan: &OperationPlan,
     destination_directory: File,
@@ -4358,7 +4394,7 @@ fn record_published_destination(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn register_published_destination(
     plan: &OperationPlan,
     directory: File,
@@ -4389,7 +4425,7 @@ fn register_published_destination(
     });
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn recovery_output_artifact(
     plan: &OperationPlan,
     stage_directory: &File,
@@ -4431,7 +4467,7 @@ fn recovery_output_artifact(
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct DestinationCompetitorEvidence {
     identity: Option<FileIdentity>,
     length: Option<u64>,
@@ -4440,7 +4476,7 @@ struct DestinationCompetitorEvidence {
     path_length: Option<u64>,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn destination_competitor_artifact(
     plan: &OperationPlan,
     artifacts: &[OwnedArtifact],
@@ -4469,13 +4505,13 @@ fn destination_competitor_artifact(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct CapturedDestinationCompetitor {
     artifact: OwnedArtifact,
     evidence_verified: bool,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn capture_current_destination_competitor(
     plan: &OperationPlan,
     artifacts: &[OwnedArtifact],
@@ -4604,7 +4640,7 @@ fn capture_current_destination_competitor(
     }))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 struct DestinationLock {
     _file: File,
     marker_name: OsString,
@@ -4613,7 +4649,7 @@ struct DestinationLock {
     parent_path: PathBuf,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, OperationFailureCode> {
     let PublicationContext {
         plan,
@@ -4767,7 +4803,7 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
     Ok(OperationOutcome::Copied)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn publish_replacement(
     context: PublicationContext<'_>,
 ) -> Result<OperationOutcome, OperationFailureCode> {
@@ -5029,7 +5065,7 @@ fn publish_replacement(
     Ok(OperationOutcome::Copied)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn update_artifact_evidence(
     artifacts: &mut [OwnedArtifact],
     name: &OsStr,
@@ -5046,7 +5082,7 @@ fn update_artifact_evidence(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn set_artifact_unverified(artifacts: &mut [OwnedArtifact], name: &OsStr) {
     update_artifact_evidence(
         artifacts,
@@ -5058,7 +5094,7 @@ fn set_artifact_unverified(artifacts: &mut [OwnedArtifact], name: &OsStr) {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn is_unsupported_capability_error(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::Unsupported
         || error.raw_os_error().is_some_and(|code| {
@@ -5066,12 +5102,12 @@ fn is_unsupported_capability_error(error: &io::Error) -> bool {
         })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn is_unsupported_filesystem_path_operation_error(error: &io::Error) -> bool {
     error.raw_os_error() == Some(libc::EXDEV) || is_unsupported_capability_error(error)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn destination_lock_failure(error: &io::Error) -> OperationFailureCode {
     if is_unsupported_capability_error(error) {
         OperationFailureCode::UnsupportedCapability
@@ -5080,7 +5116,7 @@ fn destination_lock_failure(error: &io::Error) -> OperationFailureCode {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn no_clobber_link_failure(error: &io::Error, destination_exists: bool) -> OperationFailureCode {
     if let Some(code) = no_clobber_link_error_code(error) {
         code
@@ -5091,7 +5127,7 @@ fn no_clobber_link_failure(error: &io::Error, destination_exists: bool) -> Opera
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn no_clobber_link_error_code(error: &io::Error) -> Option<OperationFailureCode> {
     if error.kind() == io::ErrorKind::AlreadyExists {
         Some(OperationFailureCode::DestinationChanged)
@@ -5102,12 +5138,12 @@ fn no_clobber_link_error_code(error: &io::Error) -> Option<OperationFailureCode>
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn is_unsupported_rename_error(error: &io::Error) -> bool {
     is_unsupported_filesystem_path_operation_error(error)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_source_entry(
     plan: &OperationPlan,
     source_directory: &File,
@@ -5115,7 +5151,7 @@ fn verify_source_entry(
     verify_source_entry_with_checkpoint(plan, source_directory, || {})
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn verify_source_entry_with_checkpoint(
     plan: &OperationPlan,
     source_directory: &File,
@@ -5128,7 +5164,7 @@ fn verify_source_entry_with_checkpoint(
         .map_err(|_| OperationFailureCode::SourceChanged)
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn validate_published_file(
     directory: &File,
     name: &OsStr,
@@ -5149,14 +5185,14 @@ fn validate_published_file(
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
 fn mark_artifact_retained(artifacts: &mut [OwnedArtifact], name: &OsStr) {
     if let Some(artifact) = artifacts.iter_mut().find(|artifact| artifact.name == name) {
         artifact.keep = true;
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 thread_local! {
     static TEST_ARTIFACT_NAME_QUEUE:
         std::cell::RefCell<std::collections::VecDeque<OsString>> =
