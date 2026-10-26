@@ -23,6 +23,9 @@ jobs:
       - name: Run genuine Git content-policy integration tests
         run: make test-content-policy-git
 
+      - name: Run genuine Git worktree cleanup tests
+        run: make test-cleanup-git
+
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
