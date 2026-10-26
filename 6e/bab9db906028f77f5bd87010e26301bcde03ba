@@ -1,0 +1,50 @@
+README.md
+  s_efe4f7d6219132::t_3257419b9acccc 226-228
+tests/test_cleanup.py
+  s_efe4f7d6219132::t_d5c48c068985c2 152-153
+  s_efe4f7d6219132::t_b1a1af68b159a8 229
+  s_efe4f7d6219132::t_c2b72827d92a2f 238-254,256-271
+  s_efe4f7d6219132::t_a1272b72f5056d 1-114,146-148,150-151,154,156-228,230-237,272-274
+  s_efe4f7d6219132::t_e6da4271a893db 115-126
+  s_efe4f7d6219132::t_133482ba48fca0 155
+  s_efe4f7d6219132::t_83f40522d1f87d 127-145
+  s_efe4f7d6219132::t_0fdfa2f8dbcf46 149
+  s_efe4f7d6219132::t_70a92cd22c90e0 255
+scripts/clean.py
+  s_efe4f7d6219132::t_d5c48c068985c2 21,26-28,32,35,110
+  s_efe4f7d6219132::t_272af69ad15586 20
+  s_efe4f7d6219132::t_0294450e03c2f2 136-138
+  s_efe4f7d6219132::t_b1a1af68b159a8 130,151-152
+  s_efe4f7d6219132::t_10191a801feb5a 1,3-7,9-19,22-25,29-31,33-34,36-109,111-129,131-135,139-150,153-192
+  s_efe4f7d6219132::t_9b0aa771d21148 2,8,193-196
+.github/workflows/ci.yml
+  s_efe4f7d6219132::t_a3c82070cf8347 26-28
+Makefile
+  s_efe4f7d6219132::t_a3c82070cf8347 1,9-10,18,32-37,45
+  s_efe4f7d6219132::t_9b0aa771d21148 57
+tests/test_cleanup_git.py
+  s_efe4f7d6219132::t_6fdcf3e276d42f 121-131
+  s_efe4f7d6219132::t_3fbad7a0ce4695 1-120,132-150
+docs/validation.md
+  s_efe4f7d6219132::t_2c84f389dd2eac 12
+  s_efe4f7d6219132::t_a3c82070cf8347 17-19,56
+docs/testing/cleanup-qualification.md
+  s_efe4f7d6219132::t_d5c48c068985c2 16-19,34-36
+  s_efe4f7d6219132::t_a3c82070cf8347 1-15,20-33,37-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "6ebab9db906028f77f5bd87010e26301bcde03ba",
+  "prompts": {},
+  "sessions": {
+    "s_efe4f7d6219132": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1756d-e78f-7e32-9f67-d6d3bdae1526",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
