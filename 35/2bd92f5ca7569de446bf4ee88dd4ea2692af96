@@ -1,0 +1,19 @@
+src/operation.rs
+  s_5115ca474bf205::t_762af1b386a640 1155,1162,1167
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "352bd92f5ca7569de446bf4ee88dd4ea2692af96",
+  "prompts": {},
+  "sessions": {
+    "s_5115ca474bf205": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a16d28-a945-7353-921f-e3c95a755ed6",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
