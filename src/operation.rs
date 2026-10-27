@@ -1152,16 +1152,19 @@ struct SessionState {
     total_bytes: Option<u64>,
     terminal_result: Option<OperationResult>,
     terminal_completion: Option<OperationCompletion>,
+    #[cfg(target_os = "macos")]
     execution_cancellation: Option<CancellationHandle>,
     event_sender: Option<std::sync::mpsc::Sender<OperationEvent>>,
     event_subscription: Option<u64>,
     next_subscription: u64,
     event_sequence: u64,
     cancellation_event_emitted: bool,
+    #[cfg(target_os = "macos")]
     emitted_milestone: Option<OperationMilestone>,
 }
 
 impl SessionState {
+    #[cfg(target_os = "macos")]
     fn cancellation_flag(&self) -> bool {
         self.cancel_requested
             || self
