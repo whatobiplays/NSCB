@@ -204,6 +204,59 @@ mount configurations remain unqualified. See
 [publication qualification](docs/testing/publication-qualification.md), and
 [ADR-0030](docs/adr/0030-darwin-copy-through-qualification.md) for details.
 
+## Copy-through CLI and job observation
+
+`nscb copy` invokes the qualified copy-through Job without prompts. It requires
+an explicit source and destination:
+
+```text
+nscb copy <source> <destination> [--workspace <path>] [--replace] [--json | --jsonl]
+```
+
+The default conflict policy refuses to replace a different existing
+destination. `--replace` selects the qualified atomic replacement path. When
+`--workspace` is omitted, staging uses the host temporary directory under
+`nscb-copy-through`. The command does not persist configuration or execution
+history.
+
+When reporting succeeds, `--json` emits one `job.result` document for an
+admitted execution, including failure, cancellation, and publication
+uncertainty. `--jsonl` emits ordered `job.event` records followed by one
+terminal `job.result`. A usage or planning failure before admission emits one
+typed `error` document in machine mode. A transport failure can leave a record
+absent or partial; it does not alter the operation result or trigger a second
+terminal record. Machine mode keeps stdout free of human text and sends human
+diagnostics to stderr.
+
+Human copy output includes the complete serialized artifact records when
+cleanup retains or cannot safely remove operation-owned entries. Each
+`artifact:` line carries its path and observed identity/content evidence for
+manual reconciliation. The warning sentence and semantic events remain free
+of raw paths.
+
+Exit classes are 0 for validated success, 2 for usage or configuration, 3 for
+input or prerequisite failure, 4 for a destination conflict or change, and 6
+for cancellation. Exit 7 covers internal, write, validation, publication, and
+reporting failures. Exit 5 is reserved for provider or device failures, which
+copy-through does not produce. Exit 8 is reserved for future batch results
+completed with issues. A cleanup warning preserves the successful operation
+exit class when reporting succeeds.
+
+A reporting failure can occur after publication, so exit 7 is ambiguous about
+filesystem state. Automation must inspect a delivered complete result and
+reconcile source, destination, and artifact evidence before deciding whether
+to retry. It must not retry automatically based only on exit 7.
+
+Rust hosts can use the same execution without a prescribed runtime.
+`OperationSession::subscribe_events()` claims one event consumer for the next
+execution. `last_result()` and `last_completion()` recover the authoritative
+terminal result independently of event delivery; the latter also carries the
+terminal event sequence and snapshot. `Engine::execute_operation_with_cancellation()`
+binds a cancellation handle to one invocation. The synchronous
+`Engine::execute_operation()` interface remains available. See
+[job execution and machine output](docs/architecture/job-execution.md) for the
+event, progress, cancellation, and reconciliation contract.
+
 ## Build and validation
 
 Rust 1.98.1 is pinned as both the development toolchain and the minimum
