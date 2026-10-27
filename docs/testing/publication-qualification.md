@@ -240,3 +240,12 @@ process consumes space before or during staging. Embedding hosts must show the
 cost and artifact inventory and support manual reconciliation. Staged file
 contents are synchronized, but containing directories are not, so crash
 durability is not claimed.
+
+## Related job-contract evidence
+
+The copy-through CLI, ordered host events, latest-value progress, and
+invocation-bound cancellation were added after this publication qualification.
+They reuse the same publication path and do not change its retained-storage or
+`PublicationUncertain` accounting. See
+[job contract qualification](job-contracts-qualification.md) for the additional
+evidence and the same macOS-only limits.

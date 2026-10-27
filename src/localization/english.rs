@@ -2,7 +2,8 @@
 
 use nscb::{
     ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult, InspectionErrorCode,
-    NcaContentType, NcaDistribution, NcaInspection, VerificationErrorCode, VerificationLimitation,
+    JobState, NcaContentType, NcaDistribution, NcaInspection, OperationFailureCode,
+    OperationOutcome, OperationResult, VerificationErrorCode, VerificationLimitation,
     VerificationProfile, VerificationResult,
 };
 use serde::Deserialize;
@@ -84,6 +85,91 @@ fn verification_messages() -> &'static VerificationMessages {
         serde_json::from_str(include_str!("verification.en.json"))
             .expect("bundled English Verification localization resource must be valid")
     })
+}
+
+#[derive(Deserialize)]
+struct CopyMessages {
+    usage: String,
+    succeeded_copied: String,
+    succeeded_already_up_to_date: String,
+    cancelled: String,
+    failed: String,
+    cleanup_warning: String,
+    cleanup_artifacts_heading: String,
+    signal_failure: String,
+    internal_failure: String,
+    unknown_error: String,
+    errors: HashMap<String, String>,
+}
+
+fn copy_messages() -> &'static CopyMessages {
+    static MESSAGES: OnceLock<CopyMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("copy.en.json"))
+            .expect("bundled English copy-through localization resource must be valid")
+    })
+}
+
+pub(crate) fn copy_usage() -> &'static str {
+    &copy_messages().usage
+}
+
+fn copy_error_message(code: &str) -> &'static str {
+    let messages = copy_messages();
+    messages
+        .errors
+        .get(code)
+        .map(String::as_str)
+        .unwrap_or(&messages.unknown_error)
+}
+
+pub(crate) fn copy_error(code: OperationFailureCode) -> &'static str {
+    copy_error_message(code.as_str())
+}
+
+pub(crate) fn copy_signal_failure() -> &'static str {
+    &copy_messages().signal_failure
+}
+
+pub(crate) fn copy_internal_failure() -> &'static str {
+    &copy_messages().internal_failure
+}
+
+/// Formats a human copy result and, when cleanup evidence is retained, lists
+/// complete artifact records so a user can reconcile their paths and identities.
+pub(crate) fn copy_result(result: &OperationResult) -> String {
+    let messages = copy_messages();
+    let mut message = match result.state() {
+        JobState::Succeeded => match result.outcome() {
+            Some(OperationOutcome::AlreadyUpToDate) => {
+                messages.succeeded_already_up_to_date.clone()
+            }
+            _ => messages.succeeded_copied.clone(),
+        },
+        JobState::Cancelled => messages.cancelled.clone(),
+        JobState::Failed => messages.failed.replace(
+            "{code}",
+            result
+                .failure()
+                .map(|failure| copy_error(failure.code()))
+                .unwrap_or(&messages.internal_failure),
+        ),
+        _ => messages.unknown_error.clone(),
+    };
+    if result.cleanup_artifact_retained() {
+        message.push(' ');
+        message.push_str(&messages.cleanup_warning);
+        message.push('\n');
+        message.push_str(&messages.cleanup_artifacts_heading);
+        for artifact in result.artifacts() {
+            message.push_str("\n  artifact: ");
+            match serde_json::to_string(artifact) {
+                Ok(record) => message.push_str(&record),
+                Err(_) => message.push_str(&format!("{artifact:?}")),
+            }
+        }
+    }
+    message
 }
 
 pub(crate) fn inspection_usage() -> &'static str {
@@ -346,6 +432,14 @@ pub(crate) fn verification_result(result: &VerificationResult) -> String {
 mod tests {
     use super::{error_message, success, usage};
     use nscb::{ContainerProbeErrorCode as Code, InputResolutionErrorCode as InputCode};
+
+    #[test]
+    fn copy_error_uses_localized_fallback_for_an_unknown_code() {
+        assert_eq!(
+            super::copy_error_message("future_unknown_code"),
+            "An unrecognized operation failure occurred."
+        );
+    }
 
     #[test]
     fn resource_contains_a_message_for_every_stable_error_code() {

@@ -12,6 +12,7 @@ use crate::file_identity::{file_snapshot, handle_identity};
 use crate::input_resolution::{
     InputResolutionErrorCode, InputResolutionRequest, looks_like_split_segment,
 };
+use crate::inspection::CancellationHandle;
 use crate::sha256::Sha256Digest;
 #[cfg(target_os = "macos")]
 use crate::split_resolution::{directory_has_canonical_member, has_adjacent_sidecar};
@@ -206,6 +207,10 @@ pub enum OperationFailureCode {
     /// Another operation is already active in the same shared session.
     #[serde(rename = "operation_session_busy")]
     Busy,
+    /// The session already has a live semantic-event consumer, or a
+    /// subscription was attempted while an execution was active.
+    #[serde(rename = "event_consumer_unavailable")]
+    EventConsumerUnavailable,
     /// The shared operation session could not be accessed safely.
     #[serde(rename = "operation_session_unavailable")]
     SessionUnavailable,
@@ -218,7 +223,7 @@ pub enum OperationFailureCode {
     ValidationFailed,
     /// The filesystem could not atomically promote the validated staging file.
     PublicationFailed,
-    /// Publication completed, but the destination postcondition could not be proven.
+    /// The destination state is uncertain; publication could not be confirmed.
     PublicationUncertain,
     /// Execution ended with an artifact retained because safe removal could not be proven.
     CleanupIncomplete,
@@ -240,6 +245,7 @@ impl OperationFailureCode {
             Self::UnsupportedCapability => "unsupported_capability",
             Self::InsufficientStorage => "insufficient_storage",
             Self::Busy => "operation_session_busy",
+            Self::EventConsumerUnavailable => "event_consumer_unavailable",
             Self::SessionUnavailable => "operation_session_unavailable",
             Self::Cancelled => "cancelled",
             Self::WriteFailed => "write_failed",
@@ -935,6 +941,8 @@ pub struct OperationSessionSnapshot {
     milestone: Option<OperationMilestone>,
     outcome: Option<OperationOutcome>,
     failure: Option<OperationFailureCode>,
+    completed_bytes: u64,
+    total_bytes: Option<u64>,
 }
 
 impl OperationSessionSnapshot {
@@ -962,6 +970,172 @@ impl OperationSessionSnapshot {
     pub const fn failure(&self) -> Option<OperationFailureCode> {
         self.failure
     }
+
+    /// Returns source bytes successfully written into private staging.
+    ///
+    /// This value counts complete source chunks confirmed written by the copy
+    /// loop. A chunk whose write fails is not counted even when the operating
+    /// system accepted part of it. The value remains zero for
+    /// `AlreadyUpToDate` and for failures or cancellation before copying.
+    /// Reaching `total_bytes` does not imply that validation, promotion, or
+    /// publication succeeded.
+    pub const fn completed_bytes(&self) -> u64 {
+        self.completed_bytes
+    }
+
+    /// Returns the planned source length for the most recently admitted execution.
+    ///
+    /// The value is `None` only before the first successful admission. Admission
+    /// publishes the length in the same locked state transition that marks the
+    /// session as executing. A refused busy admission leaves the previous snapshot,
+    /// including any previous value, unchanged.
+    pub const fn total_bytes(&self) -> Option<u64> {
+        self.total_bytes
+    }
+}
+
+/// One ordered semantic event observed during an operation execution.
+///
+/// The sequence number is local to a single admitted execution and starts at
+/// zero. Progress is not an event: hosts read the authoritative latest value
+/// from [`OperationSessionSnapshot`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct OperationEvent {
+    sequence: u64,
+    snapshot: OperationSessionSnapshot,
+    #[serde(flatten)]
+    event: OperationEventKind,
+}
+
+impl OperationEvent {
+    /// Returns the execution-local sequence number assigned to this event.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the immutable session state captured with this transition.
+    pub const fn snapshot(&self) -> OperationSessionSnapshot {
+        self.snapshot
+    }
+
+    /// Returns the typed semantic payload.
+    pub const fn event(&self) -> &OperationEventKind {
+        &self.event
+    }
+}
+
+/// The authoritative terminal event envelope retained by an operation session.
+///
+/// Hosts can recover this value after synchronous execution even when no event
+/// consumer was subscribed or event delivery failed. It is the latest result,
+/// not an event history; a successful later admission replaces it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationCompletion {
+    sequence: u64,
+    snapshot: OperationSessionSnapshot,
+    result: OperationResult,
+}
+
+impl OperationCompletion {
+    /// Returns the sequence number assigned to the logical `Completed` event.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the terminal state captured when the completion was emitted.
+    pub const fn snapshot(&self) -> OperationSessionSnapshot {
+        self.snapshot
+    }
+
+    /// Returns the complete authoritative filesystem operation result.
+    pub const fn result(&self) -> &OperationResult {
+        &self.result
+    }
+}
+
+/// A bounded semantic transition reported by an admitted operation execution.
+///
+/// Implementations emit at most one start, one event per recorded milestone,
+/// at most one cancellation decision, one failure diagnostic, one cleanup
+/// warning, and one terminal completion. The number of events therefore does
+/// not depend on the input size.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OperationEventKind {
+    /// Admission succeeded and the planned source length is known.
+    Started {
+        /// Planned source length in bytes.
+        total_bytes: u64,
+    },
+    /// Execution reached the recorded milestone.
+    Milestone {
+        /// Milestone reached by the execution.
+        milestone: OperationMilestone,
+    },
+    /// A cancellation request was accepted or refused.
+    CancellationRequested {
+        /// Whether the active execution accepted the request.
+        accepted: bool,
+    },
+    /// Execution failed with a stable diagnostic after its Failed milestone.
+    Failure {
+        /// Sanitized failure category; no filesystem paths or OS diagnostics.
+        code: OperationFailureCode,
+    },
+    /// Cleanup retained artifacts after its CleanupIncomplete milestone.
+    Warning {
+        /// Sanitized warning category; reconciliation data is in the result.
+        code: OperationFailureCode,
+    },
+    /// Execution produced its authoritative terminal result.
+    Completed {
+        /// Complete result, including any retained-artifact reconciliation data.
+        result: OperationResult,
+    },
+}
+
+/// The single logical semantic-event consumer associated with a session execution.
+///
+/// Dropping the consumer never blocks or fails execution. The authoritative
+/// terminal result remains available through [`OperationSession::last_result`].
+#[derive(Debug)]
+pub struct OperationEventConsumer {
+    receiver: std::sync::mpsc::Receiver<OperationEvent>,
+    state: Arc<Mutex<SessionState>>,
+    subscription: u64,
+}
+
+impl OperationEventConsumer {
+    /// Blocks until the next event arrives or the producer disconnects.
+    pub fn recv(&self) -> Result<OperationEvent, std::sync::mpsc::RecvError> {
+        self.receiver.recv()
+    }
+
+    /// Waits up to `timeout` for the next event.
+    pub fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<OperationEvent, std::sync::mpsc::RecvTimeoutError> {
+        self.receiver.recv_timeout(timeout)
+    }
+
+    /// Returns the next queued event without blocking.
+    pub fn try_recv(&self) -> Result<OperationEvent, std::sync::mpsc::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl Drop for OperationEventConsumer {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.phase == OperationSessionPhase::Idle
+            && state.event_subscription == Some(self.subscription)
+        {
+            state.event_subscription = None;
+            state.event_sender = None;
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -974,6 +1148,73 @@ struct SessionState {
     milestone: Option<OperationMilestone>,
     outcome: Option<OperationOutcome>,
     failure: Option<OperationFailureCode>,
+    completed_bytes: u64,
+    total_bytes: Option<u64>,
+    terminal_result: Option<OperationResult>,
+    terminal_completion: Option<OperationCompletion>,
+    execution_cancellation: Option<CancellationHandle>,
+    event_sender: Option<std::sync::mpsc::Sender<OperationEvent>>,
+    event_subscription: Option<u64>,
+    next_subscription: u64,
+    event_sequence: u64,
+    cancellation_event_emitted: bool,
+    emitted_milestone: Option<OperationMilestone>,
+}
+
+impl SessionState {
+    fn cancellation_flag(&self) -> bool {
+        self.cancel_requested
+            || self
+                .execution_cancellation
+                .as_ref()
+                .is_some_and(CancellationHandle::is_cancelled)
+    }
+
+    fn snapshot(&self) -> OperationSessionSnapshot {
+        OperationSessionSnapshot {
+            phase: self.phase,
+            status: self.status,
+            milestone: self.milestone,
+            outcome: self.outcome,
+            failure: self.failure,
+            completed_bytes: self.completed_bytes,
+            total_bytes: self.total_bytes,
+        }
+    }
+}
+
+fn emit_session_event(state: &mut SessionState, event: OperationEventKind) -> OperationEvent {
+    let sequence = state.event_sequence;
+    state.event_sequence = state.event_sequence.saturating_add(1);
+    let event = OperationEvent {
+        sequence,
+        snapshot: state.snapshot(),
+        event,
+    };
+    if let Some(sender) = state.event_sender.as_ref() {
+        let _ = sender.send(event.clone());
+    }
+    event
+}
+
+#[cfg(target_os = "macos")]
+fn record_session_milestone(state: &mut SessionState, milestone: OperationMilestone) {
+    state.milestone = Some(milestone);
+    if state.emitted_milestone != Some(milestone) {
+        state.emitted_milestone = Some(milestone);
+        emit_session_event(state, OperationEventKind::Milestone { milestone });
+    }
+}
+
+fn record_accepted_cancellation(state: &mut SessionState) {
+    state.status = OperationSessionStatus::CancellationRequested;
+    if !state.cancellation_event_emitted {
+        state.cancellation_event_emitted = true;
+        emit_session_event(
+            state,
+            OperationEventKind::CancellationRequested { accepted: true },
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1027,6 +1268,8 @@ impl OperationSession {
                 milestone: state.milestone,
                 outcome: state.outcome,
                 failure: state.failure,
+                completed_bytes: state.completed_bytes,
+                total_bytes: state.total_bytes,
             })
             .map_err(|_| OperationFailureCode::SessionUnavailable)
     }
@@ -1036,18 +1279,37 @@ impl OperationSession {
     /// Returns `true` when cancellation was recorded. Cancellation is refused
     /// once the operation enters `Promoting` or `Completing`. The finalization
     /// wrapper observes cancellation accepted before that handoff and returns
-    /// `Cancelled`; it enters `Completing` before non-cancellable cleanup,
+    /// `Cancelled` unless publication evidence is uncertain, in which case
+    /// `PublicationUncertain` takes precedence. It enters `Completing` before
+    /// non-cancellable cleanup,
     /// inventory, and result construction.
     pub fn cancel(&self) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if state.phase != OperationSessionPhase::Executing {
-            return false;
+        if state.phase == OperationSessionPhase::Executing {
+            if !state.cancel_requested {
+                state.cancel_requested = true;
+                record_accepted_cancellation(&mut state);
+            }
+            return true;
         }
-        state.cancel_requested = true;
-        state.status = OperationSessionStatus::CancellationRequested;
-        true
+        if matches!(
+            state.phase,
+            OperationSessionPhase::Promoting | OperationSessionPhase::Completing
+        ) && !state.cancellation_event_emitted
+            && matches!(
+                state.status,
+                OperationSessionStatus::Running | OperationSessionStatus::CancellationRequested
+            )
+        {
+            state.cancellation_event_emitted = true;
+            emit_session_event(
+                &mut state,
+                OperationEventKind::CancellationRequested { accepted: false },
+            );
+        }
+        false
     }
 
     /// Reports whether this shared session currently owns an executing operation.
@@ -1058,8 +1320,17 @@ impl OperationSession {
             .unwrap_or(true)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(test, target_os = "macos"))]
     fn admit(&self) -> Result<AdmissionGuard, OperationFailureCode> {
+        self.admit_with_cancellation(None, None)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn admit_with_cancellation(
+        &self,
+        cancellation: Option<&CancellationHandle>,
+        total_bytes: Option<u64>,
+    ) -> Result<AdmissionGuard, OperationFailureCode> {
         let mut state = self
             .state
             .lock()
@@ -1074,10 +1345,24 @@ impl OperationSession {
         let generation = state.generation;
         state.phase = OperationSessionPhase::Executing;
         state.status = OperationSessionStatus::Running;
-        state.cancel_requested = false;
+        state.cancel_requested = cancellation.is_some_and(CancellationHandle::is_cancelled);
         state.milestone = Some(OperationMilestone::Executing);
         state.outcome = None;
         state.failure = None;
+        state.completed_bytes = 0;
+        state.total_bytes = total_bytes;
+        state.terminal_result = None;
+        state.terminal_completion = None;
+        state.execution_cancellation = cancellation.cloned();
+        state.event_sequence = 0;
+        state.cancellation_event_emitted = false;
+        state.emitted_milestone = None;
+        if let Some(total_bytes) = total_bytes {
+            emit_session_event(&mut state, OperationEventKind::Started { total_bytes });
+        }
+        if state.cancellation_flag() {
+            record_accepted_cancellation(&mut state);
+        }
         Ok(AdmissionGuard {
             state: Arc::clone(&self.state),
             generation,
@@ -1089,8 +1374,17 @@ impl OperationSession {
     fn cancellation_requested(&self) -> Result<bool, OperationFailureCode> {
         self.state
             .lock()
-            .map(|state| state.cancel_requested)
+            .map(|state| state.cancellation_flag())
             .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn record_observed_cancellation(&self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.cancellation_flag()
+        {
+            record_accepted_cancellation(&mut state);
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -1099,7 +1393,8 @@ impl OperationSession {
             .state
             .lock()
             .map_err(|_| OperationFailureCode::SessionUnavailable)?;
-        if state.cancel_requested {
+        if state.cancellation_flag() {
+            record_accepted_cancellation(&mut state);
             return Ok(false);
         }
         if state.phase != OperationSessionPhase::Executing {
@@ -1129,10 +1424,13 @@ impl OperationSession {
             .lock()
             .map_err(|_| OperationFailureCode::SessionUnavailable)?;
         let cancellation_accepted = match state.phase {
-            OperationSessionPhase::Executing => state.cancel_requested,
+            OperationSessionPhase::Executing => state.cancellation_flag(),
             OperationSessionPhase::Promoting | OperationSessionPhase::Completing => false,
             OperationSessionPhase::Idle => return Err(OperationFailureCode::SessionUnavailable),
         };
+        if cancellation_accepted {
+            record_accepted_cancellation(&mut state);
+        }
         state.phase = OperationSessionPhase::Completing;
         Ok(!cancellation_accepted)
     }
@@ -1143,7 +1441,8 @@ impl OperationSession {
             .state
             .lock()
             .map_err(|_| OperationFailureCode::SessionUnavailable)?;
-        if state.cancel_requested {
+        if state.cancellation_flag() {
+            record_accepted_cancellation(&mut state);
             return Ok(false);
         }
         if state.phase != OperationSessionPhase::Executing {
@@ -1156,8 +1455,71 @@ impl OperationSession {
     #[cfg(target_os = "macos")]
     fn record_milestone(&self, milestone: OperationMilestone) {
         if let Ok(mut state) = self.state.lock() {
-            state.milestone = Some(milestone);
+            record_session_milestone(&mut state, milestone);
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn record_progress(&self, completed_bytes: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.completed_bytes = completed_bytes;
+        }
+    }
+
+    /// Returns the authoritative terminal result of the most recent execution.
+    ///
+    /// The result remains available until the next operation is admitted, even
+    /// when no event consumer exists or the consumer was dropped. An admission
+    /// refused as busy does not replace the active or previous result.
+    pub fn last_result(&self) -> Result<Option<OperationResult>, OperationFailureCode> {
+        self.state
+            .lock()
+            .map(|state| state.terminal_result.clone())
+            .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    /// Returns the latest complete terminal event and result, if an operation
+    /// has completed since the most recent successful admission.
+    ///
+    /// This recovery value is independent of event subscription and delivery.
+    /// A successful admission clears the previous completion; the new terminal
+    /// envelope is stored when that execution completes. A busy or failed
+    /// admission leaves the previous completion intact.
+    pub fn last_completion(&self) -> Result<Option<OperationCompletion>, OperationFailureCode> {
+        self.state
+            .lock()
+            .map(|state| state.terminal_completion.clone())
+            .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    /// Claims the single semantic-event consumer for the next execution.
+    ///
+    /// The subscription must be created while the session is idle. A second
+    /// live consumer, or a claim attempted during execution, is refused with
+    /// [`OperationFailureCode::EventConsumerUnavailable`]. Dropping the consumer
+    /// before execution releases the claim.
+    pub fn subscribe_events(&self) -> Result<OperationEventConsumer, OperationFailureCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?;
+        if state.phase != OperationSessionPhase::Idle || state.event_subscription.is_some() {
+            return Err(OperationFailureCode::EventConsumerUnavailable);
+        }
+        state.next_subscription = state
+            .next_subscription
+            .checked_add(1)
+            .ok_or(OperationFailureCode::SessionUnavailable)?;
+        let subscription = state.next_subscription;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        state.event_subscription = Some(subscription);
+        state.event_sender = Some(sender);
+        state.event_sequence = 0;
+        Ok(OperationEventConsumer {
+            receiver,
+            state: Arc::clone(&self.state),
+            subscription,
+        })
     }
 }
 
@@ -1174,8 +1536,10 @@ impl AdmissionGuard {
         if let Ok(mut state) = self.state.lock()
             && state.generation == self.generation
         {
+            let cancellation_observed = state.cancellation_flag();
             state.phase = OperationSessionPhase::Idle;
             state.cancel_requested = false;
+            state.execution_cancellation = None;
             state.status = match result.state() {
                 JobState::Succeeded => OperationSessionStatus::Succeeded,
                 JobState::Failed => OperationSessionStatus::Failed,
@@ -1184,6 +1548,56 @@ impl AdmissionGuard {
             state.milestone = result.milestones().last().copied();
             state.outcome = result.outcome();
             state.failure = result.failure().map(OperationFailure::code);
+            if cancellation_observed && !state.cancellation_event_emitted {
+                state.cancellation_event_emitted = true;
+                emit_session_event(
+                    &mut state,
+                    OperationEventKind::CancellationRequested {
+                        accepted: result.state() == JobState::Cancelled,
+                    },
+                );
+            }
+            // The authoritative result is recorded before the terminal event is
+            // published, so a failed or absent delivery cannot lose completion.
+            state.terminal_result = Some(result.clone());
+            // Final inventory can change a failure into PublicationUncertain.
+            // Emit finalization transitions from that authoritative result,
+            // in its milestone order, without replaying execution milestones.
+            for &milestone in result.milestones() {
+                let diagnostic = match milestone {
+                    OperationMilestone::Failed => {
+                        result.failure().map(|failure| OperationEventKind::Failure {
+                            code: failure.code(),
+                        })
+                    }
+                    OperationMilestone::Cancelled => None,
+                    OperationMilestone::CleanupIncomplete => {
+                        result
+                            .cleanup_warning()
+                            .map(|warning| OperationEventKind::Warning {
+                                code: warning.code(),
+                            })
+                    }
+                    _ => continue,
+                };
+                record_session_milestone(&mut state, milestone);
+                if let Some(event) = diagnostic {
+                    emit_session_event(&mut state, event);
+                }
+            }
+            let completed = emit_session_event(
+                &mut state,
+                OperationEventKind::Completed {
+                    result: result.clone(),
+                },
+            );
+            state.terminal_completion = Some(OperationCompletion {
+                sequence: completed.sequence,
+                snapshot: completed.snapshot,
+                result: result.clone(),
+            });
+            state.event_sender = None;
+            state.event_subscription = None;
         }
         self.active = false;
     }
@@ -1201,6 +1615,9 @@ impl Drop for AdmissionGuard {
             }
             state.phase = OperationSessionPhase::Idle;
             state.cancel_requested = false;
+            state.execution_cancellation = None;
+            state.event_sender = None;
+            state.event_subscription = None;
             if matches!(
                 state.status,
                 OperationSessionStatus::Running | OperationSessionStatus::CancellationRequested
@@ -1254,6 +1671,9 @@ struct FileEvidence {
 pub(crate) fn plan_copy_through(
     request: CopyThroughRequest,
 ) -> Result<OperationPlan, OperationError> {
+    #[cfg(all(test, target_os = "macos"))]
+    run_copy_planning_checkpoint();
+
     #[cfg(not(target_os = "macos"))]
     {
         let _ = request;
@@ -1266,6 +1686,15 @@ pub(crate) fn plan_copy_through(
     {
         plan_copy_through_unix(request)
     }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn run_copy_planning_checkpoint() {
+    COPY_PLANNING_CHECKPOINT.with(|slot| {
+        if let Some(checkpoint) = slot.take() {
+            checkpoint();
+        }
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -2345,6 +2774,39 @@ pub(crate) fn execute_operation(
     }
 }
 
+/// Executes a consumed plan with cancellation bound to this invocation.
+///
+/// The handle is attached only while this execution holds admission. A request
+/// made before admission is observed before any workspace or staging entry is
+/// created. The existing OperationSession::cancel path is unchanged.
+pub(crate) fn execute_operation_with_cancellation(
+    plan: OperationPlan,
+    session: &OperationSession,
+    cancellation: &CancellationHandle,
+) -> OperationResult {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (plan, session, cancellation);
+        failed_result(
+            vec![OperationMilestone::Planned],
+            OperationFailureCode::UnsupportedCapability,
+            false,
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let planned_length = plan.source_baseline.snapshot.len;
+        execute_with_producer_with_cancellation(
+            plan,
+            session,
+            move |source, stage, session| {
+                copy_source_to_stage_with_length(source, stage, planned_length, session)
+            },
+            Some(cancellation),
+        )
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn execute_with_producer<P>(
     plan: OperationPlan,
@@ -2354,22 +2816,83 @@ fn execute_with_producer<P>(
 where
     P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
 {
-    execute_with_producer_and_checkpoint(plan, session, producer, |_| {})
+    execute_with_producer_with_cancellation(plan, session, producer, None)
 }
 
 #[cfg(target_os = "macos")]
+fn execute_with_producer_with_cancellation<P>(
+    plan: OperationPlan,
+    session: &OperationSession,
+    producer: P,
+    cancellation: Option<&CancellationHandle>,
+) -> OperationResult
+where
+    P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
+{
+    execute_with_producer_and_checkpoint_with_cancellation(
+        plan,
+        session,
+        producer,
+        |_| {},
+        cancellation,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[cfg(test)]
 fn execute_with_producer_and_checkpoint<P, H>(
     plan: OperationPlan,
     session: &OperationSession,
     producer: P,
+    checkpoint: H,
+) -> OperationResult
+where
+    P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
+    H: FnMut(ExecutionCheckpoint),
+{
+    execute_with_producer_and_checkpoint_with_cancellation(
+        plan, session, producer, checkpoint, None,
+    )
+}
+
+#[cfg(target_os = "macos")]
+#[cfg(test)]
+fn execute_with_producer_and_checkpoint_and_cancellation<P, H>(
+    plan: OperationPlan,
+    session: &OperationSession,
+    producer: P,
+    checkpoint: H,
+    cancellation: &CancellationHandle,
+) -> OperationResult
+where
+    P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
+    H: FnMut(ExecutionCheckpoint),
+{
+    execute_with_producer_and_checkpoint_with_cancellation(
+        plan,
+        session,
+        producer,
+        checkpoint,
+        Some(cancellation),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn execute_with_producer_and_checkpoint_with_cancellation<P, H>(
+    plan: OperationPlan,
+    session: &OperationSession,
+    producer: P,
     mut checkpoint: H,
+    cancellation: Option<&CancellationHandle>,
 ) -> OperationResult
 where
     P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
     H: FnMut(ExecutionCheckpoint),
 {
     let mut milestones = vec![OperationMilestone::Planned];
-    let mut admission = match session.admit() {
+    let admission =
+        session.admit_with_cancellation(cancellation, Some(plan.source_baseline.snapshot.len));
+    let mut admission = match admission {
         Ok(admission) => admission,
         Err(code) => return failed_result(milestones, code, false),
     };
@@ -2410,7 +2933,15 @@ where
     }
     match finalization {
         Ok(true) => {}
-        Ok(false) => execution = Err(OperationFailureCode::Cancelled),
+        Ok(false) => {
+            // A cancellation decision cannot turn uncertain publication evidence into a
+            // clean cancellation. Inventorying the competitor below usually discovers the
+            // same condition, but terminal-result precedence must not depend on that later
+            // inventory step succeeding.
+            if !matches!(execution, Err(OperationFailureCode::PublicationUncertain)) {
+                execution = Err(OperationFailureCode::Cancelled);
+            }
+        }
         Err(_) => execution = Err(OperationFailureCode::SessionUnavailable),
     }
     cleanup_artifact_retained |= cleanup_artifacts(&mut artifacts);
@@ -2642,8 +3173,14 @@ where
         .map_err(|_| OperationFailureCode::SourceUnavailable)?;
     verify_file_evidence(&mut source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
-    acquire_source_lock(&source_file, &source_directory, plan, session, checkpoint)?;
     let source_guard = source_lock.insert(SourceLockGuard { file: source_file });
+    acquire_source_lock(
+        &source_guard.file,
+        &source_directory,
+        plan,
+        session,
+        checkpoint,
+    )?;
     let source_file = &mut source_guard.file;
     verify_file_evidence(source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
@@ -2751,6 +3288,11 @@ where
             .path
             .file_name()
             .ok_or(OperationFailureCode::UnsafePath)?;
+        // Reserve the inventory descriptor before creating an owned directory.
+        // A later open/identity failure must still leave a reportable artifact.
+        let parent_handle = workspace_directory
+            .try_clone()
+            .map_err(|_| OperationFailureCode::WriteFailed)?;
         match make_directory_at(&workspace_directory, workspace_name) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -2758,10 +3300,8 @@ where
             }
             Err(_) => return Err(OperationFailureCode::WorkspaceUnavailable),
         }
-        let created_directory = open_directory_at(&workspace_directory, workspace_name)
-            .map_err(|_| OperationFailureCode::UnsupportedCapability)?;
-        let created_identity = handle_identity(&created_directory)
-            .ok_or(OperationFailureCode::UnsupportedCapability)?;
+        let created_directory = open_directory_at(&workspace_directory, workspace_name).ok();
+        let created_identity = created_directory.as_ref().and_then(handle_identity);
         let parent_identity = handle_identity(&workspace_directory);
         let id = next_artifact_id(artifacts);
         let parent_artifact_id =
@@ -2771,23 +3311,23 @@ where
             parent_artifact_id,
             relative_name: PathBuf::from(workspace_name),
             parent_identity,
-            directory: workspace_directory
-                .try_clone()
-                .map_err(|_| OperationFailureCode::WriteFailed)?,
+            directory: parent_handle,
             name: workspace_name.to_os_string(),
             path: plan.workspace.path.clone(),
-            identity: Some(created_identity),
+            identity: created_identity,
             kind: OwnedArtifactKind::Directory,
             role: OperationArtifactRole::WorkspaceDirectory,
             length: None,
             sha256: None,
-            path_identity: Some(created_identity),
+            path_identity: created_identity,
             path_length: None,
             keep: true,
         });
         *cleanup_artifact_retained = true;
-        workspace_directory = created_directory;
-        workspace_runtime_identity = Some(created_identity);
+        workspace_directory =
+            created_directory.ok_or(OperationFailureCode::UnsupportedCapability)?;
+        workspace_runtime_identity =
+            Some(created_identity.ok_or(OperationFailureCode::UnsupportedCapability)?);
         validate_directory_route(&plan.workspace, workspace_runtime_identity)?;
     }
 
@@ -3095,6 +3635,7 @@ fn check_cancelled(session: &OperationSession) -> Result<(), OperationFailureCod
         .cancellation_requested()
         .map_err(|_| OperationFailureCode::SessionUnavailable)?
     {
+        session.record_observed_cancellation();
         Err(OperationFailureCode::Cancelled)
     } else {
         Ok(())
@@ -3158,6 +3699,7 @@ fn copy_source_to_stage_with_length_and_checkpoint(
         remaining = remaining
             .checked_sub(read as u64)
             .ok_or(OperationFailureCode::SourceChanged)?;
+        session.record_progress(planned_length.saturating_sub(remaining));
         after_chunk();
     }
 
@@ -3197,9 +3739,18 @@ fn acquire_destination_lock(
     {
         return Err(OperationFailureCode::UnsafePath);
     }
+    // Own the descriptor before any locked validation can fail. Closing it
+    // alone does not release a lock inherited by another process.
+    let lock = DestinationLock {
+        _file: lock,
+        marker_name: name.to_os_string(),
+        marker_identity: lock_identity,
+        parent_identity,
+        parent_path: parent_path.to_path_buf(),
+    };
     loop {
         check_cancelled(session)?;
-        match lock.try_lock_exclusive() {
+        match lock._file.try_lock_exclusive() {
             Ok(()) => break,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 checkpoint(ExecutionCheckpoint::DestinationLockWait);
@@ -3214,13 +3765,7 @@ fn acquire_destination_lock(
     if handle_identity(&named_lock) != Some(lock_identity) {
         return Err(OperationFailureCode::StalePlan);
     }
-    Ok(DestinationLock {
-        _file: lock,
-        marker_name: name.to_os_string(),
-        marker_identity: lock_identity,
-        parent_identity,
-        parent_path: parent_path.to_path_buf(),
-    })
+    Ok(lock)
 }
 
 #[cfg(target_os = "macos")]
@@ -3290,6 +3835,20 @@ fn acquire_source_lock(
 struct SourceLockGuard {
     /// Locked source descriptor held until terminal result construction ends.
     file: File,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SourceLockGuard {
+    fn drop(&mut self) {
+        // Closing this descriptor alone may leave the lock held by a descriptor
+        // inherited across fork. Release the shared lock at terminal finalization
+        // even when another reference to the open file description survives.
+        while let Err(error) = fs2::FileExt::unlock(&self.file) {
+            if error.kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3429,6 +3988,18 @@ fn make_directory_at(parent: &File, name: &OsStr) -> io::Result<()> {
 
 #[cfg(target_os = "macos")]
 fn open_directory_at(parent: &File, name: &OsStr) -> io::Result<File> {
+    #[cfg(test)]
+    if TEST_DIRECTORY_OPEN_FAILURE.with(|failure| {
+        let mut failure = failure.borrow_mut();
+        if failure.as_deref() == Some(name) {
+            failure.take();
+            true
+        } else {
+            false
+        }
+    }) {
+        return Err(io::Error::from_raw_os_error(libc::EMFILE));
+    }
     let name = c_name(name)?;
     // SAFETY: the descriptor refers to an open directory; flags prevent
     // following a symbolic link or opening a non-directory entry.
@@ -3766,6 +4337,16 @@ fn retain_late_destination_competitors(
         }
 
         let alias_name = OsString::from("entry");
+        // Reserve bookkeeping before linkat. Once it succeeds, register the
+        // alias before any observation can fail, keeping unknown evidence unknown.
+        let alias_parent = clone_competitor_inventory_directory(&private_directory)
+            .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+        let alias_parent_identity = private_directory_identity;
+        let alias_parent_artifact_id = parent_artifact_id_for_path(
+            artifacts,
+            &private_directory_path,
+            Some(alias_parent_identity),
+        );
         checkpoint(ExecutionCheckpoint::BeforeCompetitorLink);
         if hard_link_at(
             &parent_directory,
@@ -3777,9 +4358,28 @@ fn retain_late_destination_competitors(
         {
             return Err(OperationFailureCode::PublicationUncertain);
         }
+        let alias_path = private_directory_path.join(&alias_name);
+        let alias_artifact_id = next_artifact_id(artifacts);
+        let alias_index = artifacts.len();
+        artifacts.push(OwnedArtifact {
+            id: alias_artifact_id,
+            parent_artifact_id: alias_parent_artifact_id,
+            relative_name: PathBuf::from(&alias_name),
+            parent_identity: Some(alias_parent_identity),
+            directory: alias_parent,
+            name: alias_name.clone(),
+            path: alias_path,
+            identity: None,
+            kind: OwnedArtifactKind::File,
+            role: OperationArtifactRole::UncertainEntry,
+            length: None,
+            sha256: None,
+            path_identity: None,
+            path_length: None,
+            keep: false,
+        });
         checkpoint(ExecutionCheckpoint::AfterCompetitorLink);
 
-        let alias_path = private_directory_path.join(&alias_name);
         let mut alias_file = open_file_at(&private_directory, &alias_name).ok();
         let alias_path_identity = alias_file.as_ref().and_then(handle_identity);
         let alias_path_length = alias_file
@@ -3824,34 +4424,12 @@ fn retain_late_destination_competitors(
                 (alias_path_identity == Some(observed_evidence.identity))
                     .then_some(observed_evidence.sha256)
             });
-        let alias_parent_identity = handle_identity(&private_directory)
-            .ok_or(OperationFailureCode::PublicationUncertain)?;
-        let alias_parent_artifact_id = parent_artifact_id_for_path(
-            artifacts,
-            &private_directory_path,
-            Some(alias_parent_identity),
-        );
-        let alias_parent = private_directory
-            .try_clone()
-            .map_err(|_| OperationFailureCode::PublicationUncertain)?;
-        let alias_artifact_id = next_artifact_id(artifacts);
-        artifacts.push(OwnedArtifact {
-            id: alias_artifact_id,
-            parent_artifact_id: alias_parent_artifact_id,
-            relative_name: PathBuf::from(&alias_name),
-            parent_identity: Some(alias_parent_identity),
-            directory: alias_parent,
-            name: alias_name,
-            path: alias_path,
-            identity: alias_identity,
-            kind: OwnedArtifactKind::File,
-            role: OperationArtifactRole::UncertainEntry,
-            length: alias_length,
-            sha256: alias_digest,
-            path_identity: alias_path_identity,
-            path_length: alias_path_length,
-            keep: false,
-        });
+        let alias_artifact = &mut artifacts[alias_index];
+        alias_artifact.identity = alias_identity;
+        alias_artifact.length = alias_length;
+        alias_artifact.sha256 = alias_digest;
+        alias_artifact.path_identity = alias_path_identity;
+        alias_artifact.path_length = alias_path_length;
         if !alias_verified {
             return Err(OperationFailureCode::PublicationUncertain);
         }
@@ -3865,6 +4443,15 @@ fn retain_late_destination_competitors(
         anchored_count += 1;
         checkpoint(ExecutionCheckpoint::AfterCompetitorRetention);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn clone_competitor_inventory_directory(directory: &File) -> io::Result<File> {
+    #[cfg(test)]
+    if TEST_COMPETITOR_INVENTORY_DUP_FAILURE.with(|failure| failure.replace(false)) {
+        return Err(io::Error::from_raw_os_error(libc::EMFILE));
+    }
+    directory.try_clone()
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -4650,6 +5237,17 @@ struct DestinationLock {
 }
 
 #[cfg(target_os = "macos")]
+impl Drop for DestinationLock {
+    fn drop(&mut self) {
+        while let Err(error) = fs2::FileExt::unlock(&self._file) {
+            if error.kind() != io::ErrorKind::Interrupted {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, OperationFailureCode> {
     let PublicationContext {
         plan,
@@ -5010,14 +5608,19 @@ fn publish_replacement(
             return Err(OperationFailureCode::PublicationUncertain);
         }
     };
-    update_artifact_evidence(
-        artifacts,
-        stage_name,
-        Some(current_displaced_evidence.identity),
-        OperationArtifactRole::DisplacedDestination,
-        Some(current_displaced_evidence.snapshot.len),
-        Some(current_displaced_evidence.sha256),
-    );
+    if current_displaced_evidence.identity == displaced_evidence.identity {
+        // Same-inode content changes refresh evidence. A different identity at
+        // this pathname is an unrelated current-path object, not the displaced
+        // destination, so preserve the original recorded identity.
+        update_artifact_evidence(
+            artifacts,
+            stage_name,
+            Some(current_displaced_evidence.identity),
+            OperationArtifactRole::DisplacedDestination,
+            Some(current_displaced_evidence.snapshot.len),
+            Some(current_displaced_evidence.sha256),
+        );
+    }
     if current_displaced_evidence != displaced_evidence {
         mark_artifact_retained(artifacts, stage_name);
         *cleanup_artifact_retained = true;
@@ -5194,6 +5797,12 @@ fn mark_artifact_retained(artifacts: &mut [OwnedArtifact], name: &OsStr) {
 
 #[cfg(all(test, target_os = "macos"))]
 thread_local! {
+    static TEST_COMPETITOR_INVENTORY_DUP_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    // A single named open fails after mkdirat, without exhausting the process's
+    // descriptors or affecting tests running on other threads.
+    static TEST_DIRECTORY_OPEN_FAILURE: std::cell::RefCell<Option<OsString>> =
+        const { std::cell::RefCell::new(None) };
     static TEST_ARTIFACT_NAME_QUEUE:
         std::cell::RefCell<std::collections::VecDeque<OsString>> =
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
@@ -5220,6 +5829,158 @@ mod tests {
     fn plan(source: &Path, destination: &Path, workspace: &Path) -> OperationPlan {
         plan_copy_through(CopyThroughRequest::new(source, destination, workspace))
             .expect("create operation plan")
+    }
+
+    /// Holds inherited descriptors until the parent signals the release socket.
+    /// The fork child uses only async-signal-safe syscalls and never resumes Rust
+    /// execution or destructors from the multithreaded test harness.
+    struct InheritedDescriptorHolder {
+        release: Option<std::os::unix::net::UnixStream>,
+        child: libc::pid_t,
+    }
+
+    impl InheritedDescriptorHolder {
+        fn new() -> Self {
+            let (parent, child) = std::os::unix::net::UnixStream::pair().unwrap();
+            let parent_fd = parent.as_raw_fd();
+            let child_fd = child.as_raw_fd();
+            // SAFETY: the child only closes, reads, and exits via libc. It does
+            // not touch locks, allocation, or Rust-owned resources after fork.
+            let pid = unsafe { libc::fork() };
+            assert!(pid >= 0, "fork descriptor holder");
+            if pid == 0 {
+                let mut byte = 0_u8;
+                // SAFETY: the descriptors are valid inherited socket ends, and
+                // byte is writable storage. _exit avoids inherited destructors.
+                unsafe {
+                    libc::close(parent_fd);
+                    loop {
+                        let count = libc::read(child_fd, (&mut byte as *mut u8).cast(), 1);
+                        if count >= 0 || *libc::__error() != libc::EINTR {
+                            break;
+                        }
+                    }
+                    libc::_exit(0);
+                }
+            }
+            drop(child);
+            Self {
+                release: Some(parent),
+                child: pid,
+            }
+        }
+    }
+
+    impl Drop for InheritedDescriptorHolder {
+        fn drop(&mut self) {
+            if let Some(mut release) = self.release.take() {
+                // An explicit byte also works when another concurrent fork
+                // inherited a reference to the parent's socket endpoint.
+                let _ = release.write_all(&[1]);
+            }
+            // SAFETY: this holder owns the child PID; no other code reaps it.
+            while unsafe { libc::waitpid(self.child, std::ptr::null_mut(), 0) } < 0 {
+                if io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn assert_destination_lock_released_with_inherited_reference(retarget: bool) {
+        let (root, source, destination, workspace) = fixture();
+        let plan = plan(&source, &destination, &workspace);
+        let marker = plan.snapshot().destination_lock_path().to_path_buf();
+        let displaced = root.path().join("displaced-destination-marker");
+        let mut holder = None;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::DestinationLockAcquired && holder.is_none() {
+                    holder = Some(InheritedDescriptorHolder::new());
+                    if retarget {
+                        fs::rename(&marker, &displaced).unwrap();
+                        fs::write(&marker, b"replacement marker").unwrap();
+                    }
+                }
+            },
+        );
+        assert!(holder.is_some());
+        if retarget {
+            assert_eq!(
+                result.failure().unwrap().code(),
+                OperationFailureCode::StalePlan
+            );
+            assert!(!destination.exists());
+        } else {
+            assert_eq!(result.state(), JobState::Succeeded, "{result:?}");
+        }
+        let contender = File::open(if retarget { &displaced } else { &marker }).unwrap();
+        let acquired = fs2::FileExt::try_lock_exclusive(&contender);
+        drop(holder);
+        acquired.expect("destination lock must release before the inherited reference closes");
+        fs2::FileExt::unlock(&contender).unwrap();
+    }
+
+    #[test]
+    fn destination_lock_release_does_not_wait_for_inherited_descriptor_close() {
+        assert_destination_lock_released_with_inherited_reference(false);
+    }
+
+    #[test]
+    fn destination_lock_validation_failure_releases_inherited_lock() {
+        assert_destination_lock_released_with_inherited_reference(true);
+    }
+
+    #[test]
+    fn competitor_inventory_descriptor_failure_does_not_leave_unreported_alias() {
+        let (_root, source, destination, workspace) = fixture();
+        let plan = plan(&source, &destination, &workspace);
+        let temporary = workspace.join("competitor.tmp");
+        let mut installed = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforeArtifactInventory && !installed {
+                    installed = true;
+                    fs::write(&temporary, b"late competitor").unwrap();
+                    fs::rename(&temporary, &destination).unwrap();
+                    TEST_COMPETITOR_INVENTORY_DUP_FAILURE.with(|failure| failure.set(true));
+                }
+            },
+        );
+        assert!(installed);
+        assert_eq!(
+            result.failure().unwrap().code(),
+            OperationFailureCode::PublicationUncertain
+        );
+        assert!(result.cleanup_artifact_retained());
+        assert!(result.cleanup_warning().is_some());
+        let mut checked = false;
+        for artifact in result.artifacts() {
+            if artifact.role() == OperationArtifactRole::PrivateStagingDirectory
+                && artifact.path().exists()
+            {
+                checked = true;
+                for entry in fs::read_dir(artifact.path()).unwrap() {
+                    let path = entry.unwrap().path();
+                    assert!(
+                        result
+                            .artifacts()
+                            .iter()
+                            .any(|record| record.path() == path),
+                        "created alias is missing from terminal inventory: {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        assert!(checked, "inspect retained competitor directory");
+        assert_eq!(fs::read(destination).unwrap(), b"late competitor");
     }
 
     fn stage_file_in(workspace: &Path) -> PathBuf {
@@ -7068,6 +7829,60 @@ mod tests {
     }
 
     #[test]
+    fn source_lock_release_does_not_wait_for_inherited_descriptor_close() {
+        let (_root, source, _destination, _workspace) = fixture();
+        let file = File::open(&source).expect("open source");
+        fs2::FileExt::try_lock_shared(&file).expect("lock source");
+        let guard = SourceLockGuard { file };
+        // dup and fork retain references to the same open file description.
+        // Keeping a duplicate alive deterministically exercises that lifetime
+        // without forking the multithreaded Rust test process.
+        let inherited = guard.file.try_clone().expect("duplicate locked descriptor");
+        let contender = File::open(&source).expect("open independent contender");
+        assert_eq!(
+            fs2::FileExt::try_lock_exclusive(&contender)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(guard);
+        fs2::FileExt::try_lock_exclusive(&contender)
+            .expect("terminal release must unlock even while an inherited reference survives");
+        fs2::FileExt::unlock(&contender).expect("unlock contender");
+        drop(inherited);
+    }
+
+    #[test]
+    fn created_workspace_open_failure_is_reported_in_terminal_artifacts() {
+        let (_root, source, destination, workspace) = fixture();
+        fs::remove_dir(&workspace).expect("request a new workspace");
+        let plan = plan(&source, &destination, &workspace);
+        TEST_DIRECTORY_OPEN_FAILURE.with(|failure| {
+            *failure.borrow_mut() = workspace.file_name().map(OsStr::to_os_string);
+        });
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |_| {},
+        );
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            result.failure().unwrap().code(),
+            OperationFailureCode::UnsupportedCapability
+        );
+        assert!(
+            workspace.is_dir(),
+            "mkdirat succeeded before the injected open failure"
+        );
+        assert_cleanup_incomplete(&result);
+        let retained = retained_artifact(&result, OperationArtifactRole::WorkspaceDirectory);
+        assert_eq!(retained.path(), workspace.canonicalize().unwrap());
+        assert!(!destination.exists());
+        assert_eq!(fs::read(source).unwrap(), b"operation test source bytes");
+    }
+
+    #[test]
     fn independent_sessions_serialize_and_revalidate_the_same_destination() {
         let (_root, source, destination, workspace) = fixture();
         let first_plan = plan(&source, &destination, &workspace);
@@ -7607,6 +8422,111 @@ mod tests {
             Some(Sha256Digest::digest(concurrent_bytes))
         );
         assert_eq!(fs::read(retained.path()).unwrap(), concurrent_bytes);
+    }
+
+    #[test]
+    fn replacement_substitution_preserves_displaced_identity_and_reports_current_uncertainty() {
+        let (root, source, destination, workspace) = fixture();
+        let original_destination = b"planned destination baseline";
+        let substitute_bytes = b"unowned replacement at displaced stage path";
+        let moved_original = root.path().join("retained-original-destination.bin");
+        fs::write(&destination, original_destination).expect("write destination baseline");
+        let original_identity =
+            handle_identity(&File::open(&destination).unwrap()).expect("read destination identity");
+        let plan = plan_copy_through(
+            CopyThroughRequest::new(&source, &destination, &workspace)
+                .with_conflict_policy(ConflictPolicy::Replace),
+        )
+        .expect("plan replacement");
+        let mut substituted = false;
+        let mut substituted_stage_path = None;
+        let mut substitute_identity = None;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::AfterDisplacedEntryValidation && !substituted
+                {
+                    substituted = true;
+                    let stage_directory = fs::read_dir(&workspace)
+                        .expect("read operation workspace")
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|path| {
+                            path.is_dir()
+                                && path.file_name().is_some_and(|name| {
+                                    name.to_string_lossy().starts_with(".nscb-stage-area-")
+                                })
+                        })
+                        .expect("find private staging directory");
+                    let stage_path = fs::read_dir(stage_directory)
+                        .expect("read private staging directory")
+                        .filter_map(Result::ok)
+                        .map(|entry| entry.path())
+                        .find(|path| {
+                            path.is_file()
+                                && handle_identity(&File::open(path).unwrap())
+                                    == Some(original_identity)
+                        })
+                        .expect("find displaced destination entry");
+                    fs::rename(&stage_path, &moved_original)
+                        .expect("move originally displaced destination");
+                    fs::write(&stage_path, substitute_bytes)
+                        .expect("substitute displaced stage pathname");
+                    substitute_identity = handle_identity(&File::open(&stage_path).unwrap());
+                    substituted_stage_path = Some(stage_path);
+                }
+            },
+        );
+        assert!(
+            substituted,
+            "test must substitute the path after displaced-entry validation"
+        );
+        let substituted_stage_path = substituted_stage_path.expect("record substituted stage path");
+        let substitute_identity = substitute_identity.expect("record substitute identity");
+        assert_eq!(result.state(), JobState::Failed, "{result:?}");
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(fs::read(&moved_original).unwrap(), original_destination);
+        assert_eq!(fs::read(&substituted_stage_path).unwrap(), substitute_bytes);
+        assert_cleanup_incomplete(&result);
+
+        let displaced = retained_artifact(&result, OperationArtifactRole::DisplacedDestination);
+        assert_eq!(
+            fs::canonicalize(displaced.path()).unwrap(),
+            fs::canonicalize(&substituted_stage_path).unwrap()
+        );
+        assert_eq!(displaced.device(), Some(original_identity.device()));
+        assert_eq!(displaced.inode(), Some(original_identity.inode()));
+        assert_eq!(
+            displaced.recorded_length(),
+            Some(original_destination.len() as u64)
+        );
+        assert_eq!(
+            displaced.recorded_sha256(),
+            Some(Sha256Digest::digest(original_destination))
+        );
+        assert_eq!(displaced.length(), None);
+        assert_eq!(displaced.sha256(), None);
+        assert_eq!(displaced.path_identity_matches(), Some(false));
+        assert_eq!(
+            displaced.path_device().zip(displaced.path_inode()),
+            Some((substitute_identity.device(), substitute_identity.inode()))
+        );
+        assert_eq!(displaced.path_length(), Some(substitute_bytes.len() as u64));
+        assert_eq!(
+            result.failure().unwrap().code(),
+            OperationFailureCode::PublicationUncertain
+        );
+
+        let backup = retained_artifact(&result, OperationArtifactRole::DestinationBackup);
+        assert_eq!(fs::read(backup.path()).unwrap(), original_destination);
+        let published = retained_artifact(&result, OperationArtifactRole::PublishedDestination);
+        assert_eq!(
+            fs::read(published.path()).unwrap(),
+            fs::read(&source).unwrap()
+        );
+        assert_eq!(result.retained_storage_bytes(), None);
     }
 
     #[test]
@@ -9488,6 +10408,178 @@ mod tests {
     }
 
     #[test]
+    fn accepted_cancellation_does_not_mask_unverified_publication_uncertainty() {
+        let (_root, source, destination, workspace) = fixture();
+        let first_bytes = b"competitor bytes first";
+        let plan = plan(&source, &destination, &workspace);
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().expect("claim event consumer");
+        let cancellation = CancellationHandle::new();
+        let mut inserted = false;
+        let mut removed = false;
+
+        let result = execute_with_producer_and_checkpoint_and_cancellation(
+            plan,
+            &session,
+            copy_source_to_stage,
+            |checkpoint| match checkpoint {
+                ExecutionCheckpoint::BeforePromotion if !inserted => {
+                    fs::write(&destination, first_bytes).expect("install destination competitor");
+                    inserted = true;
+                }
+                ExecutionCheckpoint::DestinationCompetitorBeforeOpen if !removed => {
+                    fs::remove_file(&destination).expect("remove destination competitor");
+                    removed = true;
+                }
+                ExecutionCheckpoint::BeforeFinalization => {
+                    cancellation.cancel();
+                }
+                _ => {}
+            },
+            &cancellation,
+        );
+
+        assert!(inserted);
+        assert!(removed);
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+        assert!(!destination.exists());
+        assert!(result.milestones().contains(&OperationMilestone::Failed));
+        assert!(!result.milestones().contains(&OperationMilestone::Cancelled));
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert!(!events.iter().any(|event| matches!(
+            event.event(),
+            OperationEventKind::Milestone {
+                milestone: OperationMilestone::Cancelled
+            }
+        )));
+        let failed = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.event(),
+                    OperationEventKind::Milestone {
+                        milestone: OperationMilestone::Failed
+                    }
+                )
+            })
+            .expect("final failure milestone");
+        assert!(matches!(
+            events[failed + 1].event(),
+            OperationEventKind::Failure {
+                code: OperationFailureCode::PublicationUncertain
+            }
+        ));
+        assert!(matches!(
+            events.last().map(OperationEvent::event),
+            Some(OperationEventKind::Completed { result: terminal }) if terminal == &result
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event.event(),
+            OperationEventKind::CancellationRequested { accepted: true }
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), OperationEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn accepted_cancellation_before_replacement_preserves_the_destination() {
+        let (_root, source, destination, workspace) = fixture();
+        let source_bytes = b"replacement source bytes".to_vec();
+        let destination_bytes = b"original destination bytes".to_vec();
+        fs::write(&source, &source_bytes).expect("write replacement source");
+        fs::write(&destination, &destination_bytes).expect("write original destination");
+        let plan = crate::Engine::new()
+            .plan_copy_through(
+                CopyThroughRequest::new(&source, &destination, &workspace)
+                    .with_conflict_policy(ConflictPolicy::Replace),
+            )
+            .expect("create replacement plan");
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().expect("claim event consumer");
+        let cancellation = CancellationHandle::new();
+
+        let result = execute_with_producer_and_checkpoint_and_cancellation(
+            plan,
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion {
+                    cancellation.cancel();
+                }
+            },
+            &cancellation,
+        );
+
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(
+            fs::read(&destination).expect("read destination"),
+            destination_bytes
+        );
+        assert_eq!(fs::read(&source).expect("read source"), source_bytes);
+        assert!(!result.milestones().contains(&OperationMilestone::Published));
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert!(events.iter().any(|event| matches!(
+            event.event(),
+            OperationEventKind::CancellationRequested { accepted: true }
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), OperationEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn accepted_handle_cancellation_sets_the_live_cancellation_status() {
+        let (_root, source, destination, workspace) = fixture();
+        let plan = plan(&source, &destination, &workspace);
+        let session = OperationSession::new();
+        let cancellation = CancellationHandle::new();
+        let mut observed_cancellation_status = false;
+
+        let result = execute_with_producer_and_checkpoint_and_cancellation(
+            plan,
+            &session,
+            copy_source_to_stage,
+            |checkpoint| match checkpoint {
+                ExecutionCheckpoint::BeforeAtomicPromotion => {
+                    cancellation.cancel();
+                }
+                ExecutionCheckpoint::BeforeArtifactInventory => {
+                    let snapshot = session.current_operation().expect("cancellation snapshot");
+                    assert_eq!(snapshot.phase(), OperationSessionPhase::Completing);
+                    assert_eq!(
+                        snapshot.status(),
+                        OperationSessionStatus::CancellationRequested
+                    );
+                    observed_cancellation_status = true;
+                }
+                _ => {}
+            },
+            &cancellation,
+        );
+
+        assert!(observed_cancellation_status);
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::Cancelled)
+        );
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn promoting_covers_only_atomic_publication_then_completion_checks() {
         let (_root, source, destination, workspace) = fixture();
         let session = OperationSession::new();
@@ -9519,5 +10611,823 @@ mod tests {
         assert!(promotion_started && promotion_completed);
         assert_eq!(result.state(), JobState::Succeeded);
         assert_eq!(fs::read(destination).unwrap(), fs::read(source).unwrap());
+    }
+
+    #[test]
+    fn cancellation_before_atomic_promotion_is_accepted_without_publication() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().expect("claim event consumer");
+
+        let result = execute_with_producer_and_checkpoint(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion {
+                    assert!(session.cancel());
+                }
+            },
+        );
+
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(
+            result.failure().unwrap().code(),
+            OperationFailureCode::Cancelled
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&source).unwrap(), b"operation test source bytes");
+        assert!(!result.milestones().contains(&OperationMilestone::Published));
+
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), OperationEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            event.event(),
+            OperationEventKind::CancellationRequested { accepted: true }
+        )));
+    }
+
+    #[test]
+    fn cancellation_refused_at_atomic_promotion_is_reported_without_rollback() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().expect("claim event consumer");
+        let mut refusal_observed = false;
+
+        let result = execute_with_producer_and_checkpoint(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::AtomicPromotionStarted {
+                    refusal_observed = true;
+                    assert_eq!(
+                        session.current_operation().unwrap().phase(),
+                        OperationSessionPhase::Promoting
+                    );
+                    assert!(!session.cancel());
+                }
+            },
+        );
+
+        assert!(refusal_observed);
+        assert_eq!(result.state(), JobState::Succeeded);
+        assert_eq!(fs::read(&source).unwrap(), b"operation test source bytes");
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert!(result.milestones().contains(&OperationMilestone::Published));
+
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events
+                .iter()
+                .enumerate()
+                .all(|(index, event)| event.sequence() == index as u64),
+            "event sequences must be contiguous: {events:?}"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), OperationEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event(),
+                    OperationEventKind::CancellationRequested { accepted: false }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event.event(),
+            OperationEventKind::CancellationRequested { accepted: true }
+        )));
+        assert!(matches!(
+            events.last().map(OperationEvent::event),
+            Some(OperationEventKind::Completed { result: terminal }) if terminal == &result
+        ));
+    }
+
+    #[test]
+    fn cancellation_handle_requested_at_atomic_promotion_is_refused() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().expect("claim event consumer");
+        let cancellation = CancellationHandle::new();
+        let mut refusal_requested = false;
+
+        let result = execute_with_producer_and_checkpoint_and_cancellation(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::AtomicPromotionStarted {
+                    refusal_requested = true;
+                    cancellation.cancel();
+                }
+            },
+            &cancellation,
+        );
+
+        assert!(refusal_requested);
+        assert_eq!(result.state(), JobState::Succeeded);
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event(),
+                    OperationEventKind::CancellationRequested { accepted: false }
+                ))
+                .count(),
+            1
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event.event(),
+            OperationEventKind::CancellationRequested { accepted: true }
+        )));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), OperationEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn progress_reports_staged_source_bytes_when_copy_is_cancelled() {
+        let (root, _source, destination, workspace) = fixture();
+        let source = root.path().join("large-source.bin");
+        let body = vec![0x5a_u8; IO_BUFFER_SIZE * 2 + 37];
+        fs::write(&source, &body).expect("write large source");
+        let planned = body.len() as u64;
+        let session = OperationSession::new();
+
+        let result = execute_with_producer(
+            plan(&source, &destination, &workspace),
+            &session,
+            move |source, stage, session| {
+                let mut chunks = 0;
+                copy_source_to_stage_with_length_and_checkpoint(
+                    source,
+                    stage,
+                    planned,
+                    session,
+                    || {
+                        chunks += 1;
+                        if chunks == 1 {
+                            let live = session.current_operation().expect("live progress snapshot");
+                            assert_eq!(live.total_bytes(), Some(planned));
+                            assert!(
+                                live.completed_bytes() > 0 && live.completed_bytes() < planned,
+                                "live completed bytes must describe staged bytes: {live:?}"
+                            );
+                            let _ = session.cancel();
+                        }
+                    },
+                )
+            },
+        );
+
+        assert_eq!(result.state(), JobState::Cancelled);
+        let snapshot = session.current_operation().expect("progress snapshot");
+        assert_eq!(snapshot.total_bytes(), Some(planned));
+        assert!(
+            snapshot.completed_bytes() > 0 && snapshot.completed_bytes() < planned,
+            "completed bytes must describe staged bytes: {snapshot:?}"
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&source).unwrap(), body);
+    }
+
+    #[test]
+    fn failed_execution_after_full_copy_reports_all_bytes_without_publication() {
+        let (_root, source, destination, workspace) = fixture();
+        let planned = fs::metadata(&source).expect("source metadata").len();
+        let session = OperationSession::new();
+
+        let result = execute_with_producer(
+            plan(&source, &destination, &workspace),
+            &session,
+            |source, stage, session| {
+                copy_source_to_stage(source, stage, session)?;
+                Err(OperationFailureCode::ValidationFailed)
+            },
+        );
+
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            result.failure().map(OperationFailure::code),
+            Some(OperationFailureCode::ValidationFailed)
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&source).unwrap(), b"operation test source bytes");
+        let snapshot = session.current_operation().expect("progress snapshot");
+        assert_eq!(snapshot.total_bytes(), Some(planned));
+        assert_eq!(
+            snapshot.completed_bytes(),
+            planned,
+            "copy completion is not a publication or verification claim"
+        );
+    }
+
+    #[test]
+    fn busy_admission_does_not_publish_a_terminal_result() {
+        let (root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let (paused_sender, paused_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let active_session = session.clone();
+        let active_source = source.clone();
+        let active_destination = destination.clone();
+        let active_workspace = workspace.clone();
+
+        let worker = std::thread::spawn(move || {
+            execute_with_producer_and_checkpoint(
+                plan(&active_source, &active_destination, &active_workspace),
+                &active_session,
+                copy_source_to_stage,
+                |checkpoint| {
+                    if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion {
+                        paused_sender.send(()).expect("signal paused execution");
+                        resume_receiver.recv().expect("wait to resume");
+                    }
+                },
+            )
+        });
+
+        paused_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("execution reaches promotion checkpoint");
+        let busy_plan = plan(
+            &source,
+            &root.path().join("busy-destination.bin"),
+            &workspace,
+        );
+        let busy = execute_operation(busy_plan, &session);
+        assert_eq!(
+            busy.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::Busy)
+        );
+        assert_eq!(session.last_result().expect("terminal state"), None);
+
+        resume_sender.send(()).expect("resume execution");
+        let completed = worker.join().expect("execution thread");
+        assert_eq!(completed.state(), JobState::Succeeded);
+        assert_eq!(
+            session.last_result().expect("terminal result"),
+            Some(completed)
+        );
+    }
+
+    #[test]
+    fn dropping_consumer_during_execution_does_not_block_completion() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().expect("claim event consumer");
+        let (paused_sender, paused_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let worker_session = session.clone();
+        let worker_source = source.clone();
+        let worker_destination = destination.clone();
+        let worker_workspace = workspace.clone();
+
+        let worker = std::thread::spawn(move || {
+            execute_with_producer_and_checkpoint(
+                plan(&worker_source, &worker_destination, &worker_workspace),
+                &worker_session,
+                copy_source_to_stage,
+                |checkpoint| {
+                    if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion {
+                        paused_sender.send(()).expect("signal paused execution");
+                        resume_receiver.recv().expect("wait to resume");
+                    }
+                },
+            )
+        });
+
+        paused_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("execution reaches promotion checkpoint");
+        drop(consumer);
+        resume_sender.send(()).expect("resume execution");
+
+        let result = worker.join().expect("execution thread");
+        assert_eq!(result.state(), JobState::Succeeded);
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            session.last_result().expect("terminal result"),
+            Some(result)
+        );
+    }
+
+    /// Drains without driving execution, then checks the contracted order and
+    /// completion recovery independently of transport consumption.
+    fn assert_terminal_transition_events(
+        session: &OperationSession,
+        consumer: &OperationEventConsumer,
+        result: &OperationResult,
+        expected: &[OperationMilestone],
+    ) -> Vec<OperationEvent> {
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.len() <= 16,
+            "semantic cardinality is input-size independent"
+        );
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event.sequence(), index as u64);
+        }
+        let milestones = events
+            .iter()
+            .filter_map(|event| match event.event() {
+                OperationEventKind::Milestone { milestone } => Some(*milestone),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(milestones, expected);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), OperationEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+        assert!(
+            matches!(events.last().map(OperationEvent::event), Some(OperationEventKind::Completed { result: terminal }) if terminal == result)
+        );
+        assert_eq!(session.last_result().unwrap(), Some(result.clone()));
+        let terminal = events.last().expect("one terminal completion");
+        let completion = session
+            .last_completion()
+            .expect("completion lock")
+            .expect("terminal envelope retained");
+        assert_eq!(completion.sequence(), terminal.sequence());
+        assert_eq!(completion.snapshot(), terminal.snapshot());
+        assert_eq!(completion.result(), result);
+        assert_eq!(terminal.snapshot().phase(), OperationSessionPhase::Idle);
+        assert_eq!(
+            terminal.snapshot().status(),
+            match result.state() {
+                JobState::Succeeded => OperationSessionStatus::Succeeded,
+                JobState::Failed => OperationSessionStatus::Failed,
+                JobState::Cancelled => OperationSessionStatus::Cancelled,
+            }
+        );
+        for event in &events[..events.len() - 1] {
+            let json = serde_json::to_value(event).unwrap();
+            assert!(json.get("result").is_none());
+            assert!(json.get("artifacts").is_none());
+            assert_eq!(
+                json["snapshot"]["completed_bytes"],
+                event.snapshot().completed_bytes()
+            );
+        }
+        events
+    }
+
+    #[test]
+    fn failure_emits_typed_transition_before_completion() {
+        let (_root, source, destination, workspace) = fixture();
+        fs::write(&destination, b"preserve existing destination").unwrap();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().unwrap();
+        let result = execute_operation(plan(&source, &destination, &workspace), &session);
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            fs::read(&destination).unwrap(),
+            b"preserve existing destination"
+        );
+        assert_eq!(fs::read(&source).unwrap(), b"operation test source bytes");
+        let events = assert_terminal_transition_events(
+            &session,
+            &consumer,
+            &result,
+            &[OperationMilestone::Executing, OperationMilestone::Failed],
+        );
+        let payloads = events
+            .iter()
+            .map(|e| serde_json::to_value(e.event()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads[payloads.len() - 2],
+            serde_json::json!({"event":"failure","code":"destination_conflict"})
+        );
+    }
+
+    #[test]
+    fn cancellation_emits_ordered_transition_before_completion() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().unwrap();
+        let result = execute_with_producer_and_checkpoint(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::SourceLockAcquired {
+                    assert!(session.cancel());
+                }
+            },
+        );
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&source).unwrap(), b"operation test source bytes");
+        let events = assert_terminal_transition_events(
+            &session,
+            &consumer,
+            &result,
+            &[OperationMilestone::Executing, OperationMilestone::Cancelled],
+        );
+        let request = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e.event(),
+                    OperationEventKind::CancellationRequested { accepted: true }
+                )
+            })
+            .unwrap();
+        let cancelled = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e.event(),
+                    OperationEventKind::Milestone {
+                        milestone: OperationMilestone::Cancelled
+                    }
+                )
+            })
+            .unwrap();
+        assert!(request < cancelled && cancelled < events.len() - 1);
+    }
+
+    #[test]
+    fn full_staging_progress_does_not_claim_publication_before_cancel() {
+        let (_root, source, destination, workspace) = fixture();
+        let total_bytes = fs::metadata(&source).unwrap().len();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().unwrap();
+        let result = execute_with_producer_and_checkpoint(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion {
+                    let snapshot = session.current_operation().unwrap();
+                    assert_eq!(snapshot.completed_bytes(), total_bytes);
+                    assert!(
+                        session.cancel(),
+                        "cancellation is accepted before promotion"
+                    );
+                }
+            },
+        );
+
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(result.outcome(), None);
+        assert_eq!(
+            result.failure().map(OperationFailure::code),
+            Some(OperationFailureCode::Cancelled)
+        );
+        assert_eq!(
+            result.cleanup_warning().map(OperationFailure::code),
+            Some(OperationFailureCode::CleanupIncomplete)
+        );
+        assert!(!destination.exists());
+        let events = assert_terminal_transition_events(
+            &session,
+            &consumer,
+            &result,
+            &[
+                OperationMilestone::Executing,
+                OperationMilestone::Validated,
+                OperationMilestone::Cancelled,
+                OperationMilestone::CleanupIncomplete,
+            ],
+        );
+        let warning = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.event(),
+                    OperationEventKind::Warning {
+                        code: OperationFailureCode::CleanupIncomplete
+                    }
+                )
+            })
+            .expect("cleanup warning transition before completion");
+        assert_eq!(warning + 1, events.len() - 1);
+        let terminal = events.last().unwrap();
+        assert_eq!(terminal.snapshot().completed_bytes(), total_bytes);
+        assert_eq!(terminal.snapshot().total_bytes(), Some(total_bytes));
+        assert_eq!(terminal.snapshot().outcome(), None);
+        assert_eq!(
+            terminal.snapshot().milestone(),
+            Some(OperationMilestone::CleanupIncomplete)
+        );
+        assert_eq!(
+            terminal.snapshot().status(),
+            OperationSessionStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn cleanup_warning_emits_typed_transition_after_publication_before_completion() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().unwrap();
+        // An unrelated entry in the private staging directory prevents safe
+        // directory cleanup without changing the validated published bytes.
+        let result = execute_with_producer_and_checkpoint(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion {
+                    let stage = stage_file_in(&workspace);
+                    fs::write(stage.parent().unwrap().join("foreign-entry"), b"preserve").unwrap();
+                }
+            },
+        );
+        assert_eq!(result.state(), JobState::Succeeded);
+        assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+        assert_eq!(
+            result.cleanup_warning().map(OperationFailure::code),
+            Some(OperationFailureCode::CleanupIncomplete)
+        );
+        let events = assert_terminal_transition_events(
+            &session,
+            &consumer,
+            &result,
+            &[
+                OperationMilestone::Executing,
+                OperationMilestone::Validated,
+                OperationMilestone::Published,
+                OperationMilestone::CleanupIncomplete,
+            ],
+        );
+        let payloads = events
+            .iter()
+            .map(|e| serde_json::to_value(e.event()).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            payloads[payloads.len() - 2],
+            serde_json::json!({"event":"warning","code":"cleanup_incomplete"})
+        );
+    }
+
+    #[test]
+    fn failure_and_cleanup_warning_emit_in_result_order_before_completion() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+        let consumer = session.subscribe_events().unwrap();
+        let result = execute_with_producer(
+            plan(&source, &destination, &workspace),
+            &session,
+            |source, stage, session| {
+                copy_source_to_stage(source, stage, session)?;
+                let stage = stage_file_in(&workspace);
+                fs::write(stage.parent().unwrap().join("foreign-entry"), b"preserve").unwrap();
+                Err(OperationFailureCode::WriteFailed)
+            },
+        );
+        assert_eq!(result.state(), JobState::Failed);
+        assert!(!destination.exists());
+        let events = assert_terminal_transition_events(
+            &session,
+            &consumer,
+            &result,
+            &[
+                OperationMilestone::Executing,
+                OperationMilestone::Failed,
+                OperationMilestone::CleanupIncomplete,
+            ],
+        );
+        let tail = events.iter().rev().take(5).collect::<Vec<_>>();
+        assert_eq!(
+            serde_json::to_value(tail[3].event()).unwrap(),
+            serde_json::json!({"event":"failure","code":"write_failed"})
+        );
+        assert_eq!(
+            serde_json::to_value(tail[1].event()).unwrap(),
+            serde_json::json!({"event":"warning","code":"cleanup_incomplete"})
+        );
+    }
+
+    #[test]
+    fn subscription_during_execution_is_refused() {
+        let (_root, source, destination, workspace) = fixture();
+        let session = OperationSession::new();
+
+        let result = execute_with_producer_and_checkpoint(
+            plan(&source, &destination, &workspace),
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion {
+                    assert_eq!(
+                        session.subscribe_events().unwrap_err(),
+                        OperationFailureCode::EventConsumerUnavailable
+                    );
+                }
+            },
+        );
+
+        assert_eq!(result.state(), JobState::Succeeded);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+type CopyPlanningCheckpoint = Box<dyn FnOnce()>;
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static COPY_PLANNING_CHECKPOINT: std::cell::Cell<Option<CopyPlanningCheckpoint>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn set_copy_planning_checkpoint(checkpoint: impl FnOnce() + 'static) {
+    COPY_PLANNING_CHECKPOINT.with(|slot| {
+        assert!(slot.replace(Some(Box::new(checkpoint))).is_none());
+    });
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod copy_planning_signal_tests {
+    use super::{
+        CopyThroughRequest, OperationError, OperationFailureCode, OperationPlan, plan_copy_through,
+        set_copy_planning_checkpoint,
+    };
+    use crate::engine::Engine;
+    use crate::inspection::CancellationHandle;
+    use crate::operation::OperationSession;
+    use std::fs;
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, mpsc};
+    use std::thread;
+
+    fn plan_while_delivering_signal(
+        request: CopyThroughRequest,
+        signal: i32,
+    ) -> (
+        Result<OperationPlan, OperationError>,
+        CancellationHandle,
+        Vec<signal_hook::SigId>,
+    ) {
+        let flag = Arc::new(AtomicBool::new(false));
+        let interrupt = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&flag))
+            .expect("register isolated interrupt flag");
+        let terminate =
+            signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&flag))
+                .expect("register isolated terminate flag");
+        let cancellation = CancellationHandle::from_flag(flag.clone());
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        set_copy_planning_checkpoint(move || {
+            entered_sender
+                .send(())
+                .expect("signal thread waits for planner entry");
+            resume_receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("signal thread releases the planner");
+        });
+        let signal_thread = thread::spawn(move || {
+            entered_receiver
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("copy planning reaches the synchronized checkpoint");
+            signal_hook::low_level::raise(signal).expect("deliver signal during copy planning");
+            resume_sender
+                .send(())
+                .expect("copy planner waits for signal delivery");
+        });
+
+        let plan = Engine::new().plan_copy_through(request);
+        signal_thread
+            .join()
+            .expect("signal delivery thread completes");
+        assert!(
+            cancellation.is_cancelled(),
+            "the signal is latched before synchronous planning returns"
+        );
+        (plan, cancellation, vec![interrupt, terminate])
+    }
+
+    fn unregister_signal_actions(actions: Vec<signal_hook::SigId>) {
+        for action in actions {
+            signal_hook::low_level::unregister(action);
+        }
+    }
+
+    fn run_case(root: &Path, signal: i32) {
+        let source = root.join("source.bin");
+        let destination = root.join("destination.bin");
+        let workspace = root.join("workspace");
+        let source_bytes = b"signal during synchronous copy planning";
+        fs::write(&source, source_bytes).expect("write source fixture");
+
+        let (plan, cancellation, actions) = plan_while_delivering_signal(
+            CopyThroughRequest::new(&source, &destination, &workspace),
+            signal,
+        );
+        let session = OperationSession::new();
+        let result = Engine::new().execute_operation_with_cancellation(
+            plan.expect("successful planning preserves its plan"),
+            &session,
+            cancellation,
+        );
+        assert_eq!(result.state(), crate::operation::JobState::Cancelled);
+        assert_eq!(
+            session.last_result().unwrap(),
+            Some(result),
+            "cancellation before staging still produces the authoritative result"
+        );
+        assert_eq!(fs::read(&source).unwrap(), source_bytes);
+        assert!(!destination.exists());
+        assert!(!workspace.exists());
+        unregister_signal_actions(actions);
+
+        let later_source = root.join("later-source.bin");
+        let later_destination = root.join("later-destination.bin");
+        let later_workspace = root.join("later-workspace");
+        let later_bytes = b"unrelated later invocation";
+        fs::write(&later_source, later_bytes).expect("write later source");
+        let later_plan = plan_copy_through(CopyThroughRequest::new(
+            &later_source,
+            &later_destination,
+            &later_workspace,
+        ))
+        .expect("later planning is independent");
+        let later_result = Engine::new().execute_operation_with_cancellation(
+            later_plan,
+            &OperationSession::new(),
+            CancellationHandle::new(),
+        );
+        assert_eq!(later_result.state(), crate::operation::JobState::Succeeded);
+        assert_eq!(fs::read(later_destination).unwrap(), later_bytes);
+    }
+
+    fn run_failure_case(root: &Path, signal: i32) {
+        let missing = root.join("missing-source.bin");
+        let destination = root.join("failed-destination.bin");
+        let workspace = root.join("failed-workspace");
+        let (plan, cancellation, actions) = plan_while_delivering_signal(
+            CopyThroughRequest::new(&missing, &destination, &workspace),
+            signal,
+        );
+        let error = match plan {
+            Ok(_) => panic!("planning failure remains authoritative"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), OperationFailureCode::SourceUnavailable);
+        assert!(cancellation.is_cancelled());
+        assert!(!destination.exists());
+        assert!(!workspace.exists());
+        unregister_signal_actions(actions);
+    }
+
+    #[test]
+    fn signals_during_synchronous_planning_are_latched_before_the_result_handoff() {
+        const CHILD_SIGNAL: &str = "NSCB_TEST_SIGNAL_DURING_COPY_PLANNING";
+        if let Some(signal) = std::env::var_os(CHILD_SIGNAL) {
+            let signal = signal
+                .to_string_lossy()
+                .parse::<i32>()
+                .expect("test signal number");
+            let root = tempfile::tempdir().expect("copy planning signal fixture");
+            run_case(root.path(), signal);
+            run_failure_case(root.path(), signal);
+            return;
+        }
+
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "operation::copy_planning_signal_tests::signals_during_synchronous_planning_are_latched_before_the_result_handoff",
+                    "--nocapture",
+                ])
+                .env(CHILD_SIGNAL, signal.to_string())
+                .output()
+                .expect("run planning signal case in an isolated subprocess");
+            assert!(
+                output.status.success(),
+                "signal {signal}: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        }
     }
 }

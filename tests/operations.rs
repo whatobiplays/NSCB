@@ -761,7 +761,7 @@ fn copy_through_fails_closed_when_native_filesystem_guarantees_are_unavailable()
             "workspace",
         ))
         .err()
-        .expect("non-Unix copy-through is not qualified");
+        .expect("non-macOS copy-through is not qualified");
 
     assert_eq!(error.code(), OperationFailureCode::UnsupportedCapability);
 }

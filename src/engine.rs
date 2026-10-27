@@ -1,7 +1,7 @@
 use crate::error::{ContainerProbeError, ContainerProbeErrorCode};
 use crate::inspection::{
-    InspectionError, InspectionErrorCode, InspectionHost, InspectionPreflightStatus,
-    InspectionRequest, InspectionResult,
+    CancellationHandle, InspectionError, InspectionErrorCode, InspectionHost,
+    InspectionPreflightStatus, InspectionRequest, InspectionResult,
 };
 use crate::operation::{
     CopyThroughRequest, OperationError, OperationPlan, OperationResult, OperationSession,
@@ -60,6 +60,25 @@ impl Engine {
         session: &OperationSession,
     ) -> OperationResult {
         crate::operation::execute_operation(plan, session)
+    }
+
+    /// Executes one plan with cancellation bound to this invocation.
+    ///
+    /// The handle is observed while this execution holds admission and lets a
+    /// caller request cancellation before execution starts. A request made
+    /// before execution is reported as a cancelled result before any
+    /// operation-owned workspace or staging entry is created. NSCB does not
+    /// clear or reset the caller-owned handle after execution. A host must pass
+    /// a fresh handle to each invocation that should remain independently
+    /// cancellable; deliberately passing an already-cancelled handle requests
+    /// cancellation of that later invocation.
+    pub fn execute_operation_with_cancellation(
+        &self,
+        plan: OperationPlan,
+        session: &OperationSession,
+        cancellation: CancellationHandle,
+    ) -> OperationResult {
+        crate::operation::execute_operation_with_cancellation(plan, session, &cancellation)
     }
 
     /// Validates request and provider prerequisites without launching a helper.

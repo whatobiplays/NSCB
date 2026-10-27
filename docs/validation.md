@@ -16,10 +16,11 @@ NSCB uses a repository-owned `Makefile` as the canonical validation contract for
 
 `make` prints every target. `make fmt` modifies Rust source files and is not a validation target. `make clean` runs `cargo clean` and is intentionally outside `make all`.
 
-Issue #9 copy-through tests run only on macOS. A successful `make all` on
-another operating system verifies the repository's portable tests and the
-fail-closed platform guard; it does not qualify copy-through publication
-there. Replace also requires the destination volume to report Darwin's
+Issue #9 and Issue #10 copy-through, observation, and machine-output tests run
+only on macOS. A successful `make all` on another operating system verifies the
+repository's portable tests and the fail-closed platform guard; it does not
+qualify copy-through publication, host event delivery, or admitted JSONL job
+records there. Replace also requires the destination volume to report Darwin's
 `VOL_CAP_INT_RENAME_SWAP` capability and the actual atomic exchange call to
 succeed. The test results do not establish network-filesystem behavior or
 crash durability.
@@ -141,7 +142,7 @@ keys, or proprietary content.
 Focused evidence and the limits of the synthetic profile are recorded in
 [Verification qualification evidence](testing/verification-qualification.md).
 
-## Copy-through publication validation
+## Copy-through publication and job-contract validation
 
 Final-hash and pre-syscall checkpoints assert that the shared session remains
 `Executing` and accepts cancellation through final source and destination
@@ -159,6 +160,18 @@ cooperative source locking, same-parent destination coordination, atomic Fail,
 explicit qualified Replace, retention accounting, cleanup evidence, and stale
 plan rejection. They run on macOS; other targets verify the typed
 `UnsupportedCapability` guard and do not qualify copy-through publication.
+Copy-planning signal tests use `cfg(target_os = "macos")` and are executed only
+on macOS. The separate non-macOS tests cover the fail-closed capability error;
+they do not claim copy-planning signal or publication qualification. A library
+test pauses at the entry to `operation::plan_copy_through`, delivers SIGINT or
+SIGTERM while the Engine's synchronous planning call is active, and then lets
+the planner return. A CLI test separately pauses at the CLI planning entry,
+after `ScopedCancellation` is installed and immediately before the Engine
+planner is called. It delivers both signals through the real invocation guard,
+then verifies cancellation before staging, preservation of the typed error when
+planning fails, and isolation from later invocations. Other CLI tests pause at
+the plan-result handoff. Each barrier uses channel synchronization rather than
+timing sleeps. Planning I/O itself is not interruptible.
 
 The retained-verified-competitor case proves that an independently captured
 alias matching the earlier observation remains inventoried and counted after a
@@ -193,9 +206,34 @@ Run the focused and repository checks with the pinned compiler:
 ```sh
 rustup run 1.98.1 cargo test --locked --lib operation::tests
 rustup run 1.98.1 cargo test --locked --test operations
+rustup run 1.98.1 cargo test --locked --test cli_subprocess
+rustup run 1.98.1 cargo test --locked --test job_observation
 rustup run 1.98.1 make all
-make test-content-policy-git
+rustup run 1.98.1 make test-content-policy-git
 ```
+
+The `job_observation` suite exercises the additive Rust observation surface:
+single-consumer admission, ordered and bounded events, terminal uniqueness,
+dropped consumers, repeated admissions, authoritative result recovery,
+invocation-bound cancellation, and latest-value progress. The
+`cli_subprocess` suite exercises `nscb copy` through `--json` and `--jsonl`,
+including exit classes, stdout and stderr separation, SIGTERM cancellation at an
+established execution checkpoint, and a broken stdout transport. The separate
+`copy_cli_tests::stalled_jsonl_writer_does_not_block_filesystem_execution`
+in-process unit test uses a controllable writer and releases it before joining
+the reporting thread. It proves filesystem execution remains independent of
+reporting; it does not prove bounded CLI termination when an actual connected
+stdout reader stops consuming. The operation unit tests exercise accepted and refused cancellation at
+the promotion boundary, source and destination preservation, and the
+distinction between copied bytes and completed publication.
+They also assert ordered failure, cancellation, and cleanup-warning transitions,
+stable typed diagnostic codes, exactly one final completion, and result recovery.
+The inspection CLI unit suite additionally checks the signal guard's lifetime
+at the Engine handoff in isolated test subprocesses, without provider execution.
+
+The complete evidence record, including the pinned compiler and the limits of
+the macOS filesystem qualification, is in
+[job contract qualification](testing/job-contracts-qualification.md).
 
 The genuine-Git content-policy suite is separate from `make all`. Run the GPT
 Repo MCP `all` profile through its supported dry-run and execution workflow
@@ -211,3 +249,16 @@ removal. Detailed inventory fields and platform limits are recorded in
 [publication qualification](testing/publication-qualification.md); publication
 guarantees and the ADR 0008 scope are recorded in
 [publication architecture](architecture/publication.md).
+
+
+## Reporting transport qualification
+
+Executable job-reporting tests use prefilled macOS pipes whose readers stay
+open and unread. They check human, JSON, and JSONL output with stdout blocked,
+both streams blocked, stderr blocked during a human failure, broken pipes,
+cancellation, and unchanged filesystem outcomes. This subprocess evidence is
+separate from the in-process stalled-writer unit test. The five-second shared
+reporting budget begins immediately after Engine execution and operation-owned
+cleanup return. Tests allow a documented two-second scheduling margin; they do
+not claim a hard real-time exit or equivalent behavior on other operating
+systems or sink drivers.

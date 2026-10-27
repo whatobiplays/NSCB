@@ -45,7 +45,8 @@ pub use engine::{
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
 pub use operation::{
     ConflictPolicy, CopyThroughRequest, DestinationBaseline, JobState, OperationArtifact,
-    OperationArtifactRole, OperationError, OperationFailure, OperationFailureCode,
+    OperationArtifactRole, OperationCompletion, OperationError, OperationEvent,
+    OperationEventConsumer, OperationEventKind, OperationFailure, OperationFailureCode,
     OperationMilestone, OperationOutcome, OperationPlan, OperationPlanSnapshot, OperationResult,
     OperationSession, OperationSessionPhase, OperationSessionSnapshot, OperationSessionStatus,
     PlannedArtifact, PlannedEffect, PlannedSource, StagingStrategy,

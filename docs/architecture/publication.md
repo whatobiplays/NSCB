@@ -214,12 +214,39 @@ content before removal; uncertain artifacts must remain in place.
 ## Session state scope
 
 `OperationSession` exposes an ephemeral current-operation snapshot containing
-phase, status, latest milestone, and terminal outcome or failure. Cloned
-sessions share admission and current state; separately constructed sessions
-do not. `AlreadyUpToDate` is an operation outcome with Succeeded status, not a
-separate terminal job state. The snapshot is per shared session and is cleared
-when another operation is admitted; it is not Engine-global admission,
-execution history, or an ordered event stream.
+phase, status, latest milestone, completed and total source bytes, and terminal
+outcome or failure. Cloned sessions share admission and current state;
+separately constructed sessions do not. `AlreadyUpToDate` is an operation
+outcome with Succeeded status, not a separate terminal job state. The snapshot
+is per shared session and is replaced when another operation is admitted; a
+refused busy admission leaves the previous snapshot unchanged. It is not
+Engine-global admission, execution history, or an ordered event stream.
+
+The snapshot is the authoritative latest-value progress surface.
+`completed_bytes()` counts source bytes successfully written into private
+staging by the copy loop. It is zero for `AlreadyUpToDate` and for failures or
+cancellation before copying, and it can equal `total_bytes()` after a later
+verification or publication failure. Copy completion therefore does not claim
+verification or publication success.
+
+`OperationSession::subscribe_events()` claims one logical ordered event consumer
+for the next execution. Events carry execution-local sequence numbers and do
+not include per-byte progress. Dropping or failing to service the consumer never
+blocks execution. `OperationSession::last_result()` retains the complete
+terminal result until the next admission, independently of event delivery.
+
+Cancellation requested through `OperationSession::cancel()` remains accepted
+only while the execution is in `Executing`. The additive
+`Engine::execute_operation_with_cancellation()` binds a `CancellationHandle` to
+one invocation, so a pre-execution request is never stored on an idle session.
+NSCB does not clear the caller-owned handle after execution; callers must use a
+fresh handle when a later execution should not inherit an earlier cancellation.
+The CLI installs SIGINT and SIGTERM actions
+only for the command invocation and unregisters them at the end. signal-hook 0.3
+does not restore the process's previous or default signal disposition when the
+final action is removed, so the CLI qualifies signal behavior in isolated
+subprocesses and does not claim process-global restoration. Inspection and
+Verification use the same scoped registration.
 
 ADR-0008 describes broader Engine-scoped operation lifecycle behavior. Issue
 #9 keeps `Engine` zero-sized and stateless, while `execute_operation` performs
@@ -257,10 +284,12 @@ result assembly. The execution wrapper enters `Completing` before cleanup,
 competitor capture, artifact inventory, or result construction, including
 finalization after an earlier execution failure. Cancellation is accepted
 while `Executing`; a request accepted before the wrapper's finalization handoff
-produces `Cancelled`, while the phase transition and accepted disposition are
-committed together. The in-progress snapshot then reports `Completing` with
-`CancellationRequested`; later cancellation is refused. Finalization preserves
-owned staging and any independently verified competitor evidence. Cancellation
+normally produces `Cancelled`, while the phase transition and accepted
+disposition are committed together. If finalization has already established
+`PublicationUncertain`, that uncertainty takes precedence over cancellation and
+remains the terminal failure. The in-progress snapshot reports `Completing`
+with `CancellationRequested`; later cancellation is refused. Finalization
+preserves owned staging and any independently verified competitor evidence. Cancellation
 is refused from the start of `Promoting` and throughout `Completing`. The final
 pathname checks remain separate from the name-based syscall and do not establish
 inode-conditional publication.
