@@ -14,6 +14,7 @@ mod error;
 mod file_identity;
 mod input_resolution;
 mod inspection;
+mod key_file;
 mod nca;
 mod operation;
 mod partition_fs;

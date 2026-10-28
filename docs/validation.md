@@ -86,6 +86,55 @@ The repository qualification uses `rustup run 1.98.1` for Cargo commands.
 executes under the MCP server's effective Rust toolchain, so its validation ID
 and Rust version are separate evidence from the Rust 1.98.1 run.
 
+## Standalone configuration and key validation
+
+Run the focused real-binary configuration suite while changing standalone
+configuration, key discovery, or implicit Copy destination behavior:
+
+```sh
+cargo test --locked --test config_cli
+cargo test --locked --test verification_cli
+cargo test --locked --test input_resolution_cli
+cargo test --locked --test split_resolution_cli
+cargo test --locked --test cli_subprocess -- --test-threads=1
+make all
+```
+
+`config_cli` launches the real `nscb` binary with isolated HOME, USERPROFILE,
+XDG, APPDATA, cache, key, and output locations. Every integration helper that
+launches `nscb` supplies synthetic profile and roaming-config paths on Windows,
+so startup and `keys set` stay inside test-owned directories. It covers first
+use, config path/show/set/
+reset, one-document JSON and human output, nested and inline redaction,
+unknown-value retention, compatible migration and backup failure including
+symlink rejection, future-version refusal, malformed and unsafe configuration,
+JSONL startup errors, lazy Documents resolution for configured output, key
+precedence, complete-file byte preservation, shared provider parsing,
+restrictive Unix permissions, implicit destination selection, no fallback, and
+explicit destination override. Focused unit tests inject a parent-directory
+sync failure and a second failure during rollback: the first verifies that the
+previous destination is restored, and the second verifies that the prior bytes
+remain in a `.nscb-rollback-*` recovery file when restoration fails. The real-
+binary suite also checks no-argument non-TTY usage with synthetic config and
+output paths. A separate path unit test injects an unavailable Documents
+resolver on every host; the Documents-writing subprocess test is limited to
+non-Windows hosts because Windows uses the native known-folder API. The other
+focused suites preserve Inspection,
+Verification, input resolution, Split resolution, and existing real-binary Copy
+contracts.
+
+The path-policy unit tests simulate representative native base directories.
+The real-binary suite runs against the current host's native resolver. A macOS
+run does not natively qualify Linux XDG Documents lookup, Windows Documents
+known-folder lookup, Windows replacement behavior, Linux permission behavior,
+or filesystem durability on another platform. Those claims require equivalent
+native execution on each platform.
+
+`make all` remains the required completion gate. It includes the content
+policy, all-target/all-feature type check and lint, the complete routine test
+suite, build, and real-binary smoke suite. GPT Repo MCP's `all` profile is
+separate evidence because it may select a different Cargo toolchain.
+
 ## Recognition validation
 
 Run these focused checks before the full repository gate when changing recognition:

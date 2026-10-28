@@ -114,7 +114,7 @@ pub(crate) fn copy_usage() -> &'static str {
     &copy_messages().usage
 }
 
-fn copy_error_message(code: &str) -> &'static str {
+pub(crate) fn copy_error_message(code: &str) -> &'static str {
     let messages = copy_messages();
     messages
         .errors
@@ -428,10 +428,165 @@ pub(crate) fn verification_result(result: &VerificationResult) -> String {
     )
 }
 
+#[derive(Deserialize)]
+struct StandaloneConfigMessages {
+    global_help: String,
+    global_version: String,
+    config_usage: String,
+    config_path: String,
+    config_show_header: String,
+    config_show_value: String,
+    config_updated: String,
+    config_reset: String,
+    keys_usage: String,
+    keys_set: String,
+    keys_errors: HashMap<String, String>,
+    config_errors: HashMap<String, String>,
+}
+
+fn standalone_config_messages() -> &'static StandaloneConfigMessages {
+    static MESSAGES: OnceLock<StandaloneConfigMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("config.en.json"))
+            .expect("bundled English standalone-configuration resource must be valid")
+    })
+}
+
+pub(crate) fn global_help() -> &'static str {
+    &standalone_config_messages().global_help
+}
+
+pub(crate) fn global_version(version: &str) -> String {
+    standalone_config_messages()
+        .global_version
+        .replace("{version}", version)
+}
+
+pub(crate) fn config_usage() -> &'static str {
+    &standalone_config_messages().config_usage
+}
+
+pub(crate) fn config_path(path: &str) -> String {
+    standalone_config_messages()
+        .config_path
+        .replace("{path}", path)
+}
+
+pub(crate) fn config_show_header(path: &str, schema_version: i64) -> String {
+    let schema_version = schema_version.to_string();
+    interpolate(
+        &standalone_config_messages().config_show_header,
+        &[("path", path), ("schema_version", &schema_version)],
+    )
+}
+
+/// Replaces named placeholders while scanning only the original template.
+///
+/// Each value is copied directly into the output, so braces or placeholder-like
+/// text in a substituted value remain literal instead of being interpreted by
+/// a later replacement pass.
+fn interpolate(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rendered = String::with_capacity(template.len());
+    let mut cursor = 0;
+
+    while cursor < template.len() {
+        let Some(relative_open) = template[cursor..].find('{') else {
+            rendered.push_str(&template[cursor..]);
+            break;
+        };
+        let open = cursor + relative_open;
+        rendered.push_str(&template[cursor..open]);
+
+        let Some(relative_close) = template[open + 1..].find('}') else {
+            rendered.push_str(&template[open..]);
+            break;
+        };
+        let close = open + 1 + relative_close;
+        let key = &template[open + 1..close];
+        if let Some((_, value)) = replacements
+            .iter()
+            .find(|(placeholder, _)| *placeholder == key)
+        {
+            rendered.push_str(value);
+        } else {
+            rendered.push_str(&template[open..=close]);
+        }
+        cursor = close + 1;
+    }
+
+    rendered
+}
+
+pub(crate) fn config_show_value(name: &str, value: &str, source: &str) -> String {
+    interpolate(
+        &standalone_config_messages().config_show_value,
+        &[("name", name), ("value", value), ("source", source)],
+    )
+}
+
+pub(crate) fn config_updated(path: &str, name: &str, value: &str) -> String {
+    interpolate(
+        &standalone_config_messages().config_updated,
+        &[("path", path), ("name", name), ("value", value)],
+    )
+}
+
+pub(crate) fn config_reset(path: &str) -> String {
+    standalone_config_messages()
+        .config_reset
+        .replace("{path}", path)
+}
+
+pub(crate) fn keys_usage() -> &'static str {
+    &standalone_config_messages().keys_usage
+}
+
+pub(crate) fn keys_set(path: &str) -> String {
+    standalone_config_messages()
+        .keys_set
+        .replace("{path}", path)
+}
+
+pub(crate) fn keys_error(code: &str) -> &str {
+    standalone_config_messages()
+        .keys_errors
+        .get(code)
+        .map(String::as_str)
+        .unwrap_or("The key-file update failed.")
+}
+
+pub(crate) fn config_error(code: &str) -> &str {
+    standalone_config_messages()
+        .config_errors
+        .get(code)
+        .map(String::as_str)
+        .unwrap_or("The standalone configuration operation failed.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{error_message, success, usage};
     use nscb::{ContainerProbeErrorCode as Code, InputResolutionErrorCode as InputCode};
+
+    #[test]
+    fn interpolation_scans_only_the_original_template() {
+        assert_eq!(
+            super::interpolate(
+                " {name} = {value} ({source})",
+                &[
+                    ("name", "translation.note"),
+                    ("value", "{source}"),
+                    ("source", "file"),
+                ],
+            ),
+            " translation.note = {source} (file)"
+        );
+        assert_eq!(
+            super::interpolate("{known} {unknown} {unclosed", &[("known", "value")]),
+            "value {unknown} {unclosed"
+        );
+        assert_eq!(super::interpolate("plain", &[]), "plain");
+    }
 
     #[test]
     fn copy_error_uses_localized_fallback_for_an_unknown_code() {

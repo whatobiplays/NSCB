@@ -37,6 +37,18 @@ fn run(args: &[&str], cwd: &std::path::Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_nscb"))
         .args(args)
         .current_dir(cwd)
+        .env("HOME", cwd.join("test-home"))
+        .env("USERPROFILE", cwd.join("test-home"))
+        .env(
+            "APPDATA",
+            cwd.join("test-home").join("AppData").join("Roaming"),
+        )
+        .env(
+            "LOCALAPPDATA",
+            cwd.join("test-home").join("AppData").join("Local"),
+        )
+        .env("XDG_CONFIG_HOME", cwd.join("test-config"))
+        .env("XDG_CACHE_HOME", cwd.join("test-cache"))
         .output()
         .expect("run nscb executable")
 }

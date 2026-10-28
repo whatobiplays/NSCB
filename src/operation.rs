@@ -96,7 +96,9 @@ pub enum StagingStrategy {
     /// The operation uses a workspace explicitly selected for this request.
     ExplicitWorkspace,
     /// The host workspace could not be qualified on the destination volume, so staging uses the
-    /// selected destination's parent directory.
+    /// selected destination's existing anchor on the same filesystem. When one safe final
+    /// directory is missing, this anchor is its creation parent and execution creates that
+    /// directory before staging begins.
     DestinationLocalFallback,
 }
 
@@ -714,6 +716,7 @@ pub enum DestinationBaseline {
 ///         PlannedEffect::CreateWorkspaceDirectory => (),
 ///         PlannedEffect::CreatePrivateStagingDirectory => (),
 ///         PlannedEffect::CreateStagingFile => (),
+///         PlannedEffect::CreateDestinationParent => (),
 ///         PlannedEffect::CreateDestination => (),
 ///         PlannedEffect::CreateDestinationBackup => (),
 ///         PlannedEffect::ReplaceDestination => (),
@@ -734,6 +737,8 @@ pub enum PlannedEffect {
     CreatePrivateStagingDirectory,
     /// Create an exclusive staging file inside the planned private staging directory.
     CreateStagingFile,
+    /// Create the missing final destination-directory component after revalidating its existing anchor.
+    CreateDestinationParent,
     /// Create a new destination entry after validation.
     CreateDestination,
     /// Preserve an existing destination with a recovery copy.
@@ -1647,6 +1652,17 @@ struct ResolvedFile {
     path: PathBuf,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     parent_identity: FileIdentity,
+    /// Existing directory anchoring a missing destination parent. The identity
+    /// above belongs to this directory when present.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    creation_parent: Option<PathBuf>,
+}
+
+#[cfg(target_os = "macos")]
+impl ResolvedFile {
+    fn anchor(&self) -> &Path {
+        self.creation_parent.as_deref().unwrap_or(&self.parent)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1704,19 +1720,16 @@ fn run_copy_planning_checkpoint() {
 fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, OperationError> {
     reject_split_input(&request.source)?;
     let source = resolve_file(&request.source, OperationFailureCode::SourceUnavailable)?;
-    let destination = resolve_file(
-        &request.destination,
-        OperationFailureCode::DestinationUnavailable,
-    )?;
+    let destination = resolve_destination_file(&request.destination)?;
     let requested_workspace = resolve_directory(&request.workspace)?;
 
-    if is_filesystem_root(&destination.parent) || is_filesystem_root(&requested_workspace.path) {
+    if is_filesystem_root(destination.anchor()) || is_filesystem_root(&requested_workspace.path) {
         return Err(OperationError::new(OperationFailureCode::UnsafePath));
     }
 
     let source_directory = open_directory(&source.parent)
         .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
-    let destination_directory = open_directory(&destination.parent)
+    let destination_directory = open_directory(destination.anchor())
         .map_err(|_| OperationError::new(OperationFailureCode::DestinationUnavailable))?;
     let workspace_anchor = requested_workspace
         .identity
@@ -1739,11 +1752,14 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
     let workspace_on_qualified_destination_volume =
         qualified_local_apfs_volume(&requested_workspace_directory)
             && requested_workspace_identity.same_filesystem_as(destination_parent_identity);
+    // Destination-local fallback stages beside the destination. When the final
+    // output directory is safely missing, that anchor is the creation parent
+    // that execution creates before staging begins.
     let (workspace, staging_strategy) = select_staging_workspace(
         request.workspace_selection,
         requested_workspace,
         workspace_on_qualified_destination_volume,
-        &destination.parent,
+        destination.anchor(),
         destination_parent_identity,
     )
     .map_err(OperationError::new)?;
@@ -1775,10 +1791,13 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
     let source_baseline = inspect_file(&mut source_file)
         .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
 
-    let destination_baseline = match inspect_destination(&destination_directory, &destination.name)
-    {
-        Ok(baseline) => baseline,
-        Err(code) => return Err(OperationError::new(code)),
+    let destination_baseline = if destination.creation_parent.is_some() {
+        None
+    } else {
+        match inspect_destination(&destination_directory, &destination.name) {
+            Ok(baseline) => baseline,
+            Err(code) => return Err(OperationError::new(code)),
+        }
     };
 
     if destination_baseline
@@ -1813,8 +1832,8 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
         false
     };
 
-    validate_file_route(&source).map_err(OperationError::new)?;
-    validate_file_route(&destination).map_err(OperationError::new)?;
+    validate_file_route(&source, None).map_err(OperationError::new)?;
+    validate_file_route(&destination, None).map_err(OperationError::new)?;
     validate_directory_route(&workspace, None).map_err(OperationError::new)?;
     verify_file_evidence(&mut source_file, &source_baseline)
         .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
@@ -1908,7 +1927,12 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
                     effects.push(PlannedEffect::CreateDestinationBackup);
                     effects.push(PlannedEffect::ReplaceDestination);
                 }
-                (None, _) => effects.push(PlannedEffect::CreateDestination),
+                (None, _) => {
+                    if destination.creation_parent.is_some() {
+                        effects.push(PlannedEffect::CreateDestinationParent);
+                    }
+                    effects.push(PlannedEffect::CreateDestination);
+                }
                 _ => {}
             }
         }
@@ -2061,7 +2085,66 @@ fn resolve_file(
         name,
         path: resolved,
         parent_identity,
+        creation_parent: None,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_destination_file(path: &Path) -> Result<ResolvedFile, OperationError> {
+    let unavailable = OperationFailureCode::DestinationUnavailable;
+    let requested = absolute_path(path).map_err(|_| OperationError::new(unavailable))?;
+    let name = requested
+        .file_name()
+        .filter(|name| *name != OsStr::new(".") && *name != OsStr::new(".."))
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?
+        .to_os_string();
+    let requested_parent = requested
+        .parent()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?
+        .to_path_buf();
+    match fs::canonicalize(&requested_parent) {
+        Ok(parent) => {
+            let directory =
+                open_directory(&parent).map_err(|_| OperationError::new(unavailable))?;
+            let parent_identity = required_identity(&directory)?;
+            Ok(ResolvedFile {
+                requested_parent,
+                path: parent.join(&name),
+                parent,
+                name,
+                parent_identity,
+                creation_parent: None,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let missing_name = requested_parent
+                .file_name()
+                .filter(|name| *name != OsStr::new(".") && *name != OsStr::new(".."))
+                .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+            let anchor_requested = requested_parent
+                .parent()
+                .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+            let anchor =
+                fs::canonicalize(anchor_requested).map_err(|_| OperationError::new(unavailable))?;
+            let anchor_directory =
+                open_directory(&anchor).map_err(|_| OperationError::new(unavailable))?;
+            let parent_identity = required_identity(&anchor_directory)?;
+            match fs::symlink_metadata(&requested_parent) {
+                Err(entry_error) if entry_error.kind() == io::ErrorKind::NotFound => {}
+                _ => return Err(OperationError::new(OperationFailureCode::StalePlan)),
+            }
+            let parent = anchor.join(missing_name);
+            Ok(ResolvedFile {
+                requested_parent,
+                path: parent.join(&name),
+                parent,
+                name,
+                parent_identity,
+                creation_parent: Some(anchor),
+            })
+        }
+        Err(_) => Err(OperationError::new(unavailable)),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2139,13 +2222,13 @@ fn select_staging_strategy(
 
 #[cfg(target_os = "macos")]
 fn destination_local_workspace(
-    destination_parent: &Path,
-    destination_parent_identity: FileIdentity,
+    destination_anchor: &Path,
+    destination_anchor_identity: FileIdentity,
 ) -> ResolvedDirectory {
     ResolvedDirectory {
-        requested: destination_parent.to_path_buf(),
-        path: destination_parent.to_path_buf(),
-        identity: Some(destination_parent_identity),
+        requested: destination_anchor.to_path_buf(),
+        path: destination_anchor.to_path_buf(),
+        identity: Some(destination_anchor_identity),
         creation_parent: None,
         creation_parent_identity: None,
     }
@@ -2156,12 +2239,12 @@ fn select_staging_workspace(
     selection: WorkspaceSelection,
     requested_workspace: ResolvedDirectory,
     same_qualified_filesystem: bool,
-    destination_parent: &Path,
-    destination_parent_identity: FileIdentity,
+    destination_anchor: &Path,
+    destination_anchor_identity: FileIdentity,
 ) -> Result<(ResolvedDirectory, StagingStrategy), OperationFailureCode> {
     let strategy = select_staging_strategy(selection, same_qualified_filesystem)?;
     let workspace = if strategy == StagingStrategy::DestinationLocalFallback {
-        destination_local_workspace(destination_parent, destination_parent_identity)
+        destination_local_workspace(destination_anchor, destination_anchor_identity)
     } else {
         requested_workspace
     };
@@ -2666,7 +2749,51 @@ fn verify_file_evidence(
 }
 
 #[cfg(target_os = "macos")]
-fn validate_file_route(file: &ResolvedFile) -> Result<(), OperationFailureCode> {
+fn validate_file_route(
+    file: &ResolvedFile,
+    runtime_parent_identity: Option<FileIdentity>,
+) -> Result<(), OperationFailureCode> {
+    if let Some(anchor) = file.creation_parent.as_deref() {
+        return match runtime_parent_identity {
+            None => {
+                if fs::canonicalize(&file.requested_parent).is_ok() {
+                    return Err(OperationFailureCode::StalePlan);
+                }
+                let requested_anchor = file
+                    .requested_parent
+                    .parent()
+                    .ok_or(OperationFailureCode::StalePlan)?;
+                if fs::canonicalize(requested_anchor)
+                    .map_err(|_| OperationFailureCode::StalePlan)?
+                    != anchor
+                {
+                    return Err(OperationFailureCode::StalePlan);
+                }
+                let directory =
+                    open_directory(anchor).map_err(|_| OperationFailureCode::StalePlan)?;
+                if handle_identity(&directory) != Some(file.parent_identity) {
+                    Err(OperationFailureCode::StalePlan)
+                } else {
+                    Ok(())
+                }
+            }
+            Some(identity) => {
+                let current = fs::canonicalize(&file.requested_parent)
+                    .map_err(|_| OperationFailureCode::StalePlan)?;
+                if current != file.parent {
+                    return Err(OperationFailureCode::StalePlan);
+                }
+                let directory =
+                    open_directory(&file.parent).map_err(|_| OperationFailureCode::StalePlan)?;
+                if handle_identity(&directory) == Some(identity) {
+                    Ok(())
+                } else {
+                    Err(OperationFailureCode::StalePlan)
+                }
+            }
+        };
+    }
+
     let current_parent =
         fs::canonicalize(&file.requested_parent).map_err(|_| OperationFailureCode::StalePlan)?;
     if current_parent != file.parent {
@@ -2904,6 +3031,11 @@ where
 
     let mut artifacts = Vec::new();
     let mut cleanup_artifact_retained = false;
+    let mut destination_parent_identity = plan
+        .destination
+        .creation_parent
+        .is_none()
+        .then_some(plan.destination.parent_identity);
     // This guard outlives `execute_unix` so the cooperative source lock covers
     // every source-derived result postcondition and the final result assembly.
     let mut source_lock = None;
@@ -2913,6 +3045,7 @@ where
             artifacts: &mut artifacts,
             cleanup_artifact_retained: &mut cleanup_artifact_retained,
             source_lock: &mut source_lock,
+            destination_parent_identity: &mut destination_parent_identity,
         };
         execute_unix(&plan, session, producer, &mut outputs, &mut checkpoint)
     };
@@ -2923,7 +3056,12 @@ where
             .iter()
             .any(|artifact| artifact.role == OperationArtifactRole::PublishedDestination)
     {
-        match capture_current_destination_competitor(&plan, &artifacts, &mut checkpoint) {
+        match capture_current_destination_competitor(
+            &plan,
+            destination_parent_identity,
+            &artifacts,
+            &mut checkpoint,
+        ) {
             Ok(Some(captured)) => {
                 if !captured.evidence_verified {
                     execution = Err(OperationFailureCode::PublicationUncertain);
@@ -3118,6 +3256,7 @@ struct ExecutionOutputs<'a> {
     artifacts: &'a mut Vec<OwnedArtifact>,
     cleanup_artifact_retained: &'a mut bool,
     source_lock: &'a mut Option<SourceLockGuard>,
+    destination_parent_identity: &'a mut Option<FileIdentity>,
 }
 
 #[cfg(target_os = "macos")]
@@ -3135,14 +3274,15 @@ where
     let artifacts = &mut *outputs.artifacts;
     let cleanup_artifact_retained = &mut *outputs.cleanup_artifact_retained;
     let source_lock = &mut *outputs.source_lock;
+    let destination_parent_identity = &mut *outputs.destination_parent_identity;
     check_cancelled(session)?;
-    validate_file_route(&plan.source).map_err(|_| OperationFailureCode::StalePlan)?;
-    validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::StalePlan)?;
+    validate_file_route(&plan.source, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    validate_file_route(&plan.destination, None).map_err(|_| OperationFailureCode::StalePlan)?;
     validate_directory_route(&plan.workspace, None).map_err(|_| OperationFailureCode::StalePlan)?;
 
     let source_directory =
         open_directory(&plan.source.parent).map_err(|_| OperationFailureCode::SourceUnavailable)?;
-    let destination_directory = open_directory(&plan.destination.parent)
+    let destination_anchor_directory = open_directory(plan.destination.anchor())
         .map_err(|_| OperationFailureCode::DestinationUnavailable)?;
     let workspace_anchor = plan
         .workspace
@@ -3153,17 +3293,20 @@ where
     let mut workspace_directory =
         open_directory(workspace_anchor).map_err(|_| OperationFailureCode::WorkspaceUnavailable)?;
     verify_directory_identity(&source_directory, plan.source.parent_identity)?;
-    verify_directory_identity(&destination_directory, plan.destination.parent_identity)?;
+    verify_directory_identity(
+        &destination_anchor_directory,
+        plan.destination.parent_identity,
+    )?;
     let workspace_anchor_identity = plan
         .workspace
         .identity
         .or(plan.workspace.creation_parent_identity)
         .ok_or(OperationFailureCode::WorkspaceUnavailable)?;
     verify_directory_identity(&workspace_directory, workspace_anchor_identity)?;
-    if !qualified_local_apfs_volume(&destination_directory)
+    if !qualified_local_apfs_volume(&destination_anchor_directory)
         || !qualified_local_apfs_volume(&workspace_directory)
         || !handle_identity(&workspace_directory)
-            .zip(handle_identity(&destination_directory))
+            .zip(handle_identity(&destination_anchor_directory))
             .is_some_and(|(workspace, destination)| workspace.same_filesystem_as(destination))
     {
         return Err(OperationFailureCode::UnsupportedCapability);
@@ -3187,6 +3330,41 @@ where
     let source_file = &mut source_guard.file;
     verify_file_evidence(source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
+    let mut destination_directory = destination_anchor_directory;
+    if plan.destination.creation_parent.is_some() {
+        validate_file_route(&plan.destination, None)
+            .map_err(|_| OperationFailureCode::StalePlan)?;
+        let parent_name = plan
+            .destination
+            .parent
+            .file_name()
+            .ok_or(OperationFailureCode::UnsafePath)?;
+        match make_directory_at(&destination_directory, parent_name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(OperationFailureCode::StalePlan);
+            }
+            Err(_) => return Err(OperationFailureCode::DestinationUnavailable),
+        }
+        destination_directory = open_directory_at(&destination_directory, parent_name)
+            .map_err(|_| OperationFailureCode::DestinationUnavailable)?;
+        let created_identity = handle_identity(&destination_directory)
+            .ok_or(OperationFailureCode::UnsupportedCapability)?;
+        if !qualified_local_apfs_volume(&destination_directory)
+            || !handle_identity(&workspace_directory)
+                .is_some_and(|workspace| workspace.same_filesystem_as(created_identity))
+        {
+            return Err(OperationFailureCode::UnsupportedCapability);
+        }
+        if require_directory_writable(&destination_directory).is_err() {
+            return Err(OperationFailureCode::DestinationUnavailable);
+        }
+        *destination_parent_identity = Some(created_identity);
+    }
+    let destination_parent_identity =
+        destination_parent_identity.ok_or(OperationFailureCode::DestinationUnavailable)?;
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::StalePlan)?;
     ensure_destination_baseline(plan, &destination_directory)?;
     if plan.snapshot.conflict_policy == ConflictPolicy::Fail
         && plan.destination_baseline.is_some()
@@ -3215,8 +3393,17 @@ where
         session,
         checkpoint,
     )?;
-    validate_destination_lock(&destination_lock, &destination_directory, plan)?;
-    validate_plan_routes(plan, workspace_runtime_identity)?;
+    validate_destination_lock(
+        &destination_lock,
+        &destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
+    validate_plan_routes(
+        plan,
+        workspace_runtime_identity,
+        Some(destination_parent_identity),
+    )?;
     verify_source_entry(plan, &source_directory)?;
     ensure_destination_baseline(plan, &destination_directory)?;
     if plan.snapshot.conflict_policy == ConflictPolicy::Fail
@@ -3227,7 +3414,11 @@ where
     }
 
     if plan.already_up_to_date {
-        validate_plan_routes(plan, workspace_runtime_identity)?;
+        validate_plan_routes(
+            plan,
+            workspace_runtime_identity,
+            Some(destination_parent_identity),
+        )?;
         let mut current_source = open_file_at(&source_directory, &plan.source.name)
             .map_err(|_| OperationFailureCode::SourceChanged)?;
         verify_file_evidence(&mut current_source, &plan.source_baseline)
@@ -3266,7 +3457,11 @@ where
             expected_destination,
         )?;
         checkpoint(ExecutionCheckpoint::BeforeCompletion);
-        verify_destination_on_current_route(plan, expected_destination)?;
+        verify_destination_on_current_route(
+            plan,
+            destination_parent_identity,
+            expected_destination,
+        )?;
         if !session
             .begin_completion()
             .map_err(|_| OperationFailureCode::SessionUnavailable)?
@@ -3445,7 +3640,11 @@ where
     session.record_milestone(OperationMilestone::Validated);
 
     check_cancelled(session)?;
-    validate_plan_routes(plan, workspace_runtime_identity)?;
+    validate_plan_routes(
+        plan,
+        workspace_runtime_identity,
+        Some(destination_parent_identity),
+    )?;
     let mut current_source = open_file_at(&source_directory, &plan.source.name)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
     verify_file_evidence(&mut current_source, &plan.source_baseline)
@@ -3477,7 +3676,11 @@ where
 
     // Backup creation can take time. Revalidate every planned entry again so
     // the replacement commit follows the freshest available evidence.
-    validate_plan_routes(plan, workspace_runtime_identity)?;
+    validate_plan_routes(
+        plan,
+        workspace_runtime_identity,
+        Some(destination_parent_identity),
+    )?;
     verify_source_entry(plan, &source_directory)?;
     ensure_destination_baseline(plan, &destination_directory)?;
     let mut current_stage = open_file_at(&stage_directory, &stage_name)
@@ -3496,6 +3699,7 @@ where
         destination_directory: &destination_directory,
         destination_artifact_directory,
         destination_lock: &destination_lock,
+        destination_parent_identity,
         stage_directory: &stage_directory,
         workspace_runtime_identity,
         stage_name: &stage_name,
@@ -3535,9 +3739,11 @@ fn verify_directory_identity(
 fn validate_plan_routes(
     plan: &OperationPlan,
     workspace_runtime_identity: Option<FileIdentity>,
+    destination_parent_identity: Option<FileIdentity>,
 ) -> Result<(), OperationFailureCode> {
-    validate_file_route(&plan.source).map_err(|_| OperationFailureCode::StalePlan)?;
-    validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::StalePlan)?;
+    validate_file_route(&plan.source, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    validate_file_route(&plan.destination, destination_parent_identity)
+        .map_err(|_| OperationFailureCode::StalePlan)?;
     validate_directory_route(&plan.workspace, workspace_runtime_identity)
         .map_err(|_| OperationFailureCode::StalePlan)
 }
@@ -3595,21 +3801,25 @@ fn verify_destination_entry(
 #[cfg(target_os = "macos")]
 fn verify_destination_on_current_route(
     plan: &OperationPlan,
+    destination_parent_identity: FileIdentity,
     expected: &FileEvidence,
 ) -> Result<(), OperationFailureCode> {
-    let directory = open_destination_parent_on_current_route(plan)?;
+    let directory = open_destination_parent_on_current_route(plan, destination_parent_identity)?;
     verify_destination_entry(&directory, &plan.destination.name, expected)?;
-    validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::DestinationChanged)
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::DestinationChanged)
 }
 
 #[cfg(target_os = "macos")]
 fn open_destination_parent_on_current_route(
     plan: &OperationPlan,
+    destination_parent_identity: FileIdentity,
 ) -> Result<File, OperationFailureCode> {
-    validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::DestinationChanged)?;
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::DestinationChanged)?;
     let directory = open_directory(&plan.destination.parent)
         .map_err(|_| OperationFailureCode::DestinationChanged)?;
-    verify_directory_identity(&directory, plan.destination.parent_identity)
+    verify_directory_identity(&directory, destination_parent_identity)
         .map_err(|_| OperationFailureCode::DestinationChanged)?;
     Ok(directory)
 }
@@ -3617,12 +3827,14 @@ fn open_destination_parent_on_current_route(
 #[cfg(target_os = "macos")]
 fn verify_published_destination_on_current_route(
     plan: &OperationPlan,
+    destination_parent_identity: FileIdentity,
     identity: FileIdentity,
     expected: &FileEvidence,
 ) -> Result<(), OperationFailureCode> {
-    let directory = open_destination_parent_on_current_route(plan)?;
+    let directory = open_destination_parent_on_current_route(plan, destination_parent_identity)?;
     validate_published_file(&directory, &plan.destination.name, identity, expected)?;
-    validate_file_route(&plan.destination).map_err(|_| OperationFailureCode::PublicationUncertain)
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::PublicationUncertain)
 }
 
 #[cfg(target_os = "macos")]
@@ -3776,9 +3988,10 @@ fn validate_destination_lock(
     lock: &DestinationLock,
     directory: &File,
     plan: &OperationPlan,
+    destination_parent_identity: FileIdentity,
 ) -> Result<(), OperationFailureCode> {
     if lock.parent_path != plan.destination.parent
-        || lock.parent_identity != plan.destination.parent_identity
+        || lock.parent_identity != destination_parent_identity
         || handle_identity(directory) != Some(lock.parent_identity)
         || handle_identity(&lock._file) != Some(lock.marker_identity)
     {
@@ -4792,6 +5005,7 @@ struct PublicationContext<'a> {
     destination_directory: &'a File,
     destination_artifact_directory: File,
     destination_lock: &'a DestinationLock,
+    destination_parent_identity: FileIdentity,
     stage_directory: &'a File,
     workspace_runtime_identity: Option<FileIdentity>,
     stage_name: &'a OsStr,
@@ -4812,6 +5026,7 @@ struct PromotionValidation<'a> {
     workspace_runtime_identity: Option<FileIdentity>,
     destination_directory: &'a File,
     destination_lock: &'a DestinationLock,
+    destination_parent_identity: FileIdentity,
     stage_directory: &'a File,
     stage_name: &'a OsStr,
     stage_identity: FileIdentity,
@@ -4826,6 +5041,7 @@ fn validate_promotion_operands(
     let workspace_runtime_identity = validation.workspace_runtime_identity;
     let destination_directory = validation.destination_directory;
     let destination_lock = validation.destination_lock;
+    let destination_parent_identity = validation.destination_parent_identity;
     let stage_directory = validation.stage_directory;
     let stage_name = validation.stage_name;
     let stage_identity = validation.stage_identity;
@@ -4857,7 +5073,12 @@ fn validate_promotion_operands(
     }
 
     // Check the marker last so this path check is adjacent to the promotion syscall.
-    validate_destination_lock(destination_lock, destination_directory, plan)
+    validate_destination_lock(
+        destination_lock,
+        destination_directory,
+        plan,
+        destination_parent_identity,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -4870,12 +5091,22 @@ fn revalidate_before_promotion(
     let workspace_runtime_identity = validation.workspace_runtime_identity;
     let destination_directory = validation.destination_directory;
     let destination_lock = validation.destination_lock;
+    let destination_parent_identity = validation.destination_parent_identity;
     let stage_directory = validation.stage_directory;
     let stage_name = validation.stage_name;
     let stage_identity = validation.stage_identity;
     let staged = validation.staged;
-    validate_destination_lock(destination_lock, destination_directory, plan)?;
-    validate_plan_routes(plan, workspace_runtime_identity)?;
+    validate_destination_lock(
+        destination_lock,
+        destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
+    validate_plan_routes(
+        plan,
+        workspace_runtime_identity,
+        Some(destination_parent_identity),
+    )?;
     verify_source_entry_with_checkpoint(plan, source_directory, || {
         checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
     })?;
@@ -5104,10 +5335,14 @@ struct CapturedDestinationCompetitor {
 #[cfg(target_os = "macos")]
 fn capture_current_destination_competitor(
     plan: &OperationPlan,
+    destination_parent_identity: Option<FileIdentity>,
     artifacts: &[OwnedArtifact],
     _checkpoint: &mut dyn FnMut(ExecutionCheckpoint),
 ) -> Result<Option<CapturedDestinationCompetitor>, OperationFailureCode> {
-    let directory = open_destination_parent_on_current_route(plan)
+    let Some(destination_parent_identity) = destination_parent_identity else {
+        return Ok(None);
+    };
+    let directory = open_destination_parent_on_current_route(plan, destination_parent_identity)
         .map_err(|_| OperationFailureCode::PublicationUncertain)?;
     let parent_identity =
         handle_identity(&directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
@@ -5258,6 +5493,7 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
         destination_directory,
         destination_artifact_directory,
         destination_lock,
+        destination_parent_identity,
         stage_directory,
         workspace_runtime_identity,
         stage_name,
@@ -5285,7 +5521,12 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
         checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
     })?;
     checkpoint(ExecutionCheckpoint::AfterFinalSourceValidation);
-    validate_destination_lock(destination_lock, destination_directory, plan)?;
+    validate_destination_lock(
+        destination_lock,
+        destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
     let publication_inventory_directory = destination_artifact_directory
         .try_clone()
         .map_err(|_| OperationFailureCode::PublicationFailed)?;
@@ -5295,6 +5536,7 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
         workspace_runtime_identity,
         destination_directory,
         destination_lock,
+        destination_parent_identity,
         stage_directory,
         stage_name,
         stage_identity,
@@ -5396,7 +5638,14 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
         *cleanup_artifact_retained = true;
         return Err(OperationFailureCode::PublicationUncertain);
     }
-    if verify_published_destination_on_current_route(plan, stage_identity, staged).is_err() {
+    if verify_published_destination_on_current_route(
+        plan,
+        destination_parent_identity,
+        stage_identity,
+        staged,
+    )
+    .is_err()
+    {
         mark_artifact_retained(artifacts, stage_name);
         *cleanup_artifact_retained = true;
         return Err(OperationFailureCode::PublicationUncertain);
@@ -5414,6 +5663,7 @@ fn publish_replacement(
         destination_directory,
         destination_artifact_directory,
         destination_lock,
+        destination_parent_identity,
         stage_directory,
         workspace_runtime_identity,
         stage_name,
@@ -5473,7 +5723,12 @@ fn publish_replacement(
         checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
     })?;
     checkpoint(ExecutionCheckpoint::AfterFinalSourceValidation);
-    validate_destination_lock(destination_lock, destination_directory, plan)?;
+    validate_destination_lock(
+        destination_lock,
+        destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
     let publication_inventory_directory = destination_artifact_directory
         .try_clone()
         .map_err(|_| OperationFailureCode::PublicationFailed)?;
@@ -5483,6 +5738,7 @@ fn publish_replacement(
         workspace_runtime_identity,
         destination_directory,
         destination_lock,
+        destination_parent_identity,
         stage_directory,
         stage_name,
         stage_identity,
@@ -5659,7 +5915,14 @@ fn publish_replacement(
         *cleanup_artifact_retained = true;
         return Err(OperationFailureCode::PublicationUncertain);
     }
-    if verify_published_destination_on_current_route(plan, stage_identity, staged).is_err() {
+    if verify_published_destination_on_current_route(
+        plan,
+        destination_parent_identity,
+        stage_identity,
+        staged,
+    )
+    .is_err()
+    {
         mark_artifact_retained(artifacts, stage_name);
         *cleanup_artifact_retained = true;
         return Err(OperationFailureCode::PublicationUncertain);
@@ -5763,7 +6026,7 @@ fn verify_source_entry_with_checkpoint(
     source_directory: &File,
     checkpoint: impl FnMut(),
 ) -> Result<(), OperationFailureCode> {
-    validate_file_route(&plan.source).map_err(|_| OperationFailureCode::StalePlan)?;
+    validate_file_route(&plan.source, None).map_err(|_| OperationFailureCode::StalePlan)?;
     let mut source = open_file_at(source_directory, &plan.source.name)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
     verify_file_evidence_with_checkpoint(&mut source, &plan.source_baseline, checkpoint)

@@ -1,0 +1,32 @@
+{
+  "global_help": "Usage: nscb <command> [options]\n\nCommands:\n  probe <path>\n  recognize <path>\n  resolve\n  inspect <path>\n  verify <path>\n  copy <source> [destination]\n  config <path|show|set|reset>\n  keys set <source>\n\nGlobal options:\n  -h, --help       Show this help without initializing configuration.\n  -V, --version    Show the NSCB version without initializing configuration.",
+  "global_version": "nscb {version}",
+  "config_usage": "Usage: nscb config <path|show|set|reset> [--json]",
+  "config_path": "Configuration file: {path}",
+  "config_show_header": "Configuration file: {path}\nSchema version: {schema_version}",
+  "config_show_value": "  {name} = {value} ({source})",
+  "config_updated": "Updated {name} in {path}: {value}",
+  "config_reset": "Reset standalone configuration: {path}",
+  "keys_usage": "Usage: nscb keys set <source> [--json]",
+  "keys_set": "Installed the complete key file at {path}.",
+  "keys_errors": {
+    "key_file_unavailable": "The selected key source could not be read as a regular file.",
+    "key_file_limit_exceeded": "The selected key source exceeds the supported size limit.",
+    "key_file_malformed": "The selected key source contains malformed header-key entries.",
+    "missing_header_key": "The selected key source has no header_key or nca_header_key entry.",
+    "home_directory_unavailable": "The home directory for the conventional key file is unavailable.",
+    "key_destination_write_failed": "The conventional key file could not be replaced safely."
+  },
+  "config_errors": {
+    "config_directory_unavailable": "The per-user configuration directory is unavailable.",
+    "config_read_failed": "The configuration file could not be read.",
+    "config_write_failed": "The configuration file could not be saved safely.",
+    "config_lock_failed": "The configuration file is busy or cannot be locked.",
+    "config_limit_exceeded": "The configuration file exceeds the supported size limit.",
+    "config_parse_failed": "The configuration file is not valid TOML.",
+    "config_type_invalid": "A configuration value has the wrong TOML type.",
+    "config_path_invalid": "A configured path must be absolute and usable.",
+    "config_backup_failed": "The existing configuration could not be backed up safely before migration.",
+    "config_version_unsupported": "The configuration schema is newer than this NSCB version supports."
+  }
+}

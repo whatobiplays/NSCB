@@ -28,20 +28,26 @@ command dispatcher.
 ## Command line
 
 ```
-nscb copy <source> <destination> [--workspace <path>] [--replace] [--json | --jsonl]
+nscb copy <source> [<destination>] [--workspace <path>] [--replace] [--json | --jsonl]
 ```
 
-The command requires exactly one source and one destination. It never prompts.
+The command requires one source and accepts zero or one destination. An
+explicit destination overrides standalone configuration. When the destination
+is omitted, the standalone adapter resolves the configured `output_dir`, or
+the native `Documents/NSCB_output` default, followed by the source file name.
+The Engine still receives one concrete destination. The command never prompts.
 The default conflict policy refuses to replace a different existing
 destination. `--replace` selects the qualified replacement path. Without
 `--workspace`, staging uses the host temporary directory under
-`nscb-copy-through`; no configuration is persisted. The workspace directory
-created for an invocation remains operation-owned evidence and is reported in
-the terminal artifact inventory.
+`nscb-copy-through`. Normal standalone startup initializes or loads the
+standalone configuration; a Copy invocation does not persist its per-job
+source, destination, workspace, or replacement choices. The workspace
+directory created for an invocation remains operation-owned evidence and is
+reported in the terminal artifact inventory.
 
 `--json` and `--jsonl` are mutually exclusive. Repeating an option, supplying an
 unknown `--` option, omitting a `--workspace` value, or providing anything other
-than one source and one destination is a usage error with exit class 2. When a
+than one source and at most one destination is a usage error with exit class 2. When a
 machine mode was requested, the invocation emits one `error` record with code
 `usage_error`.
 
@@ -99,6 +105,19 @@ operation does not roll back over uncertain data.
 Planning reads the source, destination, and selected workspace without
 creating or modifying anything. The returned `OperationPlan` is an in-memory
 capability and cannot be reconstructed from its snapshot.
+
+For copy-through, one missing final destination-directory component is allowed
+beneath an existing canonical parent. Planning records that immutable
+precondition and a `CreateDestinationParent` effect without creating or
+write-probing the directory. Execution revalidates the anchor, completes source
+preflight, and creates only that final component before continuing through
+conflict checks, staging, validation, and atomic publication. Additional missing
+parent components remain unavailable.
+
+A host-default workspace on another volume still selects the destination-local
+fallback for one safely missing final directory. That fallback stages beside the
+same existing anchor, and execution creates the missing component before any
+staging entry appears.
 
 Execution is host-owned. A host that needs events performs these steps:
 
