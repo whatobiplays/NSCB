@@ -427,7 +427,7 @@ struct CliInvocation {
 }
 
 /// Adapts typed Container Probe requests and errors to the stable CLI contract.
-#[cfg(any(test, not(target_os = "macos")))]
+#[cfg(test)]
 pub(crate) fn run(
     args: &[OsString],
     engine: &Engine,
@@ -1906,7 +1906,7 @@ fn write_last_job_completion(session: &OperationSession, stdout: &mut dyn Write)
     )
 }
 
-#[cfg(any(test, not(target_os = "macos")))]
+#[cfg(test)]
 fn run_copy(
     args: &[OsString],
     engine: &Engine,

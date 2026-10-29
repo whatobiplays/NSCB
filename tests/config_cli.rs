@@ -5,6 +5,7 @@ mod support;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+#[cfg(target_os = "macos")]
 use support::synthetic_verification::{Spec as VerificationSpec, build as build_verification};
 
 const MAX_CONFIG_BYTES: usize = 1_048_576;
@@ -32,10 +33,11 @@ fn config_path(home: &Path) -> PathBuf {
     config_path_with_config_home(home, &home.join("xdg-config"))
 }
 
-fn config_path_with_config_home(home: &Path, _config_home: &Path) -> PathBuf {
+fn config_path_with_config_home(_home: &Path, _config_home: &Path) -> PathBuf {
     #[cfg(target_os = "macos")]
     {
-        home.join("Library")
+        _home
+            .join("Library")
             .join("Application Support")
             .join("NSCB")
             .join("config.toml")
@@ -48,7 +50,8 @@ fn config_path_with_config_home(home: &Path, _config_home: &Path) -> PathBuf {
 
     #[cfg(target_os = "windows")]
     {
-        home.join("AppData")
+        _home
+            .join("AppData")
             .join("Roaming")
             .join("NSCB")
             .join("config.toml")
