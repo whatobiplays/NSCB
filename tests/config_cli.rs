@@ -252,6 +252,8 @@ fn control_character_home_initializes_readable_configuration() {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path().join("home\nwith-\u{0001}-control");
     std::fs::create_dir(&home).unwrap();
+    let documents = directory.path().join("documents");
+    write_xdg_documents_mapping(&home, &documents);
     let expected_keys_path = home.join(".switch").join("prod.keys");
 
     let output = run(&home, &["config", "show", "--json"]);
@@ -295,6 +297,7 @@ fn ordinary_standalone_startup_initializes_configuration_before_the_command() {
 #[test]
 fn config_show_reports_defaults_and_redacts_sensitive_manual_values() {
     let directory = tempfile::tempdir().unwrap();
+    write_xdg_documents_mapping(directory.path(), &directory.path().join("documents"));
     write_config(
         directory.path(),
         "schema_version = 1\n\n[translation]\napi_key = \"synthetic-secret\"\nnote = \"manual value\"\n",
@@ -339,6 +342,7 @@ fn config_show_reports_defaults_and_redacts_sensitive_manual_values() {
 #[test]
 fn config_show_preserves_a_placeholder_like_unknown_value() {
     let directory = tempfile::tempdir().unwrap();
+    write_xdg_documents_mapping(directory.path(), &directory.path().join("documents"));
     write_config(
         directory.path(),
         "schema_version = 1\n\n[translation]\nnote = \"{source}\"\n",
@@ -411,6 +415,7 @@ fn config_show_preserves_placeholder_braces_in_the_configuration_path() {
 #[test]
 fn config_show_redacts_inline_and_nested_sensitive_fields() {
     let directory = tempfile::tempdir().unwrap();
+    write_xdg_documents_mapping(directory.path(), &directory.path().join("documents"));
     write_config(
         directory.path(),
         "schema_version = 1\ntranslation = { api_key = \"inline-secret\", nested = { refresh_token = \"nested-secret\", note = \"retain\" } }\n",
@@ -446,6 +451,7 @@ fn config_show_redacts_inline_and_nested_sensitive_fields() {
 #[test]
 fn config_show_redacts_conventional_credential_fields_and_keeps_keys_path_visible() {
     let directory = tempfile::tempdir().unwrap();
+    write_xdg_documents_mapping(directory.path(), &directory.path().join("documents"));
     let configured_keys_path = "/synthetic/redaction-regression/keys";
     let sentinels = [
         ("aws_access_key", "SYNTHETIC_AWS_ACCESS_KEY_SENTINEL"),
@@ -628,6 +634,7 @@ fn legacy_config_is_read_without_rewrite_and_migrates_only_on_explicit_save() {
     let original = "keys_path = \"/synthetic/keys\"\n\n[translation]\nnote = \"preserve\"\n";
     let path = write_config(directory.path(), original);
 
+    write_xdg_documents_mapping(directory.path(), &directory.path().join("documents"));
     let show = run(directory.path(), &["config", "show", "--json"]);
     assert_eq!(show.status.code(), Some(0));
     assert_eq!(one_document(&show)["result"]["schema_version"], 0);
