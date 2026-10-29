@@ -1,0 +1,14 @@
+tests/config_cli.rs
+  h_2e7f3207901880 255-256,300,345,418,454,637
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f3f2023e3339675b06640ee0fb637898ada918a0",
+  "prompts": {},
+  "humans": {
+    "h_2e7f3207901880": {
+      "author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
