@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 use crate::cli_reporting::{ReportingControl, ReportingSession};
+use crate::standalone::StandaloneConfig;
 use nscb::{
     CancellationHandle, ConflictPolicy, ContainerProbeError, ContainerProbeErrorCode,
     CopyThroughRequest, Engine, InputResolutionCapabilities, InputResolutionRequest,
@@ -170,6 +171,39 @@ mod inspection_cli_tests {
             super::resolve_inspection_key_file(None, None, None).unwrap_err(),
             nscb::InspectionErrorCode::InvalidKeyPath
         );
+    }
+
+    #[test]
+    fn configured_key_selection_precedes_home_without_requiring_file_existence() {
+        let configured = PathBuf::from("/fixture/configured-missing.keys");
+        assert_eq!(
+            super::resolve_inspection_key_file(
+                None,
+                Some(configured.clone()),
+                Some(PathBuf::from("/fixture/home")),
+            )
+            .unwrap(),
+            configured
+        );
+    }
+
+    #[test]
+    fn shared_cli_key_file_resolver_preserves_explicit_and_home_defaults() {
+        let home = PathBuf::from("/fixture/home");
+        assert_eq!(
+            super::resolve_cli_key_file(
+                Some(PathBuf::from("/explicit/prod.keys")),
+                None,
+                Some(home.clone()),
+            )
+            .unwrap(),
+            PathBuf::from("/explicit/prod.keys")
+        );
+        assert_eq!(
+            super::resolve_cli_key_file(None, None, Some(home.clone())).unwrap(),
+            home.join(".switch").join("prod.keys")
+        );
+        assert!(super::resolve_cli_key_file(None, None, None).is_err());
     }
 
     #[test]
@@ -393,6 +427,7 @@ struct CliInvocation {
 }
 
 /// Adapts typed Container Probe requests and errors to the stable CLI contract.
+#[cfg(test)]
 pub(crate) fn run(
     args: &[OsString],
     engine: &Engine,
@@ -401,23 +436,41 @@ pub(crate) fn run(
 ) -> i32 {
     #[cfg(target_os = "macos")]
     {
-        run_with_control(args, engine, stdout, stderr, None)
+        run_with_control(args, engine, None, stdout, stderr, None)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        run_with_control(args, engine, stdout, stderr)
+        run_with_control(args, engine, None, stdout, stderr)
+    }
+}
+
+pub(crate) fn run_with_standalone_config(
+    args: &[OsString],
+    engine: &Engine,
+    config: &StandaloneConfig,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        run_with_control(args, engine, Some(config), stdout, stderr, None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_with_control(args, engine, Some(config), stdout, stderr)
     }
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn run_with_reporting(
+pub(crate) fn run_with_reporting_and_standalone_config(
     args: &[OsString],
     engine: &Engine,
+    config: &StandaloneConfig,
     reporting: &mut ReportingSession,
 ) -> i32 {
     let control = reporting.control();
     let (stdout, stderr) = reporting.writers();
-    run_with_control(args, engine, stdout, stderr, Some(&control))
+    run_with_control(args, engine, Some(config), stdout, stderr, Some(&control))
 }
 
 pub(crate) fn is_copy_command(args: &[OsString]) -> bool {
@@ -428,6 +481,7 @@ pub(crate) fn is_copy_command(args: &[OsString]) -> bool {
 fn run_with_control(
     args: &[OsString],
     engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
@@ -435,11 +489,11 @@ fn run_with_control(
     if is_copy_command(args) {
         #[cfg(target_os = "macos")]
         {
-            return run_copy_with_control(args, engine, stdout, stderr, reporting);
+            return run_copy_with_control(args, engine, standalone, stdout, stderr, reporting);
         }
         #[cfg(not(target_os = "macos"))]
         {
-            return run_copy(args, engine, stdout, stderr);
+            return run_copy_with_standalone_config(args, engine, standalone, stdout, stderr);
         }
     }
 
@@ -447,7 +501,7 @@ fn run_with_control(
         .first()
         .is_some_and(|argument| argument == OsStr::new("inspect"))
     {
-        return run_inspection(args, engine, stdout, stderr);
+        return run_inspection(args, engine, standalone, stdout, stderr);
     }
 
     if args
@@ -461,7 +515,7 @@ fn run_with_control(
         .first()
         .is_some_and(|argument| argument == OsStr::new("verify"))
     {
-        return run_verification(args, engine, stdout, stderr);
+        return run_verification(args, engine, standalone, stdout, stderr);
     }
 
     let json_requested = args.iter().any(|argument| argument == OsStr::new("--json"));
@@ -1047,6 +1101,7 @@ thread_local! {
 fn run_inspection(
     args: &[OsString],
     engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -1071,9 +1126,16 @@ fn run_inspection(
         }
     };
     let key_file =
-        match resolve_inspection_key_file(invocation.key_file, None, inspection_home_directory()) {
+        match resolve_cli_key_file(invocation.key_file, standalone, inspection_home_directory()) {
             Ok(path) => path,
-            Err(code) => return emit_inspection_error(stdout, stderr, code, invocation.json),
+            Err(_) => {
+                return emit_inspection_error(
+                    stdout,
+                    stderr,
+                    InspectionErrorCode::InvalidKeyPath,
+                    invocation.json,
+                );
+            }
         };
     let cache_dir = match invocation.cache_dir {
         Some(cache_dir) => cache_dir,
@@ -1187,6 +1249,27 @@ fn resolve_inspection_key_file(
     }
     let home = home.ok_or(InspectionErrorCode::InvalidKeyPath)?;
     Ok(home.join(".switch").join("prod.keys"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliKeyFileResolutionError {
+    InvalidPath,
+}
+
+fn resolve_cli_key_file(
+    explicit: Option<PathBuf>,
+    standalone: Option<&StandaloneConfig>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf, CliKeyFileResolutionError> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let configured = standalone
+        .map(|config| config.effective_key_file())
+        .transpose()
+        .map_err(|_| CliKeyFileResolutionError::InvalidPath)?;
+    resolve_inspection_key_file(None, configured, home)
+        .map_err(|_| CliKeyFileResolutionError::InvalidPath)
 }
 
 fn resolve_home_directory(
@@ -1314,6 +1397,7 @@ fn parse_verification(args: &[OsString]) -> Result<VerificationInvocation, ()> {
 fn run_verification(
     args: &[OsString],
     engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -1356,7 +1440,7 @@ fn run_verification(
         };
     }
     let key_file =
-        match resolve_inspection_key_file(invocation.key_file, None, inspection_home_directory()) {
+        match resolve_cli_key_file(invocation.key_file, standalone, inspection_home_directory()) {
             Ok(path) => path,
             Err(_) => {
                 return emit_verification_error(
@@ -1594,7 +1678,7 @@ fn write_json(document: &impl Serialize, stdout: &mut dyn Write) -> bool {
 
 struct CopyInvocation {
     source: PathBuf,
-    destination: PathBuf,
+    destination: Option<PathBuf>,
     workspace: Option<PathBuf>,
     replace: bool,
     json: bool,
@@ -1657,10 +1741,14 @@ fn parse_copy(args: &[OsString]) -> Result<CopyInvocation, ()> {
     if json && jsonl {
         return Err(());
     }
-    if positionals.len() != 2 {
+    if !(1..=2).contains(&positionals.len()) {
         return Err(());
     }
-    let destination = positionals.pop().ok_or(())?;
+    let destination = if positionals.len() == 2 {
+        Some(positionals.pop().ok_or(())?)
+    } else {
+        None
+    };
     let source = positionals.pop().ok_or(())?;
     Ok(CopyInvocation {
         source,
@@ -1818,7 +1906,7 @@ fn write_last_job_completion(session: &OperationSession, stdout: &mut dyn Write)
     )
 }
 
-#[cfg(any(test, not(target_os = "macos")))]
+#[cfg(test)]
 fn run_copy(
     args: &[OsString],
     engine: &Engine,
@@ -1827,28 +1915,41 @@ fn run_copy(
 ) -> i32 {
     #[cfg(target_os = "macos")]
     {
-        run_copy_with_control(args, engine, stdout, stderr, None)
+        run_copy_with_control(args, engine, None, stdout, stderr, None)
     }
     #[cfg(not(target_os = "macos"))]
     {
-        run_copy_impl(args, engine, stdout, stderr)
+        run_copy_impl(args, engine, None, stdout, stderr)
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_copy_with_standalone_config(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    run_copy_impl(args, engine, standalone, stdout, stderr)
 }
 
 #[cfg(target_os = "macos")]
 fn run_copy_with_control(
     args: &[OsString],
     engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     reporting: Option<&ReportingControl>,
 ) -> i32 {
-    run_copy_impl(args, engine, stdout, stderr, reporting)
+    run_copy_impl(args, engine, standalone, stdout, stderr, reporting)
 }
 
 fn run_copy_impl(
     args: &[OsString],
     engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
@@ -1873,10 +1974,49 @@ fn run_copy_impl(
             };
         }
     };
+    let destination = match invocation.destination {
+        Some(destination) => destination,
+        None => {
+            let Some(config) = standalone else {
+                #[cfg(target_os = "macos")]
+                if let Some(reporting) = reporting {
+                    reporting.pre_admission_complete();
+                }
+                if machine_requested {
+                    return emit_error(stdout, "usage_error", EXIT_USAGE);
+                }
+                return if write_copy_record(stderr, crate::localization::english::copy_usage()) {
+                    EXIT_USAGE
+                } else {
+                    EXIT_INTERNAL
+                };
+            };
+            match config.copy_destination(&invocation.source) {
+                Ok(destination) => destination,
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(reporting) = reporting {
+                        reporting.pre_admission_complete();
+                    }
+                    if machine_requested {
+                        return emit_error(stdout, error.code(), EXIT_INPUT);
+                    }
+                    return if write_copy_record(
+                        stderr,
+                        crate::localization::english::copy_error_message(error.code()),
+                    ) {
+                        EXIT_INPUT
+                    } else {
+                        EXIT_INTERNAL
+                    };
+                }
+            }
+        }
+    };
     if machine_requested
         && !paths_are_json_representable(
             std::iter::once(invocation.source.as_path())
-                .chain(std::iter::once(invocation.destination.as_path()))
+                .chain(std::iter::once(destination.as_path()))
                 .chain(invocation.workspace.as_deref()),
         )
     {
@@ -1888,12 +2028,10 @@ fn run_copy_impl(
     }
 
     let request = match invocation.workspace {
-        Some(workspace) => {
-            CopyThroughRequest::new(&invocation.source, &invocation.destination, workspace)
-        }
+        Some(workspace) => CopyThroughRequest::new(&invocation.source, &destination, workspace),
         None => CopyThroughRequest::with_host_default_workspace(
             &invocation.source,
-            &invocation.destination,
+            &destination,
             default_copy_workspace(),
         ),
     };
@@ -2580,7 +2718,10 @@ mod copy_cli_tests {
         ]))
         .expect("valid copy invocation");
         assert_eq!(parsed.source, std::path::Path::new("source.bin"));
-        assert_eq!(parsed.destination, std::path::Path::new("destination.bin"));
+        assert_eq!(
+            parsed.destination.as_deref(),
+            Some(std::path::Path::new("destination.bin"))
+        );
         assert_eq!(
             parsed.workspace.as_deref(),
             Some(std::path::Path::new("staging"))
@@ -2591,10 +2732,17 @@ mod copy_cli_tests {
     }
 
     #[test]
+    fn copy_parser_allows_an_omitted_destination() {
+        let parsed = parse_copy(&args(&["copy", "source.bin", "--json"])).unwrap();
+        assert_eq!(parsed.source, std::path::Path::new("source.bin"));
+        assert!(parsed.destination.is_none());
+        assert!(parsed.json);
+    }
+
+    #[test]
     fn copy_parser_rejects_ambiguous_and_incomplete_invocations() {
         for invalid in [
             &["copy"][..],
-            &["copy", "source.bin"][..],
             &["copy", "source", "destination", "extra"][..],
             &["copy", "source", "destination", "--json", "--jsonl"][..],
             &["copy", "source", "destination", "--json", "--json"][..],

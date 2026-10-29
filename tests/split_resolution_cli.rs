@@ -43,6 +43,18 @@ fn run(args: &[&str], cwd: &Path, state_directory: &Path) -> std::process::Outpu
         .args(args)
         .current_dir(cwd)
         .env("NSCB_STATE_DIR", state_directory)
+        .env("HOME", cwd.join("test-home"))
+        .env("USERPROFILE", cwd.join("test-home"))
+        .env(
+            "APPDATA",
+            cwd.join("test-home").join("AppData").join("Roaming"),
+        )
+        .env(
+            "LOCALAPPDATA",
+            cwd.join("test-home").join("AppData").join("Local"),
+        )
+        .env("XDG_CONFIG_HOME", cwd.join("test-config"))
+        .env("XDG_CACHE_HOME", cwd.join("test-cache"))
         .output()
         .expect("run nscb")
 }

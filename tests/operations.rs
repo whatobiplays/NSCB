@@ -55,6 +55,110 @@ fn operation_paths() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathB
 }
 
 #[cfg(target_os = "macos")]
+#[test]
+fn missing_destination_parent_is_planned_and_created_only_when_the_plan_executes() {
+    let (root, source, _unused_destination) = operation_paths();
+    let output_directory = root.path().join("implicit-output");
+    let destination = output_directory.join("source.bin");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create staging workspace");
+    let engine = Engine::new();
+
+    let plan = engine
+        .plan_copy_through(CopyThroughRequest::new(&source, &destination, &workspace))
+        .expect("plan a missing destination parent without creating it");
+
+    assert_eq!(
+        plan.snapshot().destination(),
+        root.path()
+            .canonicalize()
+            .unwrap()
+            .join("implicit-output")
+            .join("source.bin")
+    );
+    assert!(
+        !output_directory.exists(),
+        "read-only planning must not create the implicit output directory"
+    );
+    assert_eq!(
+        serde_json::to_value(plan.snapshot().effects()).expect("serialize planned effects"),
+        serde_json::json!([
+            "read_source",
+            "coordinate_destination",
+            "create_private_staging_directory",
+            "create_staging_file",
+            "create_destination_parent",
+            "create_destination",
+        ])
+    );
+
+    let result = engine.execute_operation(plan, &OperationSession::new());
+
+    assert_eq!(result.state(), JobState::Succeeded, "{result:?}");
+    assert_eq!(result.outcome(), Some(OperationOutcome::Copied));
+    assert_eq!(fs::read(destination).unwrap(), fs::read(source).unwrap());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn missing_destination_parent_created_after_planning_is_stale_and_preserved() {
+    let (root, source, _unused_destination) = operation_paths();
+    let output_directory = root.path().join("implicit-output");
+    let destination = output_directory.join("source.bin");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create staging workspace");
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_through(CopyThroughRequest::new(&source, &destination, &workspace))
+        .expect("plan a missing destination parent without creating it");
+
+    fs::create_dir(&output_directory).expect("competing writer creates destination parent");
+    fs::write(
+        output_directory.join("keep.bin"),
+        b"preserve competing entry",
+    )
+    .expect("write competing destination-parent entry");
+    let result = engine.execute_operation(plan, &OperationSession::new());
+
+    assert_eq!(result.state(), JobState::Failed);
+    assert_eq!(
+        result.failure().unwrap().code(),
+        OperationFailureCode::StalePlan
+    );
+    assert!(!destination.exists());
+    assert_eq!(
+        fs::read(output_directory.join("keep.bin")).unwrap(),
+        b"preserve competing entry"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn source_planning_failure_does_not_create_the_missing_destination_parent() {
+    let (root, _source, _unused_destination) = operation_paths();
+    let missing_source = root.path().join("missing.bin");
+    let output_directory = root.path().join("implicit-output");
+    let destination = output_directory.join("missing.bin");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create staging workspace");
+
+    let error = match Engine::new().plan_copy_through(CopyThroughRequest::new(
+        &missing_source,
+        &destination,
+        &workspace,
+    )) {
+        Ok(_) => panic!("missing source must fail during planning"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), OperationFailureCode::SourceUnavailable);
+    assert!(
+        !output_directory.exists(),
+        "source failure must not create the implicit output directory"
+    );
+}
+
+#[cfg(target_os = "macos")]
 fn retained_artifact(
     result: &nscb::OperationResult,
     role: OperationArtifactRole,
@@ -749,6 +853,78 @@ fn retargeted_parent_symlink_invalidates_the_resolved_plan() {
         OperationFailureCode::StalePlan
     );
     assert!(!destination.exists());
+}
+
+/// Returns an existing directory whose filesystem differs from `reference`.
+///
+/// The copy-through plan only consults this directory to decide whether the
+/// host workspace is qualified for the destination volume. macOS always mounts
+/// devfs at `/dev`, so it provides a real cross-volume directory without
+/// creating or mounting a second volume inside the test.
+#[cfg(target_os = "macos")]
+fn directory_on_another_filesystem(reference: &std::path::Path) -> std::path::PathBuf {
+    use std::os::unix::fs::MetadataExt;
+
+    let reference_device = fs::metadata(reference)
+        .expect("inspect destination filesystem")
+        .dev();
+    ["/dev", "/System/Volumes/Preboot", "/Volumes"]
+        .into_iter()
+        .map(std::path::PathBuf::from)
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .map(|metadata| metadata.dev() != reference_device)
+                .unwrap_or(false)
+        })
+        .expect("locate an existing directory on another filesystem")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cross_volume_host_workspace_falls_back_with_one_missing_output_directory() {
+    let (root, source, _unused_destination) = operation_paths();
+    let output_directory = root.path().join("implicit-output");
+    let destination = output_directory.join("source.bin");
+    let cross_volume_workspace = directory_on_another_filesystem(root.path());
+    let engine = Engine::new();
+
+    let plan = engine
+        .plan_copy_through(CopyThroughRequest::with_host_default_workspace(
+            &source,
+            &destination,
+            &cross_volume_workspace,
+        ))
+        .expect("plan destination-local fallback beside one missing output directory");
+
+    assert_eq!(
+        plan.snapshot().staging_strategy(),
+        StagingStrategy::DestinationLocalFallback
+    );
+    assert_eq!(
+        plan.snapshot().workspace(),
+        root.path().canonicalize().unwrap()
+    );
+    assert!(
+        !output_directory.exists(),
+        "read-only planning must not create the implicit output directory"
+    );
+    assert_eq!(
+        serde_json::to_value(plan.snapshot().effects()).expect("serialize planned effects"),
+        serde_json::json!([
+            "read_source",
+            "coordinate_destination",
+            "create_private_staging_directory",
+            "create_staging_file",
+            "create_destination_parent",
+            "create_destination",
+        ])
+    );
+
+    let result = engine.execute_operation(plan, &OperationSession::new());
+
+    assert_eq!(result.state(), JobState::Succeeded, "{result:?}");
+    assert_eq!(result.outcome(), Some(OperationOutcome::Copied));
+    assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
 }
 
 #[cfg(not(target_os = "macos"))]

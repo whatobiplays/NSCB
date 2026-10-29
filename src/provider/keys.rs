@@ -4,52 +4,15 @@
 //! ignored. Only a sanitized key file containing the normalized header key is
 //! presented to the helper.
 use crate::inspection::InspectionErrorCode;
-use std::fmt;
+pub(crate) use crate::key_file::HeaderKey;
+use crate::key_file::{KeyFileParseError, parse_header_key_bytes};
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
-pub(crate) const MAX_KEY_FILE_BYTES: u64 = 1024 * 1024;
-const HEADER_KEY_ALIASES: [&str; 2] = ["header_key", "nca_header_key"];
-
-/// A parsed header key whose presence is independent of its byte values.
-pub(crate) struct HeaderKey {
-    bytes: [u8; 32],
-    present: bool,
-}
-
-impl HeaderKey {
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.bytes
-    }
-
-    fn set(&mut self, bytes: [u8; 32]) -> Result<(), InspectionErrorCode> {
-        if self.present && self.bytes != bytes {
-            return Err(InspectionErrorCode::KeyFileMalformed);
-        }
-        self.bytes = bytes;
-        self.present = true;
-        Ok(())
-    }
-
-    fn is_set(&self) -> bool {
-        self.present
-    }
-}
-
-impl fmt::Debug for HeaderKey {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("HeaderKey([REDACTED])")
-    }
-}
-
-impl Drop for HeaderKey {
-    fn drop(&mut self) {
-        self.bytes.fill(0);
-    }
-}
+pub(crate) use crate::key_file::MAX_KEY_FILE_BYTES;
 
 pub(crate) fn read_header_key(
     reader: &mut impl Read,
@@ -68,46 +31,12 @@ pub(crate) fn read_header_key(
         return Err(InspectionErrorCode::KeyFileUnavailable);
     }
 
-    let mut key = HeaderKey {
-        bytes: [0; 32],
-        present: false,
-    };
-    let mut conflict = false;
-    for line in bytes.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let line = trim_ascii(line);
-        if line.is_empty() || line.starts_with(b"#") || line.starts_with(b";") {
-            continue;
-        }
-        let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
-            conflict = true;
-            continue;
-        };
-        let name = trim_ascii(&line[..separator]);
-        let value = trim_ascii(&line[separator + 1..]);
-        let Ok(name) = std::str::from_utf8(name) else {
-            conflict = true;
-            continue;
-        };
-        if !HEADER_KEY_ALIASES.contains(&name) {
-            continue;
-        }
-        let Some(decoded) = decode_hex_32(value) else {
-            conflict = true;
-            continue;
-        };
-        if key.set(decoded).is_err() {
-            conflict = true;
-        }
-    }
+    let parsed = parse_header_key_bytes(&bytes).map_err(|error| match error {
+        KeyFileParseError::Malformed => InspectionErrorCode::KeyFileMalformed,
+        KeyFileParseError::MissingHeaderKey => InspectionErrorCode::MissingHeaderKey,
+    });
     bytes.fill(0);
-    if conflict {
-        return Err(InspectionErrorCode::KeyFileMalformed);
-    }
-    if !key.is_set() {
-        return Err(InspectionErrorCode::MissingHeaderKey);
-    }
-    Ok(key)
+    parsed
 }
 
 fn read_exact_or_clear(reader: &mut impl Read, bytes: &mut [u8]) -> std::io::Result<()> {
@@ -128,7 +57,7 @@ pub(crate) fn write_sanitized(path: &Path, key: &HeaderKey) -> Result<(), Inspec
         .map_err(|_| InspectionErrorCode::InternalIo)?;
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = [0_u8; 64];
-    for (index, byte) in key.bytes.iter().enumerate() {
+    for (index, byte) in key.as_bytes().iter().enumerate() {
         encoded[index * 2] = HEX[usize::from(byte >> 4)];
         encoded[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
     }
@@ -142,36 +71,6 @@ fn write_sanitized_bytes(writer: &mut impl Write, encoded: &mut [u8; 64]) -> io:
         .and_then(|_| writer.write_all(b"\n"));
     encoded.fill(0);
     result
-}
-
-fn trim_ascii(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(|byte| byte.is_ascii_whitespace()) {
-        value = &value[1..];
-    }
-    while value.last().is_some_and(|byte| byte.is_ascii_whitespace()) {
-        value = &value[..value.len() - 1];
-    }
-    value
-}
-
-fn decode_hex_32(value: &[u8]) -> Option<[u8; 32]> {
-    if value.len() != 64 {
-        return None;
-    }
-    let mut result = [0_u8; 32];
-    for (index, pair) in value.as_chunks::<2>().0.iter().enumerate() {
-        result[index] = (decode_nibble(pair[0])? << 4) | decode_nibble(pair[1])?;
-    }
-    Some(result)
-}
-
-fn decode_nibble(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -406,7 +305,7 @@ mod tests {
             "42".repeat(32),
             "11".repeat(16)
         );
-        let mut key = read_header_key(
+        let key = read_header_key(
             &mut Cursor::new(text.clone().into_bytes()),
             text.len() as u64,
         )
@@ -415,7 +314,7 @@ mod tests {
         let written = fs::read_to_string(&path).unwrap();
         assert_eq!(written, format!("header_key = {}\n", "42".repeat(32)));
         assert!(!written.contains(&"11".repeat(16)));
-        key.bytes.fill(0);
+        drop(key);
         let _ = fs::remove_dir_all(directory);
     }
 

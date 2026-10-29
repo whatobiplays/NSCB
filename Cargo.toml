@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 aes = "0.8"
 command-group = "5.0"
+dirs = "6.0"
 fs2 = "0.4"
 rsa = { version = "=0.9.10", features = ["sha2"] }
 serde = { version = "1", features = ["derive"] }
@@ -22,6 +23,7 @@ serde_json = "1"
 sha2 = "0.10"
 signal-hook = "0.3"
 tempfile = "3.13"
+toml_edit = "0.22"
 unicode-normalization = "0.1"
 ureq = "=2.12.1"
 url = "=2.5.8"

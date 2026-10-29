@@ -26,6 +26,10 @@ fallback when the destination volume is qualified for it. An explicit
 cross-filesystem workspace override returns `UnsupportedCapability`. Missing
 ancestors and a workspace that appears after planning fail closed.
 
+When one final output directory is safely missing, execution revalidates the
+destination's existing anchor, creates that directory, and only then begins
+destination-local staging beside the anchor.
+
 The serialized inspection snapshot carries `kind`, `nscb_version`, the source
 evidence, explicit workspace, destination baseline, policy, and planned
 artifact paths. It cannot reconstruct or replay the in-memory plan. A stale

@@ -16,7 +16,66 @@ use std::process::Stdio;
 use std::thread;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
+use support::process::isolated_command;
 use support::synthetic_pfs0::{TempInput, valid_container_probe_fixture};
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn no_argument_non_tty_reports_usage_after_loading_synthetic_configuration() {
+    let root = tempfile::tempdir().expect("create isolated no-argument root");
+    let home = root.path().join("home");
+    let config_root = root.path().join("xdg-config");
+    let cache_root = root.path().join("xdg-cache");
+    let output_directory = root.path().join("synthetic-output");
+    fs::create_dir_all(&home).unwrap();
+
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_nscb"));
+        command
+            .env_clear()
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
+            .env("XDG_CONFIG_HOME", &config_root)
+            .env("XDG_CACHE_HOME", &cache_root)
+            .env("APPDATA", root.path().join("AppData").join("Roaming"))
+            .env("LOCALAPPDATA", root.path().join("AppData").join("Local"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+        command
+    };
+
+    let configured = command()
+        .args(["config", "set", "output_dir"])
+        .arg(&output_directory)
+        .arg("--json")
+        .output()
+        .expect("configure synthetic output path");
+    assert_eq!(configured.status.code(), Some(0));
+
+    let output = command()
+        .output()
+        .expect("launch nscb without arguments in non-TTY mode");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let usage = String::from_utf8_lossy(&output.stderr);
+    assert!(usage.contains("nscb"));
+    assert!(!output_directory.exists());
+
+    #[cfg(target_os = "macos")]
+    let config_file = home
+        .join("Library")
+        .join("Application Support")
+        .join("NSCB")
+        .join("config.toml");
+    #[cfg(target_os = "linux")]
+    let config_file = config_root.join("NSCB").join("config.toml");
+    assert!(config_file.is_file());
+    assert!(
+        fs::read_to_string(config_file)
+            .unwrap()
+            .contains("synthetic-output")
+    );
+}
 
 #[test]
 fn normal_executable_probes_pfs0_without_keys_and_matches_the_public_facade() {
@@ -26,7 +85,7 @@ fn normal_executable_probes_pfs0_without_keys_and_matches_the_public_facade() {
         .probe_container(ContainerProbeRequest::new(input.path()))
         .expect("public facade probes the same fixture without keys");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .args(["probe"])
         .arg(input.path())
         .arg("--json")
@@ -92,7 +151,7 @@ fn normal_executable_emits_one_versioned_sanitized_error_document_for_bad_inputs
 
     for (bytes, expected_code) in cases {
         let input = TempInput::new(bytes);
-        let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+        let output = isolated_command()
             .args(["probe"])
             .arg(input.path())
             .arg("--json")
@@ -124,7 +183,7 @@ fn normal_executable_emits_one_versioned_sanitized_error_document_for_bad_inputs
 #[test]
 fn normal_executable_uses_english_human_presentation() {
     let input = TempInput::new(&valid_container_probe_fixture());
-    let success = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let success = isolated_command()
         .args(["probe"])
         .arg(input.path())
         .output()
@@ -138,7 +197,7 @@ fn normal_executable_uses_english_human_presentation() {
     assert!(success.stderr.is_empty());
 
     let invalid = TempInput::new(b"not a PFS0 container");
-    let error = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let error = isolated_command()
         .args(["probe"])
         .arg(invalid.path())
         .output()
@@ -162,7 +221,7 @@ fn inspect_rejects_missing_or_option_valued_path_arguments() {
     ];
 
     for (arguments, json) in cases {
-        let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+        let output = isolated_command()
             .args(*arguments)
             .output()
             .expect("launch normal nscb executable");
@@ -192,7 +251,7 @@ fn normal_executable_rejects_a_fifo_without_waiting_for_a_writer() {
     let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
     assert_eq!(result, 0, "create a FIFO fixture");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let mut child = isolated_command()
         .args(["probe"])
         .arg(input.path())
         .arg("--json")
@@ -239,7 +298,7 @@ fn normal_executable_rejects_a_fifo_without_waiting_for_a_writer() {
 
 #[test]
 fn normal_executable_reports_json_usage_errors_with_exit_two() {
-    let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .args(["probe", "--json"])
         .output()
         .expect("launch normal nscb executable");
@@ -258,7 +317,7 @@ fn normal_executable_reports_json_usage_errors_with_exit_two() {
 
 #[test]
 fn normal_executable_treats_an_unknown_long_option_as_a_usage_error() {
-    let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .args(["probe", "--bogus"])
         .output()
         .expect("launch normal nscb executable");
@@ -271,7 +330,7 @@ fn normal_executable_treats_an_unknown_long_option_as_a_usage_error() {
 #[test]
 fn recognition_unknown_and_errors_are_distinct_single_documents() {
     let input = support::synthetic_pfs0::TempInput::new(b"unrecognized content");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .args(["recognize"])
         .arg(input.path())
         .arg("--json")
@@ -289,7 +348,7 @@ fn recognition_unknown_and_errors_are_distinct_single_documents() {
     );
     assert_eq!(output.stdout.iter().filter(|b| **b == b'\n').count(), 1);
     let bad = support::synthetic_pfs0::TempInput::new(b"PFS0");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .arg("recognize")
         .arg(bad.path())
         .arg("--json")
@@ -309,7 +368,7 @@ fn recognition_unknown_and_errors_are_distinct_single_documents() {
 fn recognition_plain_output_identifies_family_and_compression_evidence() {
     let bytes = support::synthetic_pfs0::valid_container_probe_fixture();
     let input = support::synthetic_pfs0::TempInput::new(&bytes);
-    let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .arg("recognize")
         .arg(input.path())
         .output()
@@ -328,7 +387,7 @@ fn recognition_rejects_fifo_without_blocking() {
     let path = std::env::temp_dir().join(format!("nscb-recognition-fifo-{}", std::process::id()));
     let name = CString::new(path.as_os_str().as_bytes()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let mut child = isolated_command()
         .arg("recognize")
         .arg(&path)
         .arg("--json")
@@ -418,7 +477,7 @@ fn recognition_ambiguous_polyglot_is_a_result_with_exit_three() {
     bytes[0x138..0x140].copy_from_slice(&root_size.to_le_bytes());
     bytes.extend_from_slice(&root);
     let input = TempInput::new(&bytes);
-    let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .arg("recognize")
         .arg(input.path())
         .arg("--json")
@@ -447,7 +506,7 @@ mod copy_subprocess {
     use tempfile::tempdir;
 
     fn nscb() -> Command {
-        Command::new(env!("CARGO_BIN_EXE_nscb"))
+        isolated_command()
     }
 
     fn line_documents(bytes: &[u8]) -> Vec<Value> {
@@ -1350,7 +1409,7 @@ mod copy_subprocess {
         assert!(!destination.exists());
 
         let usage = nscb()
-            .args(["copy", "only-one-path", "--json"])
+            .args(["copy", "--json"])
             .output()
             .expect("run invalid copy");
         assert_eq!(usage.status.code(), Some(2));

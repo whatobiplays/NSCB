@@ -2,6 +2,36 @@
 
 This repository contains bounded Rust Engine capabilities for PFS0 probing, content recognition, deterministic input resolution, qualified NCA inspection, and validated local copy-through publication.
 
+## Standalone configuration
+
+The `nscb` executable owns a per-user, schema-versioned TOML configuration.
+Normal commands create or load it before Engine startup; embedded hosts remain
+responsible for their own configuration and receive no CLI state through the
+library.
+
+```text
+nscb --help
+nscb --version
+nscb config path|show|set|reset [--json]
+nscb config set <keys_path|output_dir> <absolute-path> [--json]
+nscb keys set <source> [--json]
+```
+
+The generated file is `NSCB/config.toml` under the native per-user
+configuration directory. Version 1 supports an absolute `keys_path` and
+`output_dir`; `config set` preserves compatible manual values, `config reset`
+does not remove key files, and secret-looking additional values are redacted by
+`config show`. A compatible older schema migrates only during an explicit set
+or reset and first creates a byte-identical backup. Future schema versions,
+malformed files, and unsafe paths fail closed.
+
+Inspection and Verification resolve keys as explicit `--keys`, configured
+`keys_path`, then `~/.switch/prod.keys`. `keys set` validates and atomically
+replaces the entire conventional key file, using user-only permissions on Unix;
+it never echoes key values. See [standalone configuration](docs/configuration.md)
+for commands, native locations, migration and failure behavior, key safety,
+machine records, and platform qualification limits.
+
 ## Container Probe
 
 The public Rust facade exposes `Engine::probe_container(ContainerProbeRequest)`. It validates PFS0 outer-container framing and reports the observed file size, payload region, and declared entry names and spans. It reads the header and metadata tables, not payload bytes, and does not modify the input.
@@ -34,8 +64,10 @@ nscb inspect <path> [--keys <path>] [--cache-dir <absolute-dir>]
              [--allow-download] [--preflight] [--json]
 ```
 
-The CLI uses an explicitly supplied `--keys <path>` first. If omitted, it uses
-`~/.switch/prod.keys`. Embedding callers provide an explicit key path through
+The CLI uses an explicitly supplied `--keys <path>` first, then the configured
+absolute `keys_path`, then `~/.switch/prod.keys`. A configured path that is
+missing or invalid fails closed rather than falling back to the conventional
+file. Embedding callers provide an explicit key path through
 `InspectionRequest`.
 
 `--preflight` validates request, cache, and required child-process controls
@@ -141,8 +173,10 @@ byte length, SHA-256 evidence, destination baseline, selected workspace, and
 parent identity without modifying either path. Execution revalidates that plan.
 The host supplies a non-persistent default workspace; a request may select an
 explicit workspace instead. A host-default workspace on another filesystem can
-use a qualified destination-local fallback, while an explicit cross-filesystem
-override fails with `UnsupportedCapability`.
+use a qualified destination-local fallback that stages beside the existing
+destination anchor, including when one final output directory is safely
+missing; an explicit cross-filesystem override fails with
+`UnsupportedCapability`.
 
 `ConflictPolicy::Fail` is the default. An absent destination is published with
 atomic no-clobber `linkat`, so a concurrently created entry is never replaced.
@@ -207,16 +241,24 @@ mount configurations remain unqualified. See
 ## Copy-through CLI and job observation
 
 `nscb copy` invokes the qualified copy-through Job without prompts. It requires
-an explicit source and destination:
+an explicit source; the destination is optional:
 
 ```text
-nscb copy <source> <destination> [--workspace <path>] [--replace] [--json | --jsonl]
+nscb copy <source> [<destination>] [--workspace <path>] [--replace] [--json | --jsonl]
 ```
+
+An explicit positional destination always overrides the configured output
+directory. When it is omitted, NSCB uses the configured `output_dir`, or the
+native `Documents/NSCB_output` default, followed by the source file name. The
+default directory must be creatable and writable; failures are reported without
+falling back to another location. Destination resolution does not change
+conflict, planning, validation, or publication behavior. There is no `--output`
+option.
 
 The default conflict policy refuses to replace a different existing
 destination. `--replace` selects the qualified atomic replacement path. When
 `--workspace` is omitted, staging uses the host temporary directory under
-`nscb-copy-through`. The command does not persist configuration or execution
+`nscb-copy-through`. Copy execution does not persist configuration or execution
 history.
 
 When reporting succeeds, `--json` emits one `job.result` document for an

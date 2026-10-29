@@ -3,13 +3,13 @@
 mod support;
 
 use serde_json::Value;
-use std::process::Command;
+use support::process::isolated_command;
 use support::synthetic_verification::{
     NpdmMode, PartitionFsMode, Spec, build, change_main_name_to_traversal,
 };
 
 fn run(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_nscb"))
+    isolated_command()
         .args(args)
         .output()
         .expect("launch nscb executable")
@@ -508,7 +508,7 @@ fn verification_does_not_launch_nstool_or_consume_provider_cache() {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&fake_nstool, permissions).unwrap();
 
-    let output = Command::new(env!("CARGO_BIN_EXE_nscb"))
+    let output = isolated_command()
         .args([
             "verify",
             paths.input.to_str().unwrap(),

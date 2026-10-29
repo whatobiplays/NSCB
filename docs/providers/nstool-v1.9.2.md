@@ -115,9 +115,12 @@ content types are outside this capability.
 ## Key-file and provider-output rules
 
 The CLI resolves the key source in this order: explicit `--keys <path>`, then
-`~/.switch/prod.keys` when the option is omitted. There is no other configured
-key-path setting in this release. Embedding callers pass an explicit key path
-in `InspectionRequest`.
+the absolute `keys_path` setting from standalone `config.toml`, then
+`~/.switch/prod.keys`. A configured path that is missing or invalid fails
+closed; it does not fall back to the conventional file. `nscb keys set <source>`
+validates and atomically replaces the conventional full key file only when the
+user explicitly requests it. Embedding callers pass an explicit key path in
+`InspectionRequest` and do not load standalone configuration.
 
 The bounded text key file may contain `header_key` or `nca_header_key`; either
 alias is sufficient, but duplicate aliases with differing values fail
