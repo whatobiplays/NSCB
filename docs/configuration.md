@@ -74,6 +74,30 @@ Windows it is `%USERPROFILE%\.switch\prod.keys`; NSCB uses the native profile
 known folder only when `USERPROFILE` is absent. Windows Documents resolution
 remains native and is independent of these configuration and profile paths.
 
+### Job history data location
+
+The standalone executable stores SQLite Job history under the platform-local
+application-data directory:
+
+| Platform | Database path |
+| --- | --- |
+| macOS | `~/Library/Application Support/NSCB/jobs.sqlite3` |
+| Linux | `${XDG_DATA_HOME:-~/.local/share}/NSCB/jobs.sqlite3` |
+| Windows | `%LOCALAPPDATA%\NSCB\jobs.sqlite3` |
+
+SQLite may also create its standard `-wal` and `-shm` sidecars. NSCB creates a
+`job-locks` directory beside the database for schema coordination and a fixed
+registry of 64 persistent slot files. Each V3 slot file contains only its
+immutable slot ID. SQLite stores the current Job-to-slot claim and claim token.
+These paths contain Job metadata and filesystem evidence only. Copied content,
+key values, credentials, and helper output are not stored in history.
+
+The `standalone-job-history` Cargo feature is opt-in, required by the standalone
+executable, and controls the optional `rusqlite` dependency. Standalone build
+and test commands enable it explicitly. Embedded library consumers use the
+default feature set or `--no-default-features`; neither compiles standalone
+SQLite history or adds SQLite to the Engine dependency graph.
+
 ## Configuration file
 
 Schema version 1 contains two optional absolute-path settings:
@@ -218,7 +242,84 @@ request; only the standalone CLI resolves this default.
 
 Copy is a normal standalone command, so startup loads or initializes the
 standalone configuration before planning. Copy does not persist per-job source,
-destination, workspace, or replacement choices back into that configuration.
+destination, workspace, or replacement choices back into that configuration;
+after admission, those choices and their selection provenance are recorded in
+standalone Job history.
+
+## Standalone Job history
+
+The standalone executable admits a Copy Job only after immutable planning
+succeeds. Normal `copy` then uses a fresh unique 128-bit Job ID for durable
+history. Planning or execution-worker startup failure does not create a Job.
+The embedded `Engine` library never opens this database.
+
+```text
+nscb jobs list [--json]
+nscb jobs show <id> [--json]
+nscb jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]
+nscb jobs clear [--json]
+```
+
+`jobs list` uses newest admission first, with the Job ID as a deterministic
+tie-breaker. `jobs show` returns source intent, current state, terminal outcome,
+publication state, conflict policy and its provenance, retry linkage, and the
+available item and artifact evidence. Human output is concise; `--json`
+contains the complete typed detail.
+
+### Interruption and retention
+
+The executing process holds an operating-system advisory lease for the Job's
+lifetime. A later process marks an admitted or running Job `Interrupted` only
+after it acquires an abandoned lease. A live peer is never interrupted, and an
+unavailable or uncertain lock preserves the existing state. NSCB never resumes
+an interrupted Job automatically and never treats it as successful.
+
+Publication evidence is derived from the authoritative result's returned
+artifacts. A failed result with no operation outcome but a
+`PublishedDestination` artifact is recorded as `published_unresolved`; an
+explicit publication-uncertain failure is recorded as `uncertain`. Both remain
+protected for reconciliation while the filesystem artifacts remain untouched.
+
+Automatic pruning retains at most 1,000 ordinary pruneable terminal Jobs.
+Interrupted Jobs and terminal Jobs with unresolved publication, cleanup, or
+retained artifact evidence are protected from pruning and excluded from that
+cap, so the total retained record count may exceed 1,000 until reconciliation
+completes.
+Parent Job IDs are stored as
+text and remain visible on linked retries even if the parent record is later
+pruned. `jobs clear` removes terminal records and their cascading item/artifact
+database rows, preserves active Jobs and unknown future states, and never
+deletes any filesystem output, cache, key, configuration, workspace, or
+artifact. Terminal deletion uses an explicit state allowlist rather than
+inferring every non-active state is safe to remove.
+
+### Retry
+
+`jobs retry` loads source intent and provenance, reconstructs a typed copy
+request, and plans again under current configuration and prerequisites. An
+explicit destination and workspace remain explicit. A configured or native
+implicit destination is resolved again from current configuration. The parent
+Job is never modified. The replacement policy defaults to refuse, even when the
+parent used replacement; `--replace` must be supplied again for the retry.
+The original invocation directory is persisted so relative explicit paths are
+anchored to where the source Job was admitted. The retry record stores its own
+invocation directory while its resolved paths become stable inputs for any
+later retry.
+
+Retry accepts only a terminal `copy_through`/`single` Job with the `all` retry
+scope and recognized selection, policy, and invocation fields. Unsupported or
+malformed future records return `job_retry_ineligible` before a new plan or Job
+is created.
+
+The retry stores its parent Job ID, parent conflict policy, and the parent's
+original policy provenance alongside the newly selected policy and provenance.
+A planning failure creates no retry Job and leaves the original record and
+published output unchanged.
+
+`--failed-items` is reserved for persisted independent-batch failures in the
+later batch-execution slice. This standalone copy version selects only records
+whose item state is actually `failed`, rejects unsupported or empty selections
+before admission, and does not fabricate a batch result.
 
 ## Machine output and exit classes
 
@@ -235,7 +336,9 @@ exactly one newline-terminated versioned document to stdout:
 ```
 
 Success kinds are `config.path`, `config.show`, `config.set`, `config.reset`,
-and `keys.set`. A handled non-success emits one document with `kind: "error"`
+and `keys.set`. Job history success kinds are `jobs.list`, `jobs.show`, and
+`jobs.clear`; retry emits the same `job.result` or `job.event` records as Copy.
+A handled non-success emits one document with `kind: "error"`
 and a sanitized `error.code`; it contains no TOML source, key value, raw
 operating-system error, or path unless a success result requires that path.
 
@@ -247,7 +350,11 @@ cannot be represented. A startup configuration failure requested with
 `--jsonl` emits one versioned error document because no Copy job has been
 admitted yet. Exit class 7 is reserved for an internal failure writing the
 required result.
-Existing Probe and Copy machine contracts and exit classes remain unchanged.
+Standalone Copy adds top-level `job_id` to terminal `job.result`. If durable
+completion persistence fails after filesystem execution, the same terminal
+record also carries `history_error`; the operation result and filesystem state
+remain authoritative. Existing Probe records and base Copy event semantics
+remain compatible.
 
 ## Schema migration and file safety
 
@@ -278,6 +385,26 @@ replace-existing and write-through semantics. A cooperative configuration lock
 serializes NSCB processes; it does not coordinate with arbitrary programs that
 edit the same file.
 
+### Job history migration
+
+Job history uses SQLite `user_version` and an NSCB application ID. A new
+database is created transactionally at schema version 3. A recognized version 1
+database first receives a recovery copy at `jobs.sqlite3.v1.bak` and upgrades to
+version 2. The same open then creates `jobs.sqlite3.v2.bak` before adding the
+slot registry and Job lease claims in version 3. Each step validates a backup of
+its exact source version, and each schema change runs in one transaction. An
+existing recovery copy is accepted only when it is healthy, has the NSCB
+application ID and expected user version, and matches the source schema and
+every current Job column. Different or unsafe backups fail closed. A failed
+schema change rolls back and leaves the previous database readable.
+
+Unknown newer schema versions, corrupt/non-database files, missing required
+tables, and unsafe file types fail with a typed Job-history error. NSCB does
+not reset or silently replace unreadable history.
+New history and lock directories are created with mode `0700` on Unix; existing
+directory modes are preserved. Database files, their SQLite sidecars, and lock
+files are constrained to user-only access.
+
 ## Platform qualification
 
 The implementation uses native directory APIs through `dirs` 6.0 and has been
@@ -287,3 +414,10 @@ missing/relative-root rejection; it does not qualify Linux XDG discovery,
 Windows Documents known-folder lookup, Windows replacement behavior, Unix file
 permissions on Linux, or any platform-specific filesystem behavior. Those
 claims require native execution on each platform.
+
+Job-history integration tests currently execute on the macOS qualification
+host. They exercise SQLite locking, concurrent processes, crash recovery,
+migration, retention, and clearing there. Portable path-composition and
+schema tests ensure non-macOS targets compile, but they do not establish
+native Linux or Windows SQLite locking, permissions, crash durability, or
+filesystem semantics. Copy-through publication remains macOS-only.

@@ -346,3 +346,92 @@ historical evidence and are not rebound to the corrected source.
   unqualified.
 - The qualification does not include product-review attestation unless a
   separate review evidence artifact exists for this run.
+
+## Issue #12 standalone Job history evidence
+
+The standalone history candidate was exercised on the native macOS
+qualification host with Rust 1.98.1:
+
+```sh
+rustup run 1.98.1 cargo test --locked --features standalone-job-history --bin nscb standalone::history::tests
+rustup run 1.98.1 cargo test --locked --features standalone-job-history --test job_history_cli
+rustup run 1.98.1 cargo test --locked --features standalone-job-history --test config_cli
+rustup run 1.98.1 cargo test --locked --features standalone-job-history --test cli_subprocess
+rustup run 1.98.1 cargo check --locked --lib --no-default-features
+rustup run 1.98.1 cargo fmt --all -- --check
+make all
+```
+
+Focused results were 47 passing history unit tests, 22 passing real-binary Job
+history tests, 49 passing configuration tests, and 29 passing CLI subprocess
+tests, with no failures or ignored tests in those focused runs. The final
+pinned `make all` profile passed. Its complete Rust suite reported 717 passed,
+0 failed, and 4 ignored tests. The smoke rerun reported 29 passing CLI
+subprocess tests and 22 passing Job history tests. The Makefile sets
+`RUST_TEST_THREADS=1` for the full and smoke profiles so concurrent subprocess
+suites cannot consume the scheduling margin enforced by the real blocked-pipe
+timing assertions. The embedded no-default-feature library check passed and
+its active dependency graph contained no `rusqlite` package. A cross-target
+`cargo check --all-targets` for `x86_64-unknown-linux-gnu` also passed with
+`RUSTC` bound to the pinned toolchain, confirming that macOS-only copy-success
+subprocess cases are excluded while portable history tests still compile.
+The initial feature-enabled Windows GNU all-target check failed with `E0463`
+because Cargo invoked `/opt/homebrew/bin/rustc` (Rust 1.99.1); this is
+historical evidence. The pinned Rust 1.98.1 Windows GNU all-target check
+exited 0 with this exact invocation:
+
+```sh
+RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=/tmp/nscb-issue12-pinned-rustc-1793354028480-420330 rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
+```
+
+This establishes cross-compilation only; native Windows execution and
+copy-publication remain unqualified. TAC-13 remains unverified.
+
+The history unit evidence covers fresh schema initialization, SQLite application
+identity and user version, corruption and future-schema rejection, migration
+backup equivalence, failed migration rollback, admission rollback, durable
+completion and item evidence, deterministic ordering, failed-item selection,
+all-column recovery comparison, publication-unresolved retention, fail-closed
+future-state clearing, artifact isolation, and process-lifetime leases. The
+lease evidence covers a fixed 64-slot registry, stable slot files and
+identities, same-slot multi-process exclusion, slot exhaustion, token
+mismatch, V3 identity-only slot files with Job/token claims in SQLite, in-place
+legacy V2 slot conversion after claim eligibility, interrupted-conversion
+recovery without inode replacement, abrupt-owner-exit recovery, live-peer
+preservation, exclusive stale recovery, and refused reuse of unresolved
+claims. The real-binary evidence covers planning and unavailable-history failures before
+filesystem mutation, admission and running-transition failures, completion
+persistence failure with recoverable uncertainty, interrupted-owner recovery,
+live-owner preservation, concurrent processes, current-configuration retry,
+retry from a different working directory, malformed future retry records,
+parent conflict-policy provenance, noninheritance of replacement
+authorization, retry reporting failure with exit 7 and durable completion,
+failed-item rejection, JSONL completion failure with one terminal record, and
+configuration/key/cache/output/artifact-preserving clear.
+
+### Artifact cleanup limitation
+
+This candidate intentionally performs no automatic artifact deletion. ADR-0030
+rejects a pathname identity check followed by unlink, and `planned_artifacts`
+records possible paths and expected content rather than durable proof that the
+operation created a particular filesystem object. Actual creation ownership and
+the required race-safe identity-bound deletion primitive belong to the
+operation lifecycle in `src/operation.rs`, which is outside this run's allowed
+scope.
+
+The standalone history layer therefore retains workspace, planned, displaced,
+retained, symlinked, foreign, modified, and publication-uncertain artifacts for
+manual reconciliation. History pruning deletes selected terminal database
+rows. Opening history for `jobs clear` may initialize or inspect the persistent
+database, SQLite sidecars, schema lock, and fixed lease-slot files. Its clear
+transaction removes selected terminal Job and cascading evidence rows,
+including their durable lease claims, without deleting or changing outputs,
+workspaces, configuration, caches, or artifact files.
+TAC-6 remains unverified until operation-owned creation evidence and an
+identity-bound deletion mechanism can be implemented and tested without
+widening this candidate's path authorization.
+
+Native Linux and Windows history behavior remains unqualified. Portable tests
+cover path composition and schema rejection, but they do not establish native
+SQLite locking, file permissions, process-lifetime lease semantics, crash
+durability, or filesystem publication on those platforms.

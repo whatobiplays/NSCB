@@ -1,3 +1,5 @@
+#![cfg(feature = "standalone-job-history")]
+
 mod support;
 
 use nscb::{ContainerProbeRequest, Engine};
@@ -17,6 +19,8 @@ use std::thread;
 #[cfg(unix)]
 use std::time::{Duration, Instant};
 use support::process::isolated_command;
+#[cfg(target_os = "macos")]
+use support::process::isolated_command_with_home;
 use support::synthetic_pfs0::{TempInput, valid_container_probe_fixture};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -826,6 +830,7 @@ mod copy_subprocess {
         }
         let terminal = documents.last().expect("terminal result record");
         assert_eq!(terminal["kind"], "job.result");
+        assert!(terminal["job_id"].is_string());
         assert_eq!(terminal["sequence"], (documents.len() - 1) as u64);
         assert_eq!(terminal["snapshot"]["phase"], "idle");
         assert_eq!(terminal["snapshot"]["status"], "succeeded");
@@ -846,6 +851,12 @@ mod copy_subprocess {
             .map(Value::to_string)
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(
+            documents[..documents.len() - 1]
+                .iter()
+                .all(|document| document.get("job_id").is_none()),
+            "nonterminal JSONL records must retain the existing event envelope"
+        );
         for path in [&source, &destination, &workspace] {
             assert!(
                 !nonterminal.contains(&path.display().to_string()),
@@ -884,6 +895,7 @@ mod copy_subprocess {
         assert_eq!(
             terminal_keys,
             [
+                "job_id",
                 "kind",
                 "nscb_version",
                 "result",
@@ -924,7 +936,8 @@ mod copy_subprocess {
             let stdout_flags = unsafe { libc::fcntl(stdout_writer.as_raw_fd(), libc::F_GETFL) };
             let stderr_flags = unsafe { libc::fcntl(stderr_writer.as_raw_fd(), libc::F_GETFL) };
             assert!(stdout_flags >= 0 && stderr_flags >= 0);
-            let mut command = nscb();
+            let mut command =
+                isolated_command_with_home(&root.path().join(format!("home-{index}")));
             command
                 .args(["copy"])
                 .arg(&source)

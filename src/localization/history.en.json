@@ -1,0 +1,39 @@
+{
+  "list_empty": "No historical Jobs.",
+  "list_row": "{job_id}  {state}  {admitted_at}  {failure}",
+  "show": "Job: {job_id}\nState: {state}\nAdmitted: {admitted_at}\nTerminal: {terminal_at}\nSource: {source}\nDestination: {destination}\nWorkspace: {workspace}",
+  "show_item": "Item: {item_key} {state} {source} -> {destination}",
+  "terminal_not_recorded": "Not yet terminal",
+  "clear_result": "Deleted {deleted} terminal Job records. Active Jobs were preserved.",
+  "unknown_state": "Unknown state",
+  "states": {
+    "admitted": "Admitted",
+    "running": "Running",
+    "succeeded": "Succeeded",
+    "completed_with_issues": "Completed with issues",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "interrupted": "Interrupted"
+  },
+  "failures": {
+    "interrupted": "Interrupted before completion; inspect the recorded evidence before retrying."
+  },
+  "errors": {
+    "job_history_directory_unavailable": "The directory for standalone Job history is unavailable.",
+    "job_history_unavailable": "The standalone Job history is unavailable.",
+    "job_history_corrupt": "The standalone Job history is damaged and cannot be read safely.",
+    "job_history_version_unsupported": "The standalone Job history was created by a newer NSCB version.",
+    "job_history_migration_failed": "The standalone Job history could not be upgraded safely.",
+    "job_history_backup_failed": "A backup of the standalone Job history could not be created.",
+    "job_history_lock_failed": "The standalone Job history is busy; try again after the other NSCB process finishes.",
+    "job_history_admission_failed": "NSCB could not record the Job in history, so the operation did not begin.",
+    "job_history_completion_failed": "NSCB could not record the final Job result. Inspect the operation output before retrying.",
+    "job_history_query_failed": "The standalone Job history could not be read.",
+    "job_history_path_unrepresentable": "A Job path cannot be represented in the history format.",
+    "job_not_found": "The requested Job was not found in history.",
+    "job_active": "The requested Job is still active.",
+    "job_retry_ineligible": "The requested Job cannot be retried.",
+    "job_failed_items_unsupported": "Retrying only failed items is not supported for this Job.",
+    "job_failed_items_empty": "The requested Job has no failed items to retry."
+  }
+}

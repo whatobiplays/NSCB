@@ -9,6 +9,7 @@
   "signal_failure": "Signal handling could not be initialized.",
   "internal_failure": "Execution ended without an authoritative result.",
   "unknown_error": "An unrecognized operation failure occurred.",
+"history_error": "The standalone Job history could not be updated. The reported operation result and filesystem evidence remain unchanged; inspect them before retrying.",
   "errors": {
     "source_unavailable": "The source file is unavailable or is not a regular file.",
     "split_input_unsupported": "Copy-through does not accept Split inputs.",

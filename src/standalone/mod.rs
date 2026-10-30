@@ -5,10 +5,13 @@
 //! executable.
 
 mod config;
+pub(crate) mod history;
 mod keys;
 mod paths;
 
-pub(crate) use config::{ConfigField, ConfigSnapshot, StandaloneConfig, StandaloneConfigError};
+pub(crate) use config::{
+    ConfigField, ConfigSnapshot, CopyDestinationSelection, StandaloneConfig, StandaloneConfigError,
+};
 
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};

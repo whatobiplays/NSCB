@@ -1,5 +1,6 @@
 //! English presentation strings for the standalone command-line adapter.
 
+use crate::standalone::history::{HistoryError, JobDetail, JobItem, JobSummary};
 use nscb::{
     ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult, InspectionErrorCode,
     JobState, NcaContentType, NcaDistribution, NcaInspection, OperationFailureCode,
@@ -99,6 +100,7 @@ struct CopyMessages {
     signal_failure: String,
     internal_failure: String,
     unknown_error: String,
+    history_error: String,
     errors: HashMap<String, String>,
 }
 
@@ -110,8 +112,129 @@ fn copy_messages() -> &'static CopyMessages {
     })
 }
 
+#[derive(Deserialize)]
+struct HistoryMessages {
+    list_empty: String,
+    list_row: String,
+    show: String,
+    show_item: String,
+    terminal_not_recorded: String,
+    clear_result: String,
+    unknown_state: String,
+    states: HashMap<String, String>,
+    failures: HashMap<String, String>,
+    errors: HashMap<String, String>,
+}
+
+fn history_messages() -> &'static HistoryMessages {
+    static MESSAGES: OnceLock<HistoryMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("history.en.json"))
+            .expect("bundled English Job history localization resource must be valid")
+    })
+}
+
 pub(crate) fn copy_usage() -> &'static str {
     &copy_messages().usage
+}
+
+pub(crate) fn jobs_usage() -> &'static str {
+    &standalone_config_messages().jobs_usage
+}
+
+/// Returns the localized message shown when no historical Jobs are available.
+pub(crate) fn jobs_list_empty() -> &'static str {
+    &history_messages().list_empty
+}
+
+/// Formats one human Job-history summary without exposing stored state tokens
+/// or failure codes.
+pub(crate) fn jobs_list_row(job: &JobSummary) -> String {
+    let state = history_state_label(&job.state);
+    let failure = job
+        .failure_code
+        .as_deref()
+        .map(history_failure_label)
+        .unwrap_or("");
+    interpolate(
+        &history_messages().list_row,
+        &[
+            ("job_id", &job.job_id),
+            ("state", state),
+            ("admitted_at", &job.admitted_at),
+            ("failure", failure),
+        ],
+    )
+}
+
+/// Formats the human header shared by every recorded Job.
+pub(crate) fn jobs_show(job: &JobDetail) -> String {
+    let messages = history_messages();
+    let state = history_state_label(&job.state);
+    let terminal = job
+        .terminal_at
+        .as_deref()
+        .unwrap_or(&messages.terminal_not_recorded);
+    interpolate(
+        &messages.show,
+        &[
+            ("job_id", &job.job_id),
+            ("state", state),
+            ("admitted_at", &job.admitted_at),
+            ("terminal_at", terminal),
+            ("source", &job.source),
+            ("destination", &job.destination),
+            ("workspace", &job.workspace),
+        ],
+    )
+}
+
+/// Formats one human Job-history item without exposing its stored state token.
+pub(crate) fn jobs_show_item(item: &JobItem) -> String {
+    interpolate(
+        &history_messages().show_item,
+        &[
+            ("item_key", &item.item_key),
+            ("state", history_state_label(&item.state)),
+            ("source", &item.source),
+            ("destination", &item.destination),
+        ],
+    )
+}
+
+/// Formats the human summary emitted after terminal Job records are cleared.
+pub(crate) fn jobs_clear_result(deleted: usize) -> String {
+    let deleted = deleted.to_string();
+    interpolate(
+        &history_messages().clear_result,
+        &[("deleted", deleted.as_str())],
+    )
+}
+
+/// Returns the localized presentation for one stable Job-history error.
+pub(crate) fn jobs_error(error: HistoryError) -> &'static str {
+    history_messages()
+        .errors
+        .get(error.code())
+        .map(String::as_str)
+        .expect("every Job history error code must have an English CLI message")
+}
+
+fn history_state_label(state: &str) -> &'static str {
+    let messages = history_messages();
+    messages
+        .states
+        .get(state)
+        .map(String::as_str)
+        .unwrap_or(&messages.unknown_state)
+}
+
+fn history_failure_label(code: &str) -> &'static str {
+    history_messages()
+        .failures
+        .get(code)
+        .map(String::as_str)
+        .unwrap_or_else(|| copy_error_message(code))
 }
 
 pub(crate) fn copy_error_message(code: &str) -> &'static str {
@@ -133,6 +256,12 @@ pub(crate) fn copy_signal_failure() -> &'static str {
 
 pub(crate) fn copy_internal_failure() -> &'static str {
     &copy_messages().internal_failure
+}
+
+/// Explains a standalone history failure without changing the authoritative
+/// filesystem result or implying that a retry is automatically safe.
+pub(crate) fn copy_history_error(_code: &'static str) -> &'static str {
+    &copy_messages().history_error
 }
 
 /// Formats a human copy result and, when cleanup evidence is retained, lists
@@ -433,6 +562,7 @@ struct StandaloneConfigMessages {
     global_help: String,
     global_version: String,
     config_usage: String,
+    jobs_usage: String,
     config_path: String,
     config_show_header: String,
     config_show_value: String,
@@ -566,6 +696,7 @@ pub(crate) fn config_error(code: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{error_message, success, usage};
+    use crate::standalone::history::HistoryError;
     use nscb::{ContainerProbeErrorCode as Code, InputResolutionErrorCode as InputCode};
 
     #[test]
@@ -593,6 +724,51 @@ mod tests {
         assert_eq!(
             super::copy_error_message("future_unknown_code"),
             "An unrecognized operation failure occurred."
+        );
+    }
+
+    #[test]
+    fn history_resource_contains_a_message_for_every_stable_error_code() {
+        let errors = [
+            HistoryError::DirectoryUnavailable,
+            HistoryError::OpenFailed,
+            HistoryError::Corrupt,
+            HistoryError::VersionUnsupported,
+            HistoryError::MigrationFailed,
+            HistoryError::BackupFailed,
+            HistoryError::LockFailed,
+            HistoryError::AdmissionFailed,
+            HistoryError::CompletionFailed,
+            HistoryError::QueryFailed,
+            HistoryError::PathUnrepresentable,
+            HistoryError::UnknownJob,
+            HistoryError::ActiveJob,
+            HistoryError::IneligibleJob,
+            HistoryError::UnsupportedFailedItems,
+            HistoryError::NoFailedItems,
+        ];
+        for error in errors {
+            let message = super::jobs_error(error);
+            assert!(!message.is_empty(), "missing message for {error:?}");
+            assert!(!message.contains(error.code()), "{message}");
+        }
+    }
+
+    #[test]
+    fn history_human_labels_hide_stored_tokens_and_use_localized_fallbacks() {
+        assert_eq!(super::history_state_label("succeeded"), "Succeeded");
+        assert_eq!(super::history_state_label("future_state"), "Unknown state");
+        assert_eq!(
+            super::history_failure_label("interrupted"),
+            "Interrupted before completion; inspect the recorded evidence before retrying."
+        );
+        assert_eq!(
+            super::history_failure_label("future_unknown_code"),
+            "An unrecognized operation failure occurred."
+        );
+        assert_eq!(
+            super::copy_history_error("job_history_unavailable"),
+            "The standalone Job history could not be updated. The reported operation result and filesystem evidence remain unchanged; inspect them before retrying."
         );
     }
 

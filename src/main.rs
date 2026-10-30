@@ -34,7 +34,7 @@ fn main() -> ExitCode {
     drop(stderr);
     let engine = Engine::new();
     #[cfg(target_os = "macos")]
-    if cli::is_copy_command(&args) {
+    if cli::requires_reporting_session(&args) {
         let mut reporting = cli_reporting::ReportingSession::new()
             .unwrap_or_else(|_| cli_reporting::ReportingSession::unavailable());
         let operation_exit = cli::run_with_reporting_and_standalone_config(

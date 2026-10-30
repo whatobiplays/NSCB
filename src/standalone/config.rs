@@ -49,6 +49,7 @@ impl From<paths::StandalonePathError> for StandaloneConfigError {
     fn from(value: paths::StandalonePathError) -> Self {
         match value {
             paths::StandalonePathError::ConfigRoot => Self::DirectoryUnavailable,
+            paths::StandalonePathError::DataRoot => Self::DirectoryUnavailable,
             paths::StandalonePathError::Home | paths::StandalonePathError::Documents => {
                 Self::PathInvalid
             }
@@ -76,6 +77,12 @@ pub(crate) enum ConfigField {
 pub(crate) enum OutputPathError {
     OutputDirectoryUnavailable,
     OutputDestinationInvalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CopyDestinationSelection {
+    ConfiguredOutputDirectory,
+    NativeDocumentsOutput,
 }
 
 impl OutputPathError {
@@ -204,21 +211,33 @@ impl StandaloneConfig {
         }
     }
 
-    pub(crate) fn copy_destination(&self, source: &Path) -> Result<PathBuf, OutputPathError> {
+    /// Resolves an implicit Copy destination and records which durable policy
+    /// chose it. Retry uses this provenance to re-run current configuration
+    /// after configuration changes.
+    pub(crate) fn copy_destination_with_selection(
+        &self,
+        source: &Path,
+    ) -> Result<(PathBuf, CopyDestinationSelection), OutputPathError> {
         let configured = self
             .document
             .get("output_dir")
             .and_then(Item::as_str)
             .map(PathBuf::from);
-        let directory = match configured {
-            Some(directory) => directory,
+        let (directory, selection) = match configured {
+            Some(directory) => (
+                directory,
+                CopyDestinationSelection::ConfiguredOutputDirectory,
+            ),
             None => {
                 let documents =
                     dirs::document_dir().ok_or(OutputPathError::OutputDirectoryUnavailable)?;
                 if !documents.is_absolute() || !documents.is_dir() {
                     return Err(OutputPathError::OutputDirectoryUnavailable);
                 }
-                documents.join("NSCB_output")
+                (
+                    documents.join("NSCB_output"),
+                    CopyDestinationSelection::NativeDocumentsOutput,
+                )
             }
         };
         match fs::metadata(&directory) {
@@ -230,7 +249,7 @@ impl StandaloneConfig {
         let file_name = source
             .file_name()
             .ok_or(OutputPathError::OutputDestinationInvalid)?;
-        Ok(directory.join(file_name))
+        Ok((directory.join(file_name), selection))
     }
 
     pub(crate) fn snapshot(&self) -> Result<ConfigSnapshot, StandaloneConfigError> {
