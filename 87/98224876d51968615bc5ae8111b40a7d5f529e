@@ -1,0 +1,45 @@
+docs/testing/job-contracts-qualification.md
+  s_eca65decc50419::t_be8a235409aa2d 394,401
+  s_eca65decc50419::t_2ffefc0edea4d9 10-15,19,25-31
+  s_eca65decc50419::t_45d60efdaa2793 392-393,395-400,402-408,410-435
+  s_eca65decc50419::t_4fdfe968025cf3 379-391,409,454-459,483-490,508-511
+  s_eca65decc50419::t_4aa476434b6c55 436-443,447-448,451
+  s_41716d078ea286::t_b9cfbe8299a36c 32
+docs/validation.md
+  s_eca65decc50419::t_7579ece86df095 356-370,390-407
+  s_eca65decc50419::t_541b5e6a84ae66 319-323
+  s_eca65decc50419::t_43896a3fda9115 371-372,380,382-383,386
+  s_eca65decc50419::t_b64603a0603dbb 373-379,381,384-385,387-389
+  s_eca65decc50419::t_d8934e83e725c6 409,412-424,428-432
+  s_eca65decc50419::t_5d0281c33d9e67 445-458,461,464-467
+  s_eca65decc50419::t_0601770238031d 469-471
+  s_eca65decc50419::t_344be53064bd79 434-438
+  s_eca65decc50419::t_acfb1b092bbc59 473-474
+  s_eca65decc50419::t_a44025808aa2e2 480-485
+  s_eca65decc50419::t_57b8215f6e1850 472,475-479
+  s_eca65decc50419::t_2f311c4b044aaa 408,433,468
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "8798224876d51968615bc5ae8111b40a7d5f529e",
+  "prompts": {},
+  "sessions": {
+    "s_41716d078ea286": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18e92-2016-7353-aca0-10aadb888a2a",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_eca65decc50419": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a185e9-e25a-7fd3-a9f3-2693487b7864",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
