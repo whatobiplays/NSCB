@@ -1,6 +1,11 @@
 #[cfg(target_os = "macos")]
 use crate::cli_reporting::{ReportingControl, ReportingSession};
-use crate::standalone::StandaloneConfig;
+use crate::standalone::history::{
+    AdmissionInput, AdmissionItem, ConflictPolicyProvenance, ConflictPolicyRecord,
+    DestinationSelection, HistoryError, HistoryStore, JobDetail, JobKind, JobLease, JobSummary,
+    PendingAdmission, RetryScope, SubmissionKind, WorkspaceSelection,
+};
+use crate::standalone::{CopyDestinationSelection, StandaloneConfig};
 use nscb::{
     CancellationHandle, ConflictPolicy, ContainerProbeError, ContainerProbeErrorCode,
     CopyThroughRequest, Engine, InputResolutionCapabilities, InputResolutionRequest,
@@ -478,6 +483,17 @@ pub(crate) fn is_copy_command(args: &[OsString]) -> bool {
         .is_some_and(|argument| argument == OsStr::new("copy"))
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn requires_reporting_session(args: &[OsString]) -> bool {
+    is_copy_command(args)
+        || (args
+            .first()
+            .is_some_and(|argument| argument == OsStr::new("jobs"))
+            && args
+                .get(1)
+                .is_some_and(|argument| argument == OsStr::new("retry")))
+}
+
 fn run_with_control(
     args: &[OsString],
     engine: &Engine,
@@ -486,6 +502,20 @@ fn run_with_control(
     stderr: &mut dyn Write,
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
 ) -> i32 {
+    if args
+        .first()
+        .is_some_and(|argument| argument == OsStr::new("jobs"))
+    {
+        return run_jobs_command(
+            args,
+            engine,
+            standalone,
+            stdout,
+            stderr,
+            #[cfg(target_os = "macos")]
+            reporting,
+        );
+    }
     if is_copy_command(args) {
         #[cfg(target_os = "macos")]
         {
@@ -1676,6 +1706,458 @@ fn write_json(document: &impl Serialize, stdout: &mut dyn Write) -> bool {
     stdout.write_all(&document).is_ok()
 }
 
+#[derive(Serialize)]
+struct JobsListResult {
+    retention_limit: usize,
+    jobs: Vec<JobSummary>,
+}
+
+#[derive(Serialize)]
+struct JobsShowResult {
+    job: JobDetail,
+}
+
+#[derive(Serialize)]
+struct JobsClearResult {
+    deleted: usize,
+}
+
+fn run_jobs_command(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let machine_requested = args
+        .iter()
+        .any(|argument| argument == OsStr::new("--json") || argument == OsStr::new("--jsonl"));
+    let Some(action) = args.get(1).and_then(|argument| argument.to_str()) else {
+        return emit_jobs_usage(machine_requested, stdout, stderr);
+    };
+    let parsed = match action {
+        "list" => parse_jobs_single_action(&args[2..], false),
+        "show" => parse_jobs_single_action(&args[2..], true),
+        "clear" => parse_jobs_single_action(&args[2..], false),
+        "retry" => parse_jobs_retry(&args[2..]),
+        _ => Err(()),
+    };
+    let parsed = match parsed {
+        Ok(parsed) => parsed,
+        Err(()) => return emit_jobs_usage(machine_requested, stdout, stderr),
+    };
+    match action {
+        "list" => run_jobs_list(parsed.json, stdout, stderr),
+        "show" => run_jobs_show(
+            parsed.positional.first().expect("show parser requires ID"),
+            parsed.json,
+            stdout,
+            stderr,
+        ),
+        "clear" => run_jobs_clear(parsed.json, stdout, stderr),
+        "retry" => {
+            let Some(config) = standalone else {
+                return emit_jobs_usage(machine_requested, stdout, stderr);
+            };
+            run_jobs_retry(
+                parsed.positional.first().expect("retry parser requires ID"),
+                JobsRetryOptions {
+                    replace: parsed.replace,
+                    failed_items: parsed.failed_items,
+                    json: parsed.json,
+                    jsonl: parsed.jsonl,
+                },
+                engine,
+                config,
+                stdout,
+                stderr,
+                #[cfg(target_os = "macos")]
+                reporting,
+            )
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[derive(Default)]
+struct ParsedJobsCommand {
+    positional: Vec<OsString>,
+    json: bool,
+    jsonl: bool,
+    replace: bool,
+    failed_items: bool,
+}
+
+#[derive(Clone, Copy)]
+struct JobsRetryOptions {
+    replace: bool,
+    failed_items: bool,
+    json: bool,
+    jsonl: bool,
+}
+
+fn parse_jobs_single_action(args: &[OsString], require_id: bool) -> Result<ParsedJobsCommand, ()> {
+    let mut parsed = ParsedJobsCommand::default();
+    for argument in args {
+        if argument == OsStr::new("--json") {
+            if parsed.json || parsed.jsonl {
+                return Err(());
+            }
+            parsed.json = true;
+        } else if argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else {
+            parsed.positional.push(argument.clone());
+        }
+    }
+    let expected = usize::from(require_id);
+    if parsed.positional.len() != expected {
+        return Err(());
+    }
+    Ok(parsed)
+}
+
+fn parse_jobs_retry(args: &[OsString]) -> Result<ParsedJobsCommand, ()> {
+    let mut parsed = ParsedJobsCommand::default();
+    for argument in args {
+        if argument == OsStr::new("--replace") {
+            if parsed.replace {
+                return Err(());
+            }
+            parsed.replace = true;
+        } else if argument == OsStr::new("--failed-items") {
+            if parsed.failed_items {
+                return Err(());
+            }
+            parsed.failed_items = true;
+        } else if argument == OsStr::new("--json") {
+            if parsed.json || parsed.jsonl {
+                return Err(());
+            }
+            parsed.json = true;
+        } else if argument == OsStr::new("--jsonl") {
+            if parsed.json || parsed.jsonl {
+                return Err(());
+            }
+            parsed.jsonl = true;
+        } else if argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else {
+            parsed.positional.push(argument.clone());
+        }
+    }
+    if parsed.positional.len() != 1 {
+        return Err(());
+    }
+    Ok(parsed)
+}
+
+fn emit_jobs_usage(machine_requested: bool, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    if machine_requested {
+        return emit_error(stdout, "usage_error", EXIT_USAGE);
+    }
+    if writeln!(stderr, "{}", crate::localization::english::jobs_usage()).is_ok() {
+        EXIT_USAGE
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+fn emit_jobs_error(
+    error: HistoryError,
+    machine_requested: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let exit = match error {
+        HistoryError::UnknownJob
+        | HistoryError::ActiveJob
+        | HistoryError::IneligibleJob
+        | HistoryError::UnsupportedFailedItems
+        | HistoryError::NoFailedItems => EXIT_INPUT,
+        _ => EXIT_INTERNAL,
+    };
+    if machine_requested {
+        return emit_error(stdout, error.code(), exit);
+    }
+    if writeln!(
+        stderr,
+        "{}",
+        crate::localization::english::jobs_error(error)
+    )
+    .is_ok()
+    {
+        exit
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+fn open_job_history() -> Result<HistoryStore, HistoryError> {
+    let store = HistoryStore::open_default()?;
+    store.reconcile_interrupted()?;
+    Ok(store)
+}
+
+fn run_jobs_list(json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    let store = match open_job_history() {
+        Ok(store) => store,
+        Err(error) => return emit_jobs_error(error, json, stdout, stderr),
+    };
+    let jobs = match store.list() {
+        Ok(jobs) => jobs,
+        Err(error) => return emit_jobs_error(error, json, stdout, stderr),
+    };
+    if json {
+        let result = JobsListResult {
+            retention_limit: crate::standalone::history::RETENTION_LIMIT,
+            jobs,
+        };
+        let document = SuccessDocument {
+            schema_version: 1,
+            kind: "jobs.list",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            result: &result,
+        };
+        return if write_json(&document, stdout) {
+            EXIT_SUCCESS
+        } else {
+            EXIT_INTERNAL
+        };
+    }
+    if jobs.is_empty() {
+        return if writeln!(
+            stdout,
+            "{}",
+            crate::localization::english::jobs_list_empty()
+        )
+        .is_ok()
+        {
+            EXIT_SUCCESS
+        } else {
+            EXIT_INTERNAL
+        };
+    }
+    for job in jobs {
+        if writeln!(
+            stdout,
+            "{}",
+            crate::localization::english::jobs_list_row(&job)
+        )
+        .is_err()
+        {
+            return EXIT_INTERNAL;
+        }
+    }
+    EXIT_SUCCESS
+}
+
+fn run_jobs_show(
+    job_id: &OsStr,
+    json: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let Some(job_id) = job_id.to_str() else {
+        return emit_jobs_error(HistoryError::UnknownJob, json, stdout, stderr);
+    };
+    let store = match open_job_history() {
+        Ok(store) => store,
+        Err(error) => return emit_jobs_error(error, json, stdout, stderr),
+    };
+    let job = match store.load(job_id) {
+        Ok(job) => job,
+        Err(error) => return emit_jobs_error(error, json, stdout, stderr),
+    };
+    if json {
+        let result = JobsShowResult { job };
+        let document = SuccessDocument {
+            schema_version: 1,
+            kind: "jobs.show",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            result: &result,
+        };
+        return if write_json(&document, stdout) {
+            EXIT_SUCCESS
+        } else {
+            EXIT_INTERNAL
+        };
+    }
+    let Ok(_) = writeln!(stdout, "{}", crate::localization::english::jobs_show(&job)) else {
+        return EXIT_INTERNAL;
+    };
+    for item in job.items {
+        if writeln!(
+            stdout,
+            "{}",
+            crate::localization::english::jobs_show_item(&item)
+        )
+        .is_err()
+        {
+            return EXIT_INTERNAL;
+        }
+    }
+    EXIT_SUCCESS
+}
+
+fn run_jobs_clear(json: bool, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32 {
+    let mut store = match open_job_history() {
+        Ok(store) => store,
+        Err(error) => return emit_jobs_error(error, json, stdout, stderr),
+    };
+    let deleted = match store.clear_terminal() {
+        Ok(deleted) => deleted,
+        Err(error) => return emit_jobs_error(error, json, stdout, stderr),
+    };
+    if json {
+        let result = JobsClearResult { deleted };
+        let document = SuccessDocument {
+            schema_version: 1,
+            kind: "jobs.clear",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            result: &result,
+        };
+        return if write_json(&document, stdout) {
+            EXIT_SUCCESS
+        } else {
+            EXIT_INTERNAL
+        };
+    }
+    if writeln!(
+        stdout,
+        "{}",
+        crate::localization::english::jobs_clear_result(deleted)
+    )
+    .is_ok()
+    {
+        EXIT_SUCCESS
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+fn run_jobs_retry(
+    job_id: &OsStr,
+    options: JobsRetryOptions,
+    engine: &Engine,
+    config: &StandaloneConfig,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let machine_requested = options.json || options.jsonl;
+    let Some(job_id) = job_id.to_str() else {
+        return emit_jobs_error(HistoryError::UnknownJob, machine_requested, stdout, stderr);
+    };
+    let store = match open_job_history() {
+        Ok(store) => store,
+        Err(error) => return emit_jobs_error(error, machine_requested, stdout, stderr),
+    };
+    if options.failed_items {
+        return match store.retry_failed_item_keys(job_id) {
+            Ok(_) => emit_jobs_error(
+                HistoryError::UnsupportedFailedItems,
+                machine_requested,
+                stdout,
+                stderr,
+            ),
+            Err(error) => emit_jobs_error(error, machine_requested, stdout, stderr),
+        };
+    }
+    let intent = match store.retry_intent(job_id) {
+        Ok(intent) => intent,
+        Err(error) => return emit_jobs_error(error, machine_requested, stdout, stderr),
+    };
+    let retry_invocation_cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            return emit_jobs_error(
+                HistoryError::DirectoryUnavailable,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    if let Err(exit) =
+        validate_invocation_cwd(&retry_invocation_cwd, machine_requested, stdout, stderr)
+    {
+        return exit;
+    }
+    let source = anchored_retry_path(&intent.invocation_cwd, &intent.source);
+    let (destination, destination_selection) = match intent.destination_selection {
+        DestinationSelection::Explicit => (
+            anchored_retry_path(&intent.invocation_cwd, &intent.destination),
+            DestinationSelection::Explicit,
+        ),
+        DestinationSelection::ConfiguredOutputDirectory
+        | DestinationSelection::NativeDocumentsOutput => {
+            match config.copy_destination_with_selection(&source) {
+                Ok((destination, current)) => (destination, history_destination_selection(current)),
+                Err(error) => {
+                    if machine_requested {
+                        return emit_error(stdout, error.code(), EXIT_INPUT);
+                    }
+                    return if write_copy_record(
+                        stderr,
+                        crate::localization::english::copy_error_message(error.code()),
+                    ) {
+                        EXIT_INPUT
+                    } else {
+                        EXIT_INTERNAL
+                    };
+                }
+            }
+        }
+    };
+    let (workspace, workspace_selection) = match intent.workspace_selection {
+        WorkspaceSelection::Explicit => (
+            anchored_retry_path(&intent.invocation_cwd, &intent.workspace),
+            WorkspaceSelection::Explicit,
+        ),
+        WorkspaceSelection::HostDefault => {
+            (default_copy_workspace(), WorkspaceSelection::HostDefault)
+        }
+    };
+    let retry = ResolvedCopyJob {
+        invocation_cwd: retry_invocation_cwd,
+        source,
+        destination,
+        destination_selection,
+        workspace,
+        workspace_selection,
+        replace: options.replace,
+        conflict_policy_provenance: if options.replace {
+            ConflictPolicyProvenance::RetryExplicitReplace
+        } else {
+            ConflictPolicyProvenance::RetryDefault
+        },
+        parent_job_id: Some(intent.job_id),
+        parent_conflict_policy: Some(intent.conflict_policy),
+        parent_conflict_policy_provenance: Some(intent.conflict_policy_provenance),
+    };
+    execute_copy_job(
+        retry,
+        CopyExecutionMode {
+            json: options.json,
+            jsonl: options.jsonl,
+            history_enabled: true,
+        },
+        engine,
+        stdout,
+        stderr,
+        #[cfg(target_os = "macos")]
+        reporting,
+    )
+}
+
 struct CopyInvocation {
     source: PathBuf,
     destination: Option<PathBuf>,
@@ -1683,6 +2165,28 @@ struct CopyInvocation {
     replace: bool,
     json: bool,
     jsonl: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedCopyJob {
+    invocation_cwd: PathBuf,
+    source: PathBuf,
+    destination: PathBuf,
+    destination_selection: DestinationSelection,
+    workspace: PathBuf,
+    workspace_selection: WorkspaceSelection,
+    replace: bool,
+    conflict_policy_provenance: ConflictPolicyProvenance,
+    parent_job_id: Option<String>,
+    parent_conflict_policy: Option<ConflictPolicyRecord>,
+    parent_conflict_policy_provenance: Option<ConflictPolicyProvenance>,
+}
+
+#[derive(Clone, Copy)]
+struct CopyExecutionMode {
+    json: bool,
+    jsonl: bool,
+    history_enabled: bool,
 }
 
 fn parse_copy(args: &[OsString]) -> Result<CopyInvocation, ()> {
@@ -1760,8 +2264,60 @@ fn parse_copy(args: &[OsString]) -> Result<CopyInvocation, ()> {
     })
 }
 
+impl ResolvedCopyJob {
+    fn admission_input(&self, plan: &OperationPlan) -> AdmissionInput {
+        let snapshot = plan.snapshot();
+        AdmissionInput {
+            kind: JobKind::CopyThrough,
+            submission_kind: SubmissionKind::Single,
+            invocation_cwd: self.invocation_cwd.clone(),
+            source: self.source.clone(),
+            destination: self.destination.clone(),
+            destination_selection: self.destination_selection,
+            workspace: self.workspace.clone(),
+            workspace_selection: self.workspace_selection,
+            conflict_policy: if self.replace {
+                ConflictPolicyRecord::Replace
+            } else {
+                ConflictPolicyRecord::Fail
+            },
+            conflict_policy_provenance: self.conflict_policy_provenance,
+            parent_conflict_policy: self.parent_conflict_policy,
+            parent_conflict_policy_provenance: self.parent_conflict_policy_provenance,
+            parent_job_id: self.parent_job_id.clone(),
+            retry_scope: RetryScope::All,
+            required_providers: snapshot.required_providers().to_vec(),
+            required_keys: snapshot.required_keys().to_vec(),
+            items: vec![AdmissionItem {
+                item_key: "copy-through".to_owned(),
+                source: self.source.clone(),
+                destination: self.destination.clone(),
+            }],
+        }
+    }
+}
+
+fn history_destination_selection(selection: CopyDestinationSelection) -> DestinationSelection {
+    match selection {
+        CopyDestinationSelection::ConfiguredOutputDirectory => {
+            DestinationSelection::ConfiguredOutputDirectory
+        }
+        CopyDestinationSelection::NativeDocumentsOutput => {
+            DestinationSelection::NativeDocumentsOutput
+        }
+    }
+}
+
 fn default_copy_workspace() -> PathBuf {
     std::env::temp_dir().join("nscb-copy-through")
+}
+
+fn anchored_retry_path(invocation_cwd: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        invocation_cwd.join(path)
+    }
 }
 
 fn copy_plan_paths_are_json_representable(plan: &OperationPlan) -> bool {
@@ -1782,6 +2338,77 @@ fn copy_plan_paths_are_json_representable(plan: &OperationPlan) -> bool {
 
 fn paths_are_json_representable<'a>(paths: impl IntoIterator<Item = &'a Path>) -> bool {
     paths.into_iter().all(|path| path.to_str().is_some())
+}
+
+fn prepare_copy_history(
+    job: &ResolvedCopyJob,
+    plan: &OperationPlan,
+) -> Result<(PendingAdmission, JobLease), HistoryError> {
+    let store = HistoryStore::open_default()?;
+    store.reconcile_interrupted()?;
+    let pending = store.begin_admission(job.admission_input(plan))?;
+    let lease = pending.acquire_lease()?;
+    debug_assert_eq!(lease.job_id(), pending.job_id());
+    Ok((pending, lease))
+}
+
+fn emit_copy_history_error(
+    error: HistoryError,
+    machine_requested: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    if error == HistoryError::PathUnrepresentable {
+        // Input paths must be UTF-8 to fit the standalone history schema.
+        return emit_unrepresentable_path_error(machine_requested, stdout, stderr);
+    }
+    if machine_requested {
+        emit_error(stdout, error.code(), EXIT_INTERNAL)
+    } else {
+        let _ = write_copy_record(
+            stderr,
+            crate::localization::english::copy_history_error(error.code()),
+        );
+        EXIT_INTERNAL
+    }
+}
+
+fn emit_unrepresentable_path_error(
+    machine_requested: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let code = nscb::InputResolutionErrorCode::UnrepresentablePath;
+    if machine_requested {
+        emit_error(stdout, code.as_str(), EXIT_INPUT)
+    } else if writeln!(
+        stderr,
+        "{}",
+        crate::localization::english::input_resolution_error(code)
+    )
+    .is_ok()
+    {
+        EXIT_INPUT
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+fn validate_invocation_cwd(
+    path: &Path,
+    machine_requested: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), i32> {
+    if path.to_str().is_some() {
+        Ok(())
+    } else {
+        Err(emit_unrepresentable_path_error(
+            machine_requested,
+            stdout,
+            stderr,
+        ))
+    }
 }
 
 fn exit_for_operation_failure(code: OperationFailureCode) -> i32 {
@@ -1831,18 +2458,70 @@ struct JobResultDocument<'a> {
     schema_version: u8,
     kind: &'static str,
     nscb_version: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_error: Option<&'static str>,
     sequence: u64,
     snapshot: OperationSessionSnapshot,
     result: &'a OperationResult,
 }
 
+#[derive(Debug)]
+struct CopyWorkerOutput {
+    result: Option<OperationResult>,
+    history_error: Option<HistoryError>,
+}
+
+#[derive(Debug, Default)]
+struct CompletionPersistence {
+    state: std::sync::Mutex<Option<Option<HistoryError>>>,
+    ready: std::sync::Condvar,
+}
+
+impl CompletionPersistence {
+    fn complete(&self, error: Option<HistoryError>) {
+        if let Ok(mut state) = self.state.lock() {
+            *state = Some(error);
+            self.ready.notify_all();
+        }
+    }
+
+    fn wait_for(
+        &self,
+        worker: &std::thread::JoinHandle<CopyWorkerOutput>,
+    ) -> Option<Option<HistoryError>> {
+        let Ok(mut state) = self.state.lock() else {
+            return None;
+        };
+        loop {
+            if let Some(value) = *state {
+                return Some(value);
+            }
+            if worker.is_finished() {
+                return None;
+            }
+            let Ok((next, _)) = self
+                .ready
+                .wait_timeout(state, std::time::Duration::from_millis(50))
+            else {
+                return None;
+            };
+            state = next;
+        }
+    }
+}
+
 fn stream_job_events(
     consumer: &OperationEventConsumer,
     stdout: &mut dyn Write,
-    worker: &std::thread::JoinHandle<OperationResult>,
-) -> (bool, bool) {
+    worker: &std::thread::JoinHandle<CopyWorkerOutput>,
+    job_id: Option<&str>,
+    completion_persistence: Option<&CompletionPersistence>,
+) -> (bool, bool, Option<HistoryError>) {
     let mut output_ok = true;
     let mut terminal_written = false;
+    let mut persisted_error = None;
     loop {
         let event = match consumer.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(event) => event,
@@ -1859,12 +2538,20 @@ fn stream_job_events(
         };
         let wrote = match event.event() {
             OperationEventKind::Completed { result } => {
+                if let Some(gate) = completion_persistence {
+                    let Some(gate_result) = gate.wait_for(worker) else {
+                        break;
+                    };
+                    persisted_error = gate_result;
+                }
                 terminal_written = true;
                 write_json(
                     &JobResultDocument {
                         schema_version: 1,
                         kind: "job.result",
                         nscb_version: env!("CARGO_PKG_VERSION"),
+                        job_id,
+                        history_error: persisted_error.map(HistoryError::code),
                         sequence: event.sequence(),
                         snapshot: event.snapshot(),
                         result,
@@ -1886,10 +2573,15 @@ fn stream_job_events(
         };
         output_ok &= wrote && stdout.flush().is_ok();
     }
-    (output_ok, terminal_written)
+    (output_ok, terminal_written, persisted_error)
 }
 
-fn write_last_job_completion(session: &OperationSession, stdout: &mut dyn Write) -> bool {
+fn write_last_job_completion(
+    session: &OperationSession,
+    stdout: &mut dyn Write,
+    job_id: Option<&str>,
+    history_error: Option<HistoryError>,
+) -> bool {
     let Ok(Some(completion)) = session.last_completion() else {
         return false;
     };
@@ -1898,6 +2590,8 @@ fn write_last_job_completion(session: &OperationSession, stdout: &mut dyn Write)
             schema_version: 1,
             kind: "job.result",
             nscb_version: env!("CARGO_PKG_VERSION"),
+            job_id,
+            history_error: history_error.map(HistoryError::code),
             sequence: completion.sequence(),
             snapshot: completion.snapshot(),
             result: completion.result(),
@@ -1974,8 +2668,8 @@ fn run_copy_impl(
             };
         }
     };
-    let destination = match invocation.destination {
-        Some(destination) => destination,
+    let (destination, destination_selection) = match invocation.destination {
+        Some(destination) => (destination, DestinationSelection::Explicit),
         None => {
             let Some(config) = standalone else {
                 #[cfg(target_os = "macos")]
@@ -1991,8 +2685,10 @@ fn run_copy_impl(
                     EXIT_INTERNAL
                 };
             };
-            match config.copy_destination(&invocation.source) {
-                Ok(destination) => destination,
+            match config.copy_destination_with_selection(&invocation.source) {
+                Ok((destination, selection)) => {
+                    (destination, history_destination_selection(selection))
+                }
                 Err(error) => {
                     #[cfg(target_os = "macos")]
                     if let Some(reporting) = reporting {
@@ -2013,12 +2709,38 @@ fn run_copy_impl(
             }
         }
     };
+    let invocation_cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_copy_history_error(
+                HistoryError::DirectoryUnavailable,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    if let Err(exit) = validate_invocation_cwd(&invocation_cwd, machine_requested, stdout, stderr) {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        return exit;
+    }
+    let (workspace, workspace_selection) = match invocation.workspace.clone() {
+        Some(workspace) => (workspace, WorkspaceSelection::Explicit),
+        None => (default_copy_workspace(), WorkspaceSelection::HostDefault),
+    };
     if machine_requested
-        && !paths_are_json_representable(
-            std::iter::once(invocation.source.as_path())
-                .chain(std::iter::once(destination.as_path()))
-                .chain(invocation.workspace.as_deref()),
-        )
+        && !paths_are_json_representable([
+            invocation.source.as_path(),
+            destination.as_path(),
+            workspace.as_path(),
+        ])
     {
         #[cfg(target_os = "macos")]
         if let Some(reporting) = reporting {
@@ -2026,16 +2748,69 @@ fn run_copy_impl(
         }
         return emit_error(stdout, "unrepresentable_path", EXIT_INPUT);
     }
-
-    let request = match invocation.workspace {
-        Some(workspace) => CopyThroughRequest::new(&invocation.source, &destination, workspace),
-        None => CopyThroughRequest::with_host_default_workspace(
-            &invocation.source,
-            &destination,
-            default_copy_workspace(),
-        ),
+    let job = ResolvedCopyJob {
+        invocation_cwd,
+        source: invocation.source.clone(),
+        destination: destination.clone(),
+        destination_selection,
+        workspace,
+        workspace_selection,
+        replace: invocation.replace,
+        conflict_policy_provenance: if invocation.replace {
+            ConflictPolicyProvenance::CliReplace
+        } else {
+            ConflictPolicyProvenance::Default
+        },
+        parent_job_id: None,
+        parent_conflict_policy: None,
+        parent_conflict_policy_provenance: None,
     };
-    let request = if invocation.replace {
+    execute_copy_job(
+        job,
+        CopyExecutionMode {
+            json: invocation.json,
+            jsonl: invocation.jsonl,
+            history_enabled: standalone.is_some(),
+        },
+        engine,
+        stdout,
+        stderr,
+        #[cfg(target_os = "macos")]
+        reporting,
+    )
+}
+
+/// Builds an operation request without losing how the CLI selected its workspace.
+fn copy_through_request(
+    source: &Path,
+    destination: &Path,
+    workspace: &Path,
+    workspace_selection: WorkspaceSelection,
+) -> CopyThroughRequest {
+    match workspace_selection {
+        WorkspaceSelection::Explicit => CopyThroughRequest::new(source, destination, workspace),
+        WorkspaceSelection::HostDefault => {
+            CopyThroughRequest::with_host_default_workspace(source, destination, workspace)
+        }
+    }
+}
+
+fn execute_copy_job(
+    job: ResolvedCopyJob,
+    mode: CopyExecutionMode,
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let machine_requested = mode.json || mode.jsonl;
+    let request = copy_through_request(
+        &job.source,
+        &job.destination,
+        &job.workspace,
+        job.workspace_selection,
+    );
+    let request = if job.replace {
         request.with_conflict_policy(ConflictPolicy::Replace)
     } else {
         request
@@ -2091,7 +2866,7 @@ fn run_copy_impl(
     }
 
     let session = OperationSession::new();
-    if invocation.jsonl {
+    if mode.jsonl {
         let consumer = match session.subscribe_events() {
             Ok(consumer) => consumer,
             Err(code) => {
@@ -2102,21 +2877,86 @@ fn run_copy_impl(
                 return emit_error(stdout, code.as_str(), exit_for_operation_failure(code));
             }
         };
+        let history = if mode.history_enabled {
+            match prepare_copy_history(&job, &plan) {
+                Ok(history) => Some(history),
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(reporting) = reporting {
+                        reporting.pre_admission_complete();
+                    }
+                    drop(consumer);
+                    drop(session);
+                    drop(cancellation);
+                    return emit_copy_history_error(error, true, stdout, stderr);
+                }
+            }
+        } else {
+            None
+        };
+        let job_id = history
+            .as_ref()
+            .map(|(pending, _)| pending.job_id().to_owned());
+        let (lease, pending) = match history {
+            Some((pending, lease)) => (Some(lease), Some(pending)),
+            None => (None, None),
+        };
+        let completion_persistence = Arc::new(CompletionPersistence::default());
+        let worker_gate = Arc::clone(&completion_persistence);
+        let worker_job_id = job_id.clone();
         let execution_session = session.clone();
         let execution_cancellation = cancellation.handle().clone();
         #[cfg(target_os = "macos")]
         let execution_reporting = reporting.cloned();
+        let (admission_sender, admission_receiver) = std::sync::mpsc::channel();
         let worker = match spawn_copy_worker(move || {
-            let result = Engine::new().execute_operation_with_cancellation(
-                plan,
-                &execution_session,
-                execution_cancellation,
-            );
+            if admission_receiver.recv().is_err() {
+                let output = CopyWorkerOutput {
+                    result: None,
+                    history_error: Some(HistoryError::AdmissionFailed),
+                };
+                worker_gate.complete(output.history_error);
+                return output;
+            }
+            let output = (|| {
+                let mut history_store = if let Some(job_id) = worker_job_id.as_deref() {
+                    let store = HistoryStore::open_default()?;
+                    store.begin_running(job_id)?;
+                    Some(store)
+                } else {
+                    None
+                };
+                let _lease = lease;
+                let result = Engine::new().execute_operation_with_cancellation(
+                    plan,
+                    &execution_session,
+                    execution_cancellation,
+                );
+                let history_error = if let (Some(store), Some(job_id)) =
+                    (history_store.as_mut(), worker_job_id.as_deref())
+                {
+                    match execution_session.last_completion() {
+                        Ok(Some(completion)) => store.complete(job_id, &completion).err(),
+                        Ok(None) | Err(_) => Some(HistoryError::CompletionFailed),
+                    }
+                } else {
+                    None
+                };
+                Ok(CopyWorkerOutput {
+                    result: Some(result),
+                    history_error,
+                })
+            })()
+            .unwrap_or_else(|error| CopyWorkerOutput {
+                result: None,
+                history_error: Some(error),
+            });
+            worker_gate.complete(output.history_error);
             #[cfg(target_os = "macos")]
             if let Some(reporting) = execution_reporting {
                 reporting.job_complete();
             }
-            result
+            output
         }) {
             Ok(worker) => worker,
             Err(_) => {
@@ -2124,15 +2964,44 @@ fn run_copy_impl(
                 if let Some(reporting) = reporting {
                     reporting.pre_admission_complete();
                 }
+                drop(admission_sender);
+                drop(pending);
                 drop(consumer);
                 drop(session);
                 drop(cancellation);
                 return emit_error(stdout, "execution_worker_start_failed", EXIT_INTERNAL);
             }
         };
-        let (output_ok, terminal_written) = stream_job_events(&consumer, stdout, &worker);
-        let result = match worker.join() {
-            Ok(result) => result,
+        if let Some(pending) = pending
+            && pending.commit().is_err()
+        {
+            drop(admission_sender);
+            let _ = worker.join();
+            drop(consumer);
+            drop(session);
+            drop(cancellation);
+            return emit_copy_history_error(HistoryError::AdmissionFailed, true, stdout, stderr);
+        }
+        if admission_sender.send(()).is_err() {
+            if let Some(job_id) = job_id.as_deref() {
+                let _ = HistoryStore::open_default()
+                    .and_then(|store| store.discard_unstarted_admission(job_id));
+            }
+            let _ = worker.join();
+            drop(consumer);
+            drop(session);
+            drop(cancellation);
+            return emit_copy_history_error(HistoryError::AdmissionFailed, true, stdout, stderr);
+        }
+        let (output_ok, terminal_written, event_history_error) = stream_job_events(
+            &consumer,
+            stdout,
+            &worker,
+            job_id.as_deref(),
+            Some(&completion_persistence),
+        );
+        let worker_output = match worker.join() {
+            Ok(output) => output,
             Err(_) => {
                 #[cfg(target_os = "macos")]
                 if let Some(reporting) = reporting {
@@ -2146,9 +3015,19 @@ fn run_copy_impl(
             }
         };
         drop(cancellation);
+        let history_error = worker_output.history_error.or(event_history_error);
+        let Some(result) = worker_output.result else {
+            return emit_copy_history_error(
+                history_error.unwrap_or(HistoryError::CompletionFailed),
+                true,
+                stdout,
+                stderr,
+            );
+        };
         let mut output_ok = output_ok;
         if !terminal_written && output_ok {
-            output_ok = write_last_job_completion(&session, stdout);
+            output_ok =
+                write_last_job_completion(&session, stdout, job_id.as_deref(), history_error);
         }
         if !output_ok {
             #[cfg(target_os = "macos")]
@@ -2163,41 +3042,98 @@ fn run_copy_impl(
                 let _ = write_copy_record(stderr, crate::localization::english::output_failure());
             }
         }
-        return exit_for_operation_result(&result);
+        return if history_error.is_some() || !output_ok {
+            EXIT_INTERNAL
+        } else {
+            exit_for_operation_result(&result)
+        };
     }
 
+    let history = if mode.history_enabled {
+        match prepare_copy_history(&job, &plan) {
+            Ok((pending, lease)) => match pending.commit() {
+                Ok(admitted) => Some((admitted.job_id, lease)),
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(reporting) = reporting {
+                        reporting.pre_admission_complete();
+                    }
+                    drop(cancellation);
+                    return emit_copy_history_error(error, machine_requested, stdout, stderr);
+                }
+            },
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                if let Some(reporting) = reporting {
+                    reporting.pre_admission_complete();
+                }
+                drop(cancellation);
+                return emit_copy_history_error(error, machine_requested, stdout, stderr);
+            }
+        }
+    } else {
+        None
+    };
+    let job_id = history.as_ref().map(|(job_id, _)| job_id.clone());
+    if let Some(job_id) = job_id.as_deref() {
+        let store = match HistoryStore::open_default()
+            .and_then(|store| store.begin_running(job_id).map(|()| store))
+        {
+            Ok(store) => store,
+            Err(error) => {
+                drop(history);
+                drop(cancellation);
+                return emit_copy_history_error(error, machine_requested, stdout, stderr);
+            }
+        };
+        drop(store);
+    }
     let result =
         engine.execute_operation_with_cancellation(plan, &session, cancellation.handle().clone());
+    let history_error = if let Some(job_id) = job_id.as_deref() {
+        match session.last_completion() {
+            Ok(Some(completion)) => HistoryStore::open_default()
+                .and_then(|mut store| store.complete(job_id, &completion))
+                .err(),
+            Ok(None) | Err(_) => Some(HistoryError::CompletionFailed),
+        }
+    } else {
+        None
+    };
+    drop(history);
     #[cfg(target_os = "macos")]
     if let Some(reporting) = reporting {
         reporting.job_complete();
     }
     drop(cancellation);
-    if invocation.json {
-        if !write_last_job_completion(&session, stdout) {
-            #[cfg(target_os = "macos")]
-            let managed = reporting.is_some();
-            #[cfg(target_os = "macos")]
-            if let Some(reporting) = reporting {
-                reporting.fail();
-            }
-            #[cfg(not(target_os = "macos"))]
-            let managed = false;
-            if !managed {
-                let _ = write_copy_record(stderr, crate::localization::english::output_failure());
-            }
-        }
+
+    let output_failed = if mode.json {
+        !write_last_job_completion(&session, stdout, job_id.as_deref(), history_error)
     } else {
-        let written = write_human_copy_result(&result, stdout, stderr);
-        if !written {
-            #[cfg(target_os = "macos")]
-            let managed = reporting.is_some();
-            #[cfg(not(target_os = "macos"))]
-            let managed = false;
-            if !managed {
-                let _ = write_copy_record(stderr, crate::localization::english::output_failure());
-            }
+        !write_human_copy_result(&result, stdout, stderr)
+    };
+    if output_failed {
+        #[cfg(target_os = "macos")]
+        let managed = reporting.is_some();
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.fail();
         }
+        #[cfg(not(target_os = "macos"))]
+        let managed = false;
+        if !managed {
+            let _ = write_copy_record(stderr, crate::localization::english::output_failure());
+        }
+    }
+    if let Some(error) = history_error {
+        let _ = write_copy_record(
+            stderr,
+            crate::localization::english::copy_history_error(error.code()),
+        );
+        return EXIT_INTERNAL;
+    }
+    if output_failed {
+        return EXIT_INTERNAL;
     }
     exit_for_operation_result(&result)
 }
@@ -2242,9 +3178,9 @@ thread_local! {
     static COPY_WORKER_START_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn spawn_copy_worker(
-    worker: impl FnOnce() -> OperationResult + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<OperationResult>> {
+fn spawn_copy_worker<T: Send + 'static>(
+    worker: impl FnOnce() -> T + Send + 'static,
+) -> std::io::Result<std::thread::JoinHandle<T>> {
     #[cfg(all(test, target_os = "macos"))]
     if COPY_WORKER_START_FAILURE.with(|failure| failure.replace(false)) {
         return Err(std::io::Error::other("injected worker startup failure"));
@@ -2423,6 +3359,40 @@ mod tests {
         assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
         let document: Value = serde_json::from_slice(&stdout).expect("one usage JSON document");
         assert_eq!(document["error"]["code"], "usage_error");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_invocation_cwd_uses_input_path_error_for_human_and_json() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let cwd = std::path::PathBuf::from(OsString::from_vec(b"cwd-\xff".to_vec()));
+        let mut json_stdout = Vec::new();
+        let mut json_stderr = Vec::new();
+        let json_exit =
+            super::validate_invocation_cwd(&cwd, true, &mut json_stdout, &mut json_stderr)
+                .unwrap_err();
+        assert_eq!(json_exit, 3);
+        assert!(json_stderr.is_empty());
+        let json: Value = serde_json::from_slice(&json_stdout).unwrap();
+        assert_eq!(json["error"]["code"], "unrepresentable_path");
+
+        let mut human_stdout = Vec::new();
+        let mut human_stderr = Vec::new();
+        let human_exit =
+            super::validate_invocation_cwd(&cwd, false, &mut human_stdout, &mut human_stderr)
+                .unwrap_err();
+        assert_eq!(human_exit, 3);
+        assert!(human_stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(human_stderr).unwrap(),
+            format!(
+                "{}\n",
+                english::input_resolution_error(
+                    nscb::InputResolutionErrorCode::UnrepresentablePath
+                )
+            )
+        );
     }
 
     #[test]
@@ -3165,6 +4135,42 @@ mod copy_cli_tests {
             "a failed worker start releases invocation state"
         );
         assert_eq!(fs::read(next_destination).unwrap(), bytes);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_default_workspace_provenance_allows_cross_volume_fallback() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().expect("cross-volume copy fixture");
+        let source = root.path().join("source.bin");
+        let destination = root.path().join("destination.bin");
+        let workspace = std::path::Path::new("/System/Volumes/Preboot");
+        fs::write(&source, b"host-default workspace provenance").expect("write source");
+
+        assert_ne!(
+            fs::metadata(root.path())
+                .expect("temporary volume metadata")
+                .dev(),
+            fs::metadata(workspace)
+                .expect("Preboot volume metadata")
+                .dev(),
+            "the test requires distinct destination and host-workspace volumes"
+        );
+
+        let plan = Engine::new()
+            .plan_copy_through(super::copy_through_request(
+                &source,
+                &destination,
+                workspace,
+                super::WorkspaceSelection::HostDefault,
+            ))
+            .expect("host-default workspace falls back across volumes");
+
+        assert_eq!(
+            plan.snapshot().staging_strategy(),
+            nscb::StagingStrategy::DestinationLocalFallback
+        );
     }
 
     #[cfg(target_os = "macos")]

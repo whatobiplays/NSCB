@@ -14,6 +14,7 @@ nscb --help
 nscb --version
 nscb config path|show|set|reset [--json]
 nscb config set <keys_path|output_dir> <absolute-path> [--json]
+nscb jobs list|show|retry|clear [--json]
 nscb keys set <source> [--json]
 ```
 
@@ -258,8 +259,8 @@ option.
 The default conflict policy refuses to replace a different existing
 destination. `--replace` selects the qualified atomic replacement path. When
 `--workspace` is omitted, staging uses the host temporary directory under
-`nscb-copy-through`. Copy execution does not persist configuration or execution
-history.
+`nscb-copy-through`. Copy does not modify configuration. The normal standalone
+executable records each admitted copy in its per-user Job history.
 
 When reporting succeeds, `--json` emits one `job.result` document for an
 admitted execution, including failure, cancellation, and publication
@@ -299,16 +300,60 @@ binds a cancellation handle to one invocation. The synchronous
 [job execution and machine output](docs/architecture/job-execution.md) for the
 event, progress, cancellation, and reconciliation contract.
 
+## Standalone Job history
+
+`nscb` records plan-admitted Job history in a versioned per-user SQLite
+database. History is separate from the embedded `Engine` API and contains no
+copied content or key material.
+
+```text
+nscb jobs list [--json]
+nscb jobs show <id> [--json]
+nscb jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]
+nscb jobs clear [--json]
+```
+
+History keeps at most 1,000 ordinary pruneable terminal Jobs. Interrupted Jobs
+and terminal Jobs with retained artifact, unresolved published output, or
+uncertain publication evidence are excluded from automatic pruning for
+reconciliation. A retry creates a new linked Job from a fresh typed plan and
+current configuration; the earlier Job and published output remain untouched.
+Relative explicit paths remain tied to the original invocation directory,
+while implicit destination and workspace choices are resolved again.
+Replacement authority is never inherited and requires `--replace` again.
+Clearing history removes terminal database records but never deletes outputs,
+keys, configuration, caches, workspaces, or other filesystem artifacts. Active
+Jobs and unknown future states remain visible. Opening history for `jobs clear`
+may initialize or inspect the persistent database, SQLite sidecars, schema lock,
+and fixed lease-slot files before the clear transaction runs.
+
+See [standalone configuration](docs/configuration.md) for the native database
+location, retention exception, recovery rules, and machine records.
+
 ## Build and validation
 
 Rust 1.98.1 is pinned as both the development toolchain and the minimum
 supported Rust version. Dependency versions are recorded in `Cargo.lock`.
-`rust-toolchain.toml` selects that pinned toolchain when rustup dispatches
-Cargo. A `make all` run instead uses whichever Cargo toolchain is active in
-the invoking environment. Run `rustup run 1.98.1 make all` for Rust 1.98.1
-qualification. GPT Repo MCP `all` executes under the MCP server's effective
-Rust toolchain and must be recorded as separate evidence; it is not Rust
-1.98.1 evidence unless the server actually selected 1.98.1.
+`rust-toolchain.toml` selects the default toolchain, and the canonical Makefile
+resolves Cargo, rustc, rustfmt, Cargo Clippy, and clippy-driver from the Rust
+1.98.1 toolchain. It supplies the pinned compiler and formatter paths to Cargo
+and puts the pinned toolchain directory first when locating Clippy, so caller
+PATH entries do not select alternate Rust tools:
+
+```sh
+make all
+```
+
+GPT Repo MCP `all` executes under the MCP server's effective toolchain and must
+be recorded as separate evidence from a local pinned Makefile run.
+
+The `standalone-job-history` feature is opt-in and enables the optional bundled
+SQLite dependency used by the `nscb` executable. `make build` enables this
+feature and verifies that the executable exists. `make test` and `make smoke`
+also enable the feature and fail when the selected Job-history CLI test count is
+zero. `make embedded-boundary` checks the no-default dependency graph for
+`rusqlite`. Embedded consumers can separately compile the library with
+`cargo check --locked --lib --no-default-features`.
 
 The content-policy checker and its tests use only the Python 3.11+ standard library. It checks prohibited-content patterns and verifies provenance for every binary fixture against both the Git index and working tree. The initial fixture registry is intentionally empty because the repository contains no binary fixtures.
 
@@ -318,7 +363,7 @@ The repository-owned `Makefile` is the canonical entrypoint for local validation
 make all
 ```
 
-Individual profiles are also available through `make content-policy`, `make test-content-policy`, `make test-content-policy-git`, `make test-cleanup`, `make test-cleanup-git`, `make typecheck`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting. Validation targets never modify source files.
+Individual profiles are also available through `make content-policy`, `make test-content-policy`, `make test-content-policy-git`, `make test-cleanup`, `make test-cleanup-git`, `make typecheck`, `make embedded-boundary`, `make check-standalone-tests`, `make lint`, `make test`, `make build`, and `make smoke`. Use `make` to list every target. `make fmt` applies formatting. Validation targets never modify source files.
 
 Run `make clean` only after stopping builds, tests, Python imports, and other artifact producers. It deletes the entire conventional worktree-local `target/`, including generated internal locks, then independently removes untracked Python bytecode under `scripts/` and `tests/`. Do not store durable content in `target/`. Tracked target files or known protected state prevent target deletion; symlinked roots are rejected, and external symlink destinations are never followed. Custom Cargo target/build locations are reported outside scope. The offline Python standard-library driver never invokes Cargo, installs tools, or provisions a toolchain. Documentation, Delegation provenance, tracked files, environments, provider/application state, and other durable content remain. Reports show independent category outcomes and approximate logical bytes; missing directories and repeated runs succeed. See [cleanup qualification](docs/testing/cleanup-qualification.md) for exact exclusions, exit statuses, failure/retry behavior, and host limits.
 
@@ -328,8 +373,9 @@ GitHub Actions runs `make all` plus the separate Git integration job on `ubuntu-
 
 ## Content recognition
 
-`cargo run --locked -- recognize <path> --json` reports byte-derived container
-or archive structure through `Engine::recognize_content`. Unknown and Ambiguous
+`cargo run --locked --features standalone-job-history -- recognize <path> --json`
+reports byte-derived container or archive structure through
+`Engine::recognize_content`. Unknown and Ambiguous
 are distinct results with exit 3. Package/card structural eligibility is not
 execution authorization. See [Content recognition](docs/content-recognition.md)
 for supported profiles, encrypted NCA/NSX limitations, evidence and budgets.

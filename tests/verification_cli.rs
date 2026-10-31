@@ -1,3 +1,5 @@
+#![cfg(feature = "standalone-job-history")]
+
 //! Subprocess tests for the standalone `nscb verify` surface.
 
 mod support;

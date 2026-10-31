@@ -1,3 +1,4 @@
+#[cfg(feature = "standalone-job-history")]
 #[allow(dead_code)]
 pub mod process;
 #[allow(dead_code)]

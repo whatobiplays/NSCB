@@ -1,3 +1,5 @@
+#![cfg(feature = "standalone-job-history")]
+
 mod support;
 
 use nscb::LocalSplitTrustStore;

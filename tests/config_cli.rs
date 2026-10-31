@@ -1,3 +1,5 @@
+#![cfg(feature = "standalone-job-history")]
+
 //! Subprocess coverage for standalone configuration and key management.
 
 mod support;
@@ -208,6 +210,23 @@ fn global_help_and_version_do_not_initialize_configuration() {
             "{argument} must not initialize standalone state"
         );
     }
+}
+
+#[test]
+fn global_and_jobs_help_advertise_history_commands() {
+    let directory = tempfile::tempdir().unwrap();
+    let global = run(directory.path(), &["--help"]);
+    assert_eq!(global.status.code(), Some(0), "{global:?}");
+    let global = String::from_utf8_lossy(&global.stdout);
+    assert!(global.contains("jobs <list|show|retry|clear>"), "{global}");
+
+    let jobs = run(directory.path(), &["jobs", "--help"]);
+    assert_eq!(jobs.status.code(), Some(2), "{jobs:?}");
+    let jobs = String::from_utf8_lossy(&jobs.stderr);
+    assert!(jobs.contains("jobs list"), "{jobs}");
+    assert!(jobs.contains("jobs show <id>"), "{jobs}");
+    assert!(jobs.contains("jobs retry <id>"), "{jobs}");
+    assert!(jobs.contains("jobs clear"), "{jobs}");
 }
 
 #[test]

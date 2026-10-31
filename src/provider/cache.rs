@@ -1752,6 +1752,7 @@ pub(crate) fn test_provider_root(cache_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::unix_cache;
     use super::{
         CacheLookup, CacheProblem, MAX_CACHE_DIRECTORY_ENTRIES, MAX_POINTER_CANDIDATES,
@@ -1864,6 +1865,7 @@ mod tests {
         let _ = fs::remove_dir_all(cache);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_bounds_pointer_enumeration_before_removing_entries() {
         let cache = temp_cache();
@@ -1890,6 +1892,7 @@ mod tests {
         let _ = fs::remove_dir_all(cache);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_bounds_object_enumeration() {
         let cache = temp_cache();
@@ -2209,6 +2212,7 @@ mod tests {
         let _ = fs::remove_dir_all(cache);
     }
 
+    #[cfg(unix)]
     #[test]
     fn active_cache_lock_prevents_a_concurrent_repair() {
         let cache = temp_cache();

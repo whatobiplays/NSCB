@@ -1,5 +1,5 @@
 {
-  "global_help": "Usage: nscb <command> [options]\n\nCommands:\n  probe <path>\n  recognize <path>\n  resolve\n  inspect <path>\n  verify <path>\n  copy <source> [destination]\n  config <path|show|set|reset>\n  keys set <source>\n\nGlobal options:\n  -h, --help       Show this help without initializing configuration.\n  -V, --version    Show the NSCB version without initializing configuration.",
+  "global_help": "Usage: nscb <command> [options]\n\nCommands:\n  probe <path>\n  recognize <path>\n  resolve\n  inspect <path>\n  verify <path>\n  copy <source> [destination]\n  jobs <list|show|retry|clear>\n  config <path|show|set|reset>\n  keys set <source>\n\nGlobal options:\n  -h, --help       Show this help without initializing configuration.\n  -V, --version    Show the NSCB version without initializing configuration.",
   "global_version": "nscb {version}",
   "config_usage": "Usage: nscb config <path|show|set|reset> [--json]",
   "config_path": "Configuration file: {path}",
@@ -8,6 +8,7 @@
   "config_updated": "Updated {name} in {path}: {value}",
   "config_reset": "Reset standalone configuration: {path}",
   "keys_usage": "Usage: nscb keys set <source> [--json]",
+  "jobs_usage": "Usage: nscb jobs <list|show|retry|clear> [options]\n\nCommands:\n  jobs list [--json]\n  jobs show <id> [--json]\n  jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]\n  jobs clear [--json]\n\nHistory keeps at most 1,000 ordinary terminal Jobs. Interrupted Jobs and Jobs with unresolved artifact or publication evidence are retained for reconciliation. Clearing history never deletes outputs, configuration, keys, caches, workspaces, or other filesystem artifacts.",
   "keys_set": "Installed the complete key file at {path}.",
   "keys_errors": {
     "key_file_unavailable": "The selected key source could not be read as a regular file.",

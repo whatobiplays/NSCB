@@ -17,18 +17,30 @@ the `Executing` phase and is refused once the execution enters `Promoting` or
 
 The existing read-only JSON kinds (`container_probe.result`,
 `content_recognition.result`, `input_resolution.result`, `inspection.result`,
-`inspection.preflight`, and `verification.result`) are unchanged. The new
-machine kinds are `job.result`, `job.event`, and the existing `error` shape.
+`inspection.preflight`, and `verification.result`) are unchanged. Job-output
+machine kinds are `job.result`, `job.event`, and the existing `error` shape;
+standalone durable history adds `jobs.list`, `jobs.show`, and `jobs.clear`.
 
 Copy-through is qualified only on macOS. Other targets fail planning and
-execution with `UnsupportedCapability`. The contract does not add Tokio,
-NSCB-owned persistence, a daemon, execution history, replay, or a generic
-command dispatcher.
+execution with `UnsupportedCapability`. The standalone executable owns
+persistent Job history. The public Engine library remains stateless with
+respect to configuration, SQLite, lifecycle, and filesystem history. This
+contract adds no daemon, automatic replay, or generic command dispatcher.
+
+The executable declares the non-default `standalone-job-history` feature as
+required, and that feature alone enables the optional `rusqlite` dependency.
+Standalone build and test commands enable it explicitly. The library default
+graph and `--no-default-features` builds exclude standalone SQLite and history
+modules from the Engine dependency graph.
 
 ## Command line
 
 ```
 nscb copy <source> [<destination>] [--workspace <path>] [--replace] [--json | --jsonl]
+nscb jobs list [--json]
+nscb jobs show <id> [--json]
+nscb jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]
+nscb jobs clear [--json]
 ```
 
 The command requires one source and accepts zero or one destination. An
@@ -40,10 +52,13 @@ The default conflict policy refuses to replace a different existing
 destination. `--replace` selects the qualified replacement path. Without
 `--workspace`, staging uses the host temporary directory under
 `nscb-copy-through`. Normal standalone startup initializes or loads the
-standalone configuration; a Copy invocation does not persist its per-job
-source, destination, workspace, or replacement choices. The workspace
-directory created for an invocation remains operation-owned evidence and is
-reported in the terminal artifact inventory.
+standalone configuration; a Copy invocation does not write those per-job
+choices back into configuration. After planning succeeds, standalone Job
+history records the source intent, the explicit, configured, or native
+destination selection, the explicit or host-default workspace selection, and
+whether replacement was selected. The workspace directory created for an
+invocation remains operation-owned evidence and is reported in the terminal
+artifact inventory; history does not claim that every planned path was created.
 
 `--json` and `--jsonl` are mutually exclusive. Repeating an option, supplying an
 unknown `--` option, omitting a `--workspace` value, or providing anything other
@@ -130,8 +145,10 @@ Execution is host-owned. A host that needs events performs these steps:
 5. Recover the authoritative `OperationResult` from the execution return value
    or from `OperationSession::last_result()`.
 
-The host chooses its threading model. The contract does not prescribe an async
-runtime, a worker pool, or a persistence layer.
+The host chooses its threading model. The embedded contract does not prescribe
+an async runtime or worker pool. The standalone executable adds its binary-only
+SQLite lifecycle around this seam; constructing or using the Engine library
+never opens configuration or Job history.
 
 `subscribe_events()` claims exactly one logical consumer for the next
 execution. A second live consumer, or a claim attempted while an execution is
@@ -143,6 +160,107 @@ Admission remains exclusive per session. A second execution admitted while
 one is active returns a `Busy` failure result without emitting an execution
 event and without replacing the active or previous authoritative terminal
 result.
+
+## Standalone Job lifecycle
+
+The standalone executable places durable history around the plan-first Engine
+contract. It plans first and begins an admission transaction only after a
+viable immutable plan and JSON-representable machine paths exist. The
+transaction records the source intent, destination and workspace selection
+provenance, conflict policy and its provenance, retry linkage, required
+providers and keys, and planned item evidence. Planning and configuration
+failures therefore create no Job.
+
+For JSONL Copy, the event consumer and execution worker are started before the
+admission transaction commits so worker-start failure can roll the transaction
+back without creating a fictitious Job. The worker starts behind an in-memory
+gate and the Engine is not called until the admission transaction commits and
+the gate is released. Before opening the admission writer transaction, the
+process exclusively locks one persistent slot from a fixed, bounded registry.
+Each V3 slot file contains only its immutable opaque slot ID. The admission
+transaction stores the Job ID and opaque claim token in SQLite and links that
+claim to the slot. A released legacy V2 slot is rewritten in place to the V3
+identity record only after SQLite confirms that no blocking claim remains and
+the process holds its exclusive OS lock. The version marker is made durable
+before the legacy suffix is truncated, so an interrupted conversion remains
+parseable. Slot files are never unlinked or replaced. The process records the
+transition to `running` before filesystem execution. A failed commit, slot
+claim, or running transition
+prevents filesystem mutation. Synchronous JSON and human Copy commit admission
+and complete the lease/running transition before calling the Engine.
+
+SQLite transactions are limited to schema initialization, admission, durable
+state transitions, completion, retention pruning, recovery, and explicit clear
+operations. The Engine never runs while an admission or completion transaction
+is open. The OS releases the process-lifetime lease when its owner exits; a
+stored PID, timestamp, or pathname is not ownership proof.
+
+The worker obtains the authoritative result from the Engine return value or
+`OperationSession::last_completion()` and commits the terminal outcome and
+artifact evidence before any human, `job.result`, or semantic terminal output is
+delivered. Reporting failure does not change the persisted result. If history
+completion fails after filesystem execution, the base terminal result remains
+authoritative, `history_error` exposes the persistence failure, and the CLI
+exits 7 rather than silently reporting an untracked success. The admitted or
+running record remains available for interruption and reconciliation.
+The same output-failure exit class applies to retry in JSON, JSONL, and human
+mode even when the retry's filesystem result and history row completed.
+
+On startup and before history queries, NSCB scans nonterminal records and tries
+to acquire each record's slot lock without waiting. Recovery checks the slot
+file's stable ID against the SQLite slot mapping and verifies the Job ID and
+claim token from SQLite again inside the recovery transaction. A legacy V2
+file's embedded owner values must also match; V3 files contain no Job or token
+values. The Job and item transitions and the claim's move to `unresolved` share
+one transaction while the slot lock remains held. An active lease, mismatch,
+missing file, or lock error preserves existing state. Lock release proves the
+previous owner exited; it does not by itself prove safe slot reuse or
+publication reconciliation. An unresolved claim therefore keeps the slot
+unavailable until a separately justified reconciliation transition exists.
+There is no daemon, automatic resumption, or fabricated terminal publication.
+
+`jobs retry` does not deserialize a stored plan or inherit authorization. It
+loads the source intent and selection provenance, reconstructs a typed
+`CopyThroughRequest`, and plans against current configuration and
+prerequisites. Explicit destination and workspace paths stay explicit;
+configured and native destination choices are resolved again; a host-default
+workspace is selected again. The new Job links to the parent Job ID and records
+the parent's conflict policy and original policy provenance, but starts with
+the refuse policy unless the operator supplies `--replace` again. The parent
+record and outputs are not changed.
+
+Each Job stores its absolute invocation directory. A retry anchors relative
+explicit source, destination, and workspace strings to the original Job's
+invocation directory. The newly admitted Job records the retry invocation's own
+directory while storing the anchored paths, so later retries cannot silently
+change targets because the operator changed working directories. Only terminal
+`copy_through` records with a `single` submission and `all` retry scope are
+eligible; unknown kinds, batch submissions, failed-item scopes, malformed
+enumeration values, or a missing absolute invocation directory are rejected
+before planning.
+
+Retention keeps the newest 1,000 ordinary pruneable terminal records.
+Nonterminal and `Interrupted` records, plus terminal records carrying unresolved
+artifact, cleanup, or publication evidence, are protected from pruning and do
+not count toward that cap. These records may raise the total above 1,000 until
+reconciliation completes. Parent linkage is stored by Job ID so the child
+remains inspectable after parent pruning. `jobs
+clear` removes only terminal history and its cascading item/artifact rows,
+preserves active records and unknown future states, and performs no filesystem
+deletion. Terminal deletion uses an explicit state allowlist.
+
+This contract does not automatically reclaim workspace or other artifact files.
+`planned_artifacts` records possible paths and expected content rather than
+proof that the operation created an artifact. The operation-owned result is the
+authority for actual artifact identity and retention. When creation ownership or
+unchanged identity cannot be proved, the artifact remains untouched and is
+reported for manual reconciliation.
+
+Publication classification uses the artifacts returned by the authoritative
+operation result. A result without an operation outcome but with a
+`PublishedDestination` artifact becomes `published_unresolved` rather than
+`not_completed`. This state is nonpruneable so the published object remains
+available for reconciliation even when no outcome was established.
 
 ## Semantic events
 
@@ -230,10 +348,13 @@ clean success.
 
 ## Machine record shapes
 
-A terminal `job.result` has exactly six top-level fields: `schema_version`,
-`kind`, `nscb_version`, `sequence`, `snapshot`, and `result`. Standalone `--json`
-and the final JSONL record use this same shape. The sequence and snapshot are
-those of the logical `Completed` event.
+A base terminal `job.result` has exactly six top-level fields: `schema_version`,
+`kind`, `nscb_version`, `sequence`, `snapshot`, and `result`. The sequence and
+snapshot are those of the logical `Completed` event. Standalone Copy `--json`
+and the final JSONL record add top-level `job_id`. If durable completion failed
+after the authoritative result existed, they also add top-level
+`history_error`; otherwise that field is absent. Existing Probe records and the
+Job event envelope are unchanged.
 
 ```json
 {"schema_version":1,"kind":"job.result","nscb_version":"<version>","sequence":3,"snapshot":{"phase":"idle","status":"succeeded","milestone":"validated","outcome":"already_up_to_date","failure":null,"completed_bytes":0,"total_bytes":123},"result":{...}}

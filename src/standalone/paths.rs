@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StandalonePathError {
     ConfigRoot,
+    DataRoot,
     Home,
     Documents,
 }
@@ -37,6 +38,26 @@ pub(crate) fn conventional_key_file_path() -> Result<PathBuf, StandalonePathErro
     }
 }
 
+/// Returns the per-user SQLite history location for the standalone executable.
+///
+/// History is application state, so it lives beneath the platform-local data
+/// directory rather than beside the executable, in the repository, or in a
+/// user-selected workspace.
+pub(crate) fn history_database_path() -> Result<PathBuf, StandalonePathError> {
+    #[cfg(windows)]
+    {
+        history_file_in(
+            std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .or_else(dirs::data_local_dir),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        history_file_in(dirs::data_local_dir())
+    }
+}
+
 #[cfg(any(windows, test))]
 fn windows_config_file_path(
     appdata: Option<PathBuf>,
@@ -66,6 +87,12 @@ fn key_file_in(profile: Option<PathBuf>) -> Result<PathBuf, StandalonePathError>
         .filter(|path| path.is_absolute())
         .map(|path| path.join(".switch").join("prod.keys"))
         .ok_or(StandalonePathError::Home)
+}
+
+fn history_file_in(base: Option<PathBuf>) -> Result<PathBuf, StandalonePathError> {
+    base.filter(|path| path.is_absolute())
+        .map(|path| path.join("NSCB").join("jobs.sqlite3"))
+        .ok_or(StandalonePathError::DataRoot)
 }
 
 pub(crate) fn default_output_directory() -> Result<PathBuf, StandalonePathError> {
@@ -103,7 +130,8 @@ fn default_output_in(documents: Option<PathBuf>) -> Result<PathBuf, StandalonePa
 mod tests {
     use super::{
         StandalonePathError, config_file_in, default_output_directory, default_output_in,
-        simulate_documents_unavailable, windows_config_file_path, windows_key_file_path,
+        history_file_in, simulate_documents_unavailable, windows_config_file_path,
+        windows_key_file_path,
     };
     use std::path::PathBuf;
 
@@ -123,6 +151,10 @@ mod tests {
             assert_eq!(
                 default_output_in(Some(base.clone())).unwrap(),
                 base.join("NSCB_output")
+            );
+            assert_eq!(
+                history_file_in(Some(base.clone())).unwrap(),
+                base.join("NSCB").join("jobs.sqlite3")
             );
         }
     }
@@ -198,6 +230,10 @@ mod tests {
         assert_eq!(
             config_file_in(None).unwrap_err(),
             StandalonePathError::ConfigRoot
+        );
+        assert_eq!(
+            history_file_in(None).unwrap_err(),
+            StandalonePathError::DataRoot
         );
         assert_eq!(
             config_file_in(Some(PathBuf::from("relative"))).unwrap_err(),
