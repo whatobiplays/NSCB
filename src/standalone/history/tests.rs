@@ -1482,28 +1482,7 @@ fn v1_migration_process_crash_before_commit_preserves_backup_and_retries() {
         .current_dir(root.path())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if crash_marker.is_file() {
-            break;
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => panic!("migration child exited before DDL marker: {status}"),
-            Ok(None) => {}
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("could not check migration child status: {error}");
-            }
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("timed out waiting for migration DDL marker");
-        }
-        std::thread::yield_now();
-    }
-    assert_eq!(fs::read(&crash_marker).unwrap(), b"ddl-applied");
+    await_migration_crash_marker(&mut child, &crash_marker);
     child
         .kill()
         .expect("migration child could not be killed at DDL marker");
@@ -1583,6 +1562,72 @@ fn v1_migration_process_crash_before_commit_preserves_backup_and_retries() {
             Some("copied".to_owned()),
         )
     );
+}
+
+/// Waits until the child publishes the complete migration DDL marker payload.
+///
+/// The marker path can exist before its contents become visible, so file existence alone does not
+/// establish that the child reached the crash boundary. This helper also stops and reaps the child
+/// when waiting fails.
+fn await_migration_crash_marker(child: &mut std::process::Child, path: &Path) {
+    const EXPECTED_CONTENT: &[u8] = b"ddl-applied";
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        match fs::read(path) {
+            Ok(contents) if contents == EXPECTED_CONTENT => return,
+            Ok(contents) if EXPECTED_CONTENT.starts_with(&contents) => {}
+            Ok(contents) => {
+                let cleanup = stop_migration_child(child);
+                panic!(
+                    "migration DDL marker {} had unexpected content: {:?}{cleanup}",
+                    path.display(),
+                    String::from_utf8_lossy(&contents),
+                );
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let cleanup = stop_migration_child(child);
+                panic!(
+                    "could not read migration DDL marker {}: {error}{cleanup}",
+                    path.display(),
+                );
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => panic!("migration child exited before DDL marker: {status}"),
+            Ok(None) => {}
+            Err(error) => {
+                let cleanup = stop_migration_child(child);
+                panic!("could not check migration child status: {error}{cleanup}");
+            }
+        }
+
+        if Instant::now() >= deadline {
+            let cleanup = stop_migration_child(child);
+            panic!("timed out waiting for complete migration DDL marker{cleanup}");
+        }
+        std::thread::yield_now();
+    }
+}
+
+fn stop_migration_child(child: &mut std::process::Child) -> String {
+    let kill_error = child.kill().err();
+    let wait_error = child.wait().err();
+    match (kill_error, wait_error) {
+        (None, None) => String::new(),
+        (Some(error), None) => {
+            format!("; additionally could not kill migration child: {error}")
+        }
+        (None, Some(error)) => {
+            format!("; additionally could not reap migration child: {error}")
+        }
+        (Some(kill_error), Some(wait_error)) => format!(
+            "; additionally could not kill migration child: {kill_error}; \
+             could not reap migration child: {wait_error}"
+        ),
+    }
 }
 
 #[test]

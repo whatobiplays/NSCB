@@ -362,6 +362,12 @@ The final native macOS focused run reported no failures or ignored tests:
 | Configuration tests | 49 |
 | CLI subprocess tests | 29 |
 
+Current final-source evidence independently confirms 56 history tests and 23
+Job-history CLI tests on `src/standalone/history/tests.rs` SHA-256
+`b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`;
+the embedded boundary found no SQLite in the no-default graph, and formatter,
+content-policy, documentation-test, and diff checks also passed.
+
 An earlier qualification run recorded 47 passing history unit tests and 22
 passing real-binary Job history tests. Those results remain historical evidence
 for that run and are not final counts.
@@ -375,21 +381,80 @@ isolated retries passed. At that earlier point, a focused rerun then passed
 consecutive focused reruns at 56/0. Those results are historical and did not
 describe the final candidate's complete repeat-run sequence.
 
-Final-candidate validation repeated the focused history command with default
-parallel test execution. The initial run produced 55 passed and 1 failed with
-the same migration process-crash test reading `[]` instead of `ddl-applied`.
+The pre-correction final-candidate validation repeated the focused history
+command with default test parallelism. Its initial run produced 55 passed and
+1 failed with the same migration process-crash test reading `[]` instead of
+`ddl-applied`.
 Three subsequent identical parallel reruns produced 56/0, 56/0, then 55/1 with
 the same assertion. A serialized confirmation with `RUST_TEST_THREADS=1`
 produced 56/0. The canonical `make all` run also passed the same
 crash-injection test as part of its 135-test binary suite.
 
-This is a known `std::fs::write` synchronization race in the test harness: the
-parent waited for the marker path to exist while the child created or truncated
-the file before writing its bytes. The race is nonblocking under the amended
-Issue #12 contract, but it remains a test reliability follow-up.
+The historical failure was a `std::fs::write` synchronization race in the test
+harness: the parent waited for the marker path to exist while the child created
+or truncated the file before writing its bytes. The parent now waits for the
+exact `ddl-applied` marker payload, tolerates absent or partial content, retains
+the bounded timeout and child-liveness checks, and kills and reaps the child on
+timeout or error. The correction adds no sleep-based synchronization and
+changes no production code. This PR corrects the race, which remains a
+regression case in the test suite. At the time, the race was classified as
+nonblocking under the amended Issue #12 contract. The race was not evidence of
+a migration behavior failure and did not waive TAC-12.
 
-The final pinned `make all` gate passed. Its canonical Rust test run before
-smoke reported 1,051 passing executions with 8 ignored. The no-default and
+The concrete historical CI failure was Linux x86_64 in GitHub Actions run
+41172011703 for PR head 8798224876d51968615bc5ae8111b40a7d5f529e, where the
+migration test read an empty marker instead of ddl-applied. The subsequent
+20/20 exact-test and 5/5 complete-suite results are local Rust 1.98.1 candidate
+evidence with default test parallelism; they are not native Linux execution or
+a post-fix Linux CI result. A post-fix Linux CI run must be recorded only after
+this corrective commit is pushed. No post-fix Linux CI result exists at the
+current HEAD.
+
+Post-fix evidence from Rust 1.98.1 records 20/20 passes for
+`standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries`
+and 5/5 passes for the complete filtered `standalone::history::tests` suite
+with default test parallelism. The 25 raw logs in
+`/tmp/nscb-pr66-validation.AO0xoJ/` record those runs. The structured logs and
+exit records in `/tmp/nscb-pr66-final-validation.Q3IIUB/logs/` repeat the
+20/20 and 5/5 results, bind `src/standalone/history/tests.rs` to
+`b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`, and all
+exit 0.
+
+An earlier corrected-source canonical attempt failed in `make smoke` during
+`cli_subprocess` (28 passed, 1 failed in 62.78 seconds) at
+`tests/cli_subprocess.rs:1004` with the seven-second assertion diagnostic.
+Separately, a retained canonical `make test` failure ended at 66.84 seconds;
+its manifest binds that run to pre-correction `src/standalone/history/tests.rs`
+SHA-256 `fe774c0be5bf98c2bfa4f25ebae23de5acc3cdc72ea0ea4f2de40fddbf73b58d`,
+so it does not describe the corrected source.
+
+The isolated exact-test diagnostic had three failures in five runs, with
+observed durations from 7.04 to 7.77 seconds. The baseline had zero failures
+in five runs, with observed durations from 5.56 to 6.87 seconds. These results
+remain historical reliability evidence for the `cli_subprocess` timing guard.
+This timing failure was unrelated to the migration marker.
+
+The final source-bound canonical rerun then passed.
+`rustup run 1.98.1 gmake all` exited 0 after 675.499756833 seconds. Both the
+pre-run and post-run manifests listed the same 144 files and had identical SHA-256
+`1cec4868476fd66600f4e825a2c8c2919bc261912d500d73a5a7ad40355a3088`, and the
+binary diff SHA-256 was
+`6832c7b94e063c405023e7b410925250f88f0d56a00b663dcf0c4dd0488b8f4d`. The run
+log is `/tmp/nscb-issue12-gmake-all-ismawmqp/gmake-all.log` with SHA-256
+`d3276d94e3ee962925cd15efbca82acc5e6fa770c6e04049e2f2da17e1c4ad3e`.
+Across 19 Cargo invocations, 1,103 Rust tests passed, none failed, and 8 were
+ignored. Python content-policy passed 53 tests and cleanup passed 11. The
+important invocations reported 323 passed and 4 ignored for each library
+configuration, 135 for the main binary, 29 for `cli_subprocess`, 49 for
+configuration, 23 for `job_history_cli`, 29 and 23 for the two smoke reruns,
+and 2 documentation tests. `src/standalone/history/tests.rs` remained
+byte-identical at the recorded SHA-256 through the run. Documentation-only
+edits made afterward do not change compiled inputs.
+
+The recorded pre-correction pinned `make all` gate passed. It predates the
+crash-marker correction and did not exercise the corrected exact-payload marker
+wait. Its canonical Rust test run before smoke reported 1,051 passing
+executions with 8 ignored. The no-default and
 feature-enabled library suites each passed 323 tests with 4 ignored; the
 feature-enabled binary suite passed 135; integration test targets passed 268;
 and documentation tests passed 2. The final smoke rerun added 52 passing
@@ -454,17 +519,27 @@ documentation-only cycle did not rerun the check. The initial feature-enabled
 Windows GNU all-target check failed with `E0463` because Cargo invoked
 `/opt/homebrew/bin/rustc` (Rust 1.99.1); that failure is also historical.
 
-The final feature-enabled Windows GNU all-target compile-only check succeeded
-with Rust 1.98.1 using this exact command form:
+An earlier feature-enabled Windows GNU all-target compile-only check succeeded
+with Rust 1.98.1 before the corrected `src/standalone/history/tests.rs`; it
+remains historical pre-correction evidence. A fresh final-source validation
+used Rust 1.98.1 with feature-enabled `x86_64-pc-windows-gnu` `cargo check
+--all-targets`, exited 0 in 42.09 seconds, and is bound to
+`src/standalone/history/tests.rs` SHA-256
+`b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`.
+Its log is
+`/tmp/nscb-issue12-final-evidence.6qMIs4/13-windows-gnu-all-targets.log`.
+Documentation-only edits after the run do not change the compiled input. The
+command below records the wrapper-variable removals. The placeholder omits the
+run's disposable target directory:
 
 ```sh
-RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=<temporary-validation-directory> rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
+env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=<temporary-validation-directory> rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
 ```
 
-This establishes feature-enabled all-target compile-only success for
-`x86_64-pc-windows-gnu`. Native Windows execution, ACL behavior, locking, lease
-behavior, crash recovery, retry, and copy-publication qualification remain
-excluded.
+The fresh run establishes feature-enabled all-target compile-only success for
+the corrected current source targeted at `x86_64-pc-windows-gnu`. Native
+Windows execution, ACL behavior, locking, lease behavior, crash recovery,
+retry, and copy-publication qualification remain excluded.
 
 The live, owner-approved prospective Issue #12 amendment adopted by this
 Delegation prompt replaces historical TAC-6 with NDR-1. The amendment applies
