@@ -7,14 +7,28 @@ that was executed from conditions that remain unqualified.
 
 ## Candidate and environment
 
+### Earlier validation candidate
+
+This table records an earlier validation candidate. Its base revision matched
+`origin/main` at the time and remains historical evidence; it does not identify
+the final Issue #12 candidate.
+
 | Item | Value |
 | --- | --- |
 | Repository | `whatobiplays/NSCB` |
-| Base revision | `09f70d632cf7c4a79d6eaf9d48a20b3d7aaeb7c3` (matches `origin/main`) |
+| Earlier candidate base revision | `09f70d632cf7c4a79d6eaf9d48a20b3d7aaeb7c3` (matched `origin/main` at that time) |
 | Worktree | Isolated Git worktree; the primary checkout was not modified |
 | Host | macOS 27.0.1, Darwin 27.0.0, arm64 |
 | Compiler | Rust 1.98.1 (48a229cea 2026-09-01) |
 | Toolchain pin | `rust-toolchain.toml` and `rustup run 1.98.1` |
+
+### Final Issue #12 candidate
+
+The final Issue #12 candidate used baseline
+`ee85e6a283b884791a69a34a4503a9f9f50e377c` and snapshot HEAD
+`9d99624aee2b8f5458ffca3255dbf1c184072649`. Because this document is part of
+the hashed candidate, the authoritative final manifest and hashes are recorded
+in `RESULT.json` rather than embedded here.
 
 Copy-through evidence applies only to this macOS filesystem configuration.
 No Linux, Windows, network-filesystem, crash-durability, provider, Nintendo
@@ -362,30 +376,87 @@ rustup run 1.98.1 cargo fmt --all -- --check
 make all
 ```
 
-Focused results were 47 passing history unit tests, 22 passing real-binary Job
-history tests, 49 passing configuration tests, and 29 passing CLI subprocess
-tests, with no failures or ignored tests in those focused runs. The final
-pinned `make all` profile passed. Its complete Rust suite reported 717 passed,
-0 failed, and 4 ignored tests. The smoke rerun reported 29 passing CLI
-subprocess tests and 22 passing Job history tests. The Makefile sets
-`RUST_TEST_THREADS=1` for the full and smoke profiles so concurrent subprocess
-suites cannot consume the scheduling margin enforced by the real blocked-pipe
-timing assertions. The embedded no-default-feature library check passed and
-its active dependency graph contained no `rusqlite` package. A cross-target
-`cargo check --all-targets` for `x86_64-unknown-linux-gnu` also passed with
-`RUSTC` bound to the pinned toolchain, confirming that macOS-only copy-success
-subprocess cases are excluded while portable history tests still compile.
+An earlier qualification run recorded 47 passing history unit tests and 22
+passing real-binary Job history tests. Those results are historical evidence
+for that run and are not the final counts.
+
+The final native macOS focused run reported no failures or ignored tests:
+
+| Focused suite | Passed |
+| --- | ---: |
+| History unit tests | 56 |
+| Real-binary Job history tests | 23 |
+| Configuration tests | 49 |
+| CLI subprocess tests | 29 |
+
+An intermediate rerun of the filtered history suite observed 55 passed and 1
+failed:
+`standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries`
+read an empty marker (`[]`) instead of `ddl-applied`. The captured failure log
+remains in the validation evidence. Five isolated reproductions of the same
+test passed (5/5). At an earlier point, one focused rerun passed 56/0, and an
+earlier historical stabilization sequence recorded three consecutive focused
+runs at 56/0. Those results remain historical evidence for that run and do not
+describe the final candidate's complete repeat-run sequence.
+
+Final-candidate validation repeated the focused history command with the
+default parallel test execution. Its initial run produced 55 passed and 1
+failed: the same migration process-crash test read `[]` instead of
+`ddl-applied`. The retained final-candidate repeat sequence produced 56/0,
+56/0, and 55/1 with the same assertion. A subsequent serialized confirmation
+using `RUST_TEST_THREADS=1` produced 56/0. The canonical `gmake all` gate also
+passed, including this crash-injection test in its 135-test binary suite.
+
+The known failure is a `std::fs::write` marker-visibility race in the test
+harness: the parent waited for the marker path to exist while the child
+created or truncated the file before writing its bytes. It is classified as
+a nonblocking test-reliability follow-up under the amended Issue #12 contract.
+The test harness was not changed under the documentation-only authorization.
+The race is not evidence of a migration behavior failure and does not waive
+TAC-12.
+
+The canonical `gmake all` gate passed and includes both `make test` and
+`make smoke`. `make test` reported 1,051 passing executions and 8 ignored: the
+no-default-feature and feature-enabled library suites each passed 323 tests
+with 4 ignored, the feature-enabled binary suite passed 135 tests, integration
+test targets passed 268 tests, and documentation tests passed 2. `make smoke`
+added 52 passing executions, consisting of 29 CLI subprocess tests and 23
+real-binary Job-history CLI tests. The raw `make all` accounting is therefore
+1,103 passing executions and 8 ignored. These are execution counts across
+target invocations, not distinct tests. Deduplication across unique targets
+yields 728 passed and 4 ignored because the 323-test library suite ran under
+both feature configurations and smoke reran targets already selected by
+`make test`. The focused runs above are separate evidence and are not added
+to these canonical counts.
+
+`make test` and `make smoke` set `RUST_TEST_THREADS=1` so concurrent
+subprocess suites cannot consume scheduling margin enforced by real
+blocked-pipe timing assertions. The embedded no-default-feature library check
+passed, and its active dependency graph contained no `rusqlite` package.
+
+An earlier qualification run also passed a cross-target `cargo check
+--all-targets` for `x86_64-unknown-linux-gnu` with `RUSTC` bound to the pinned
+toolchain, confirming that macOS-only copy-success subprocess cases are excluded
+while portable history tests still compile. The final evidence archive did not
+retain that Linux log, and the final documentation-only cycle did not rerun the
+check.
+
 The initial feature-enabled Windows GNU all-target check failed with `E0463`
 because Cargo invoked `/opt/homebrew/bin/rustc` (Rust 1.99.1); this is
 historical evidence. The pinned Rust 1.98.1 Windows GNU all-target check
-exited 0 with this exact invocation:
+exited 0. The final run used a disposable temporary target directory; its
+ephemeral path is omitted from this semantic command:
 
 ```sh
-RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=/tmp/nscb-issue12-pinned-rustc-1793354028480-420330 rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
+RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=<temporary-validation-directory> rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
 ```
 
-This establishes cross-compilation only; native Windows execution and
-copy-publication remain unqualified. TAC-13 remains unverified.
+This establishes compile-only qualification for the feature-enabled
+`x86_64-pc-windows-gnu` all-target build. Native Windows execution, ACL and
+lease behavior, crash recovery, retry behavior, and copy publication remain
+unqualified. The prospective TAC-13 result is supported by the completed
+native macOS canonical gate and focused tests and by the Windows all-target
+compilation; native Windows execution and copy publication are not claimed.
 
 The history unit evidence covers fresh schema initialization, SQLite application
 identity and user version, corruption and future-schema rejection, migration
@@ -409,7 +480,14 @@ authorization, retry reporting failure with exit 7 and durable completion,
 failed-item rejection, JSONL completion failure with one terminal record, and
 configuration/key/cache/output/artifact-preserving clear.
 
-### Artifact cleanup limitation
+### Historical TAC-6 cleanup and NDR-1 boundary
+
+The automatic-cleanup requirement originally associated with TAC-6 is
+historical. Under the live amended Issue #12, NDR-1 prospectively supersedes
+that cleanup condition. NDR-1 passes by acquiring one exclusive per-Job OS
+lease, atomically recording a durable interruption, retaining evidence, and
+refusing to replay an interrupted request. It does not require or establish
+automatic artifact deletion.
 
 This candidate intentionally performs no automatic artifact deletion. ADR-0030
 rejects a pathname identity check followed by unlink, and `planned_artifacts`
@@ -427,9 +505,10 @@ database, SQLite sidecars, schema lock, and fixed lease-slot files. Its clear
 transaction removes selected terminal Job and cascading evidence rows,
 including their durable lease claims, without deleting or changing outputs,
 workspaces, configuration, caches, or artifact files.
-TAC-6 remains unverified until operation-owned creation evidence and an
-identity-bound deletion mechanism can be implemented and tested without
-widening this candidate's path authorization.
+ADR-0030's threat model and prohibition remain in force: a pathname check
+cannot establish operation-created identity, so check-then-unlink remains
+prohibited. Automatic artifact reclamation remains a separate follow-up and
+is not claimed by NDR-1.
 
 Native Linux and Windows history behavior remains unqualified. Portable tests
 cover path composition and schema rejection, but they do not establish native

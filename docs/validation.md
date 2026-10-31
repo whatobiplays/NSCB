@@ -316,9 +316,11 @@ and version separately from the Rust 1.98.1 results.
 
 Staging, recovery, displaced, and uncertain artifacts are retained and
 inventoried because path-only deletion cannot be conditioned on identity.
-Manual reconciliation must not mutate artifact contents and must prove
-ownership, parent identity, unchanged file identity, and content before any
-removal. Detailed inventory fields and platform limits are recorded in
+Manual reconciliation must not mutate artifact contents or infer deletion
+authority from a planned path. ADR-0030 prohibits a pathname check followed by
+unlink. Job recovery, pruning, and clearing perform no filesystem deletion;
+automatic artifact reclamation is a separate follow-up. Detailed inventory
+fields and platform limits are recorded in
 [publication qualification](testing/publication-qualification.md); publication
 guarantees and the ADR 0008 scope are recorded in
 [publication architecture](architecture/publication.md).
@@ -351,33 +353,88 @@ make embedded-boundary
 make all
 ```
 
-The pinned `make all` completed successfully. The no-default embedded library
-suite reported 323 passed and 4 ignored; the feature-enabled library suite
-reported the same counts, and the feature-enabled binary suite passed 125 tests.
-The history unit suite passed 47 tests, `config_cli` passed 49, and the smoke
-rerun passed 29 CLI subprocess tests and 22 real-binary Job history tests. The
-full and smoke Makefile profiles set `RUST_TEST_THREADS=1` so subprocess timing
-assertions are measured without contention from other Rust tests; the real
-five-second reporting budget and seven-second assertion remain unchanged.
+The final native macOS focused run reported no failures or ignored tests:
 
-The unit suite exercises schema creation, corruption and future-version
+| Focused suite | Passed |
+| --- | ---: |
+| History unit tests | 56 |
+| Real-binary Job history tests | 23 |
+| Configuration tests | 49 |
+| CLI subprocess tests | 29 |
+
+An earlier qualification run recorded 47 passing history unit tests and 22
+passing real-binary Job history tests. Those results remain historical evidence
+for that run and are not final counts.
+
+One intermediate rerun of the focused history suite observed 55 passed and 1
+failed. The failing
+`standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries`
+test read the marker as an empty list (`[]`) instead of `ddl-applied`. Five
+isolated retries passed. At that earlier point, a focused rerun then passed
+56/0, and an earlier historical stabilization sequence recorded three
+consecutive focused reruns at 56/0. Those results are historical and did not
+describe the final candidate's complete repeat-run sequence.
+
+Final-candidate validation repeated the focused history command with default
+parallel test execution. The initial run produced 55 passed and 1 failed with
+the same migration process-crash test reading `[]` instead of `ddl-applied`.
+Three subsequent identical parallel reruns produced 56/0, 56/0, then 55/1 with
+the same assertion. A serialized confirmation with `RUST_TEST_THREADS=1`
+produced 56/0. The canonical `make all` run also passed the same
+crash-injection test as part of its 135-test binary suite.
+
+This is a known `std::fs::write` synchronization race in the test harness: the
+parent waited for the marker path to exist while the child created or truncated
+the file before writing its bytes. The race is nonblocking under the amended
+Issue #12 contract, but it remains a test reliability follow-up.
+
+The final pinned `make all` gate passed. Its canonical Rust test run before
+smoke reported 1,051 passing executions with 8 ignored. The no-default and
+feature-enabled library suites each passed 323 tests with 4 ignored; the
+feature-enabled binary suite passed 135; integration test targets passed 268;
+and documentation tests passed 2. The final smoke rerun added 52 passing
+executions: 29 CLI subprocess tests and 23 real-binary Job history tests.
+Including smoke, the run comprised 1,103 passing executions and 8 ignored.
+These are execution counts across invocations, not distinct tests. Deduplication
+across unique targets yields 728 passed and 4 ignored because the 323-test
+library suite ran under both feature configurations and smoke reran existing
+targets. The focused counts above are separate from these totals and must not
+be added to them.
+
+The `make test` and `make smoke` profiles set `RUST_TEST_THREADS=1` so
+subprocess timing assertions are measured without contention from other Rust
+tests; the five-second reporting budget and seven-second assertion remain
+unchanged.
+
+The history unit suite exercises schema creation, corruption and future-version
 rejection, pending-schema restart after migration, legacy live-lock migration,
 recovery-backup equivalence across application tables and rows, rollback,
-admission rollback, durable completion, deterministic listing, reserved
-failed-item selection, retention protection, active-Job-preserving clear,
-fixed slot bounds and immutable identities, damaged-slot isolation, slot
-exhaustion, owner-token mismatch, final-component database checks, descriptor-
-relative no-follow lock opens, legacy V2 slot conversion without inode
-replacement, crash recovery from the new SQLite claim, live-peer preservation,
-and exclusive stale-claim recovery across processes. The
-real-binary `job_history_cli` suite
-exercises planning and worker failure before mutation, synchronous and JSONL
-admission ordering, completion persistence failure, restart recovery, a live
-peer that remains active, concurrent standalone processes, retry with changed
-configuration and conflict policy, retry from a different working directory,
-retry output transport failure, unsupported failed-item retry, and clear with
+admission rollback, durable completion, deterministic listing, retention
+protection, active-Job-preserving clear, fixed slot bounds and immutable
+identities, damaged-slot isolation, slot exhaustion, owner-token mismatch,
+final-component database checks, descriptor-relative no-follow lock opens,
+legacy V2 slot conversion without inode replacement, process-lifetime leases,
+live-peer preservation, and exclusive stale-claim recovery across processes.
+It also covers durable failed-item identity and provenance, eligibility
+validation, and selection of only durably recorded failed items. The real-binary
+`job_history_cli` suite exercises planning and worker failure before mutation,
+synchronous and JSONL admission ordering, completion persistence failure,
+restart reconciliation, a live peer that remains active, concurrent standalone
+processes, retry with changed configuration and conflict policy, retry from a
+different working directory, retry output transport failure, and clear with
 published-output, configuration, key, cache, workspace, and uncertain-artifact
 preservation.
+
+Under the amended Issue #12 acceptance contract,
+`jobs retry <id> --failed-items` returns a stable typed unsupported-execution
+error before Job admission. This candidate creates no Job for that request and
+does not fabricate a runnable batch or `CompletedWithIssues`. Executable
+failed-item retry belongs to Issue #13.
+
+ADR-0025’s retry-failed-items behavior remains a phased requirement. This Issue
+#12 candidate implements durable failed-item data, selection, eligibility
+validation, and the typed pre-admission unsupported-execution rejection;
+executable retry for `CompletedWithIssues` remains Issue #13.
 
 History integration evidence is currently limited to the native macOS
 qualification host. On Unix, directory creation, lock opens, and database or
@@ -385,29 +442,44 @@ backup preflight opens walk directory components with no-follow descriptor-
 relative opens. The rusqlite database and recovery-backup connections and
 `VACUUM INTO` still use pathname-based SQLite APIs, so this does not close the
 parent-directory substitution race for those operations. A descriptor-relative
-SQLite VFS is required to establish that guarantee. The portable tests cover path composition and schema
-behavior, but the candidate does not qualify native Linux or Windows SQLite
-locking, file permissions, process-lifetime locks, crash durability, or
-filesystem publication semantics. An all-target compile check for
-`x86_64-unknown-linux-gnu` passed with `RUSTC` bound to Rust 1.98.1. MinGW-w64
-14.0.0_3/GCC 16.2.0 is available. The initial feature-enabled Windows GNU
-all-target check failed with `E0463` because Cargo invoked
-`/opt/homebrew/bin/rustc` (Rust 1.99.1); that failure is historical. The exact
-feature-enabled Windows GNU all-target check exited 0 with the pinned Rust
-1.98.1 toolchain and this exact invocation:
+SQLite VFS is required to establish that guarantee. The portable tests cover
+path composition and schema behavior, but the candidate does not qualify
+native Linux or Windows SQLite locking, file permissions, process-lifetime
+locks, crash durability, or filesystem publication semantics.
+
+An earlier qualification run also passed a `cargo check --all-targets` for
+`x86_64-unknown-linux-gnu` with `RUSTC` bound to Rust 1.98.1. That Linux result
+is historical: the final evidence archive did not retain its log, and the final
+documentation-only cycle did not rerun the check. The initial feature-enabled
+Windows GNU all-target check failed with `E0463` because Cargo invoked
+`/opt/homebrew/bin/rustc` (Rust 1.99.1); that failure is also historical.
+
+The final feature-enabled Windows GNU all-target compile-only check succeeded
+with Rust 1.98.1 using this exact command form:
 
 ```sh
-RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=/tmp/nscb-issue12-pinned-rustc-1793354028480-420330 rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
+RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=<temporary-validation-directory> rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
 ```
 
-This is cross-compilation only; native Windows execution and copy-publication
-remain unqualified.
+This establishes feature-enabled all-target compile-only success for
+`x86_64-pc-windows-gnu`. Native Windows execution, ACL behavior, locking, lease
+behavior, crash recovery, retry, and copy-publication qualification remain
+excluded.
 
-Automatic artifact deletion is not implemented or qualified. ADR-0030 rejects
-pathname identity checks followed by unlink, and the allowed standalone layer
-does not own durable proof of actual artifact creation. Planned paths therefore
-remain intent rather than creation evidence. Retained, displaced, modified,
-symlinked, foreign, uncertain, and published artifacts stay untouched for
-manual reconciliation. A future cleanup implementation requires the
-operation-owned creation and identity evidence plus a race-safe identity-bound
-deletion mechanism.
+The live, owner-approved prospective Issue #12 amendment adopted by this
+Delegation prompt replaces historical TAC-6 with NDR-1. The amendment applies
+prospectively and does not retroactively validate earlier work. Recovery
+requires exclusive acquisition of the per-Job operating-system lease that
+proves no owner remains under the supported local-filesystem model, an atomic
+durable Job and item interruption transition, and retained admission and
+reconciliation evidence. It does not invent a publication outcome, replay
+persisted snapshots, or reuse replacement authorization. Recovery, pruning,
+and `jobs clear` perform no filesystem deletion. ADR-0030 continues to prohibit
+a pathname identity check followed by unlink. Automatic artifact reclamation
+is a separate follow-up and is not part of this qualification.
+
+The allowed standalone layer does not own durable proof that an operation
+created a particular artifact. Planned paths therefore remain intent rather
+than creation evidence. Retained, displaced, modified, symlinked, foreign,
+uncertain, and published artifacts stay in place for manual reconciliation,
+including when ownership evidence is incomplete.
