@@ -1,9 +1,10 @@
 mod support;
 
+#[cfg(target_os = "macos")]
+use nscb::CopyBatchRequest;
 use nscb::{
-    CopyBatchRequest, Engine, InputResolutionBatchRequest, InputResolutionCapabilities,
-    InputResolutionControl, InputResolutionErrorCode, InputResolutionRequest, InputSelectionSource,
-    LocalSplitTrustStore,
+    Engine, InputResolutionBatchRequest, InputResolutionCapabilities, InputResolutionControl,
+    InputResolutionErrorCode, InputResolutionRequest, InputSelectionSource, LocalSplitTrustStore,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -848,14 +849,6 @@ fn embedded_engine_anchors_input_list_split_identity_to_request_base() {
         "lists/selection.json",
         br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[{"path":"../splits/qualified.nsp"}]}"#,
     );
-    let ordinary = tree.write("ordinary.bin", b"ordinary");
-    let output = tree.path().join("output");
-    let workspace = tree.path().join("workspace");
-    fs::create_dir(&output).unwrap();
-    fs::create_dir(&workspace).unwrap();
-    let current_directory = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
-    assert_ne!(current_directory, fs::canonicalize(tree.path()).unwrap());
-
     let resolved = Engine::new()
         .resolve_inputs_batch_with(
             request(&tree).with_input_list("lists/selection.json"),
@@ -874,20 +867,31 @@ fn embedded_engine_anchors_input_list_split_identity_to_request_base() {
         fs::canonicalize(tree.path()).unwrap()
     );
 
-    let plan = Engine::new()
-        .plan_copy_batch(
-            CopyBatchRequest::new(&output, &workspace)
-                .with_source(ordinary)
-                .with_qualified_split_input_unsupported(
-                    split.clone(),
-                    output.join("qualified.nsp"),
-                ),
-        )
-        .unwrap();
-    assert_eq!(
-        plan.snapshot().items()[1].source(),
-        fs::canonicalize(directory).unwrap()
-    );
+    #[cfg(target_os = "macos")]
+    {
+        let ordinary = tree.write("ordinary.bin", b"ordinary");
+        let output = tree.path().join("output");
+        let workspace = tree.path().join("workspace");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let current_directory = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+        assert_ne!(current_directory, fs::canonicalize(tree.path()).unwrap());
+
+        let plan = Engine::new()
+            .plan_copy_batch(
+                CopyBatchRequest::new(&output, &workspace)
+                    .with_source(ordinary)
+                    .with_qualified_split_input_unsupported(
+                        split.clone(),
+                        output.join("qualified.nsp"),
+                    ),
+            )
+            .unwrap();
+        assert_eq!(
+            plan.snapshot().items()[1].source(),
+            fs::canonicalize(directory).unwrap()
+        );
+    }
 }
 
 #[test]
