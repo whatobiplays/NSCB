@@ -9,6 +9,7 @@ use fs2::FileExt;
 use nscb::JobState;
 use nscb::OperationArtifactRole;
 use rusqlite::{Connection, OpenFlags, params, types::Value};
+#[cfg(target_os = "macos")]
 use serde_json::Value as JsonValue;
 use std::fs;
 use std::path::{Path, PathBuf};

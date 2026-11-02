@@ -5,7 +5,7 @@
 //! state, writes to a private staging file, validates the staged bytes, and
 //! only then promotes the file into the destination.
 //!
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 use crate::file_identity::path_identity;
 use crate::file_identity::{FileIdentity, FileSnapshot};
 #[cfg(target_os = "macos")]
@@ -6550,6 +6550,7 @@ impl CopyBatchPlanSnapshot {
     }
 }
 
+#[cfg(target_os = "macos")]
 struct CopyBatchItemPlan {
     item_key: String,
     source: PathBuf,
@@ -6560,7 +6561,9 @@ struct CopyBatchItemPlan {
 /// An immutable, non-replayable capability for sequential independent copy.
 pub struct CopyBatchPlan {
     snapshot: CopyBatchPlanSnapshot,
+    #[cfg(target_os = "macos")]
     items: Vec<CopyBatchItemPlan>,
+    #[cfg(target_os = "macos")]
     destination_directory_identity: FileIdentity,
 }
 
@@ -6658,6 +6661,7 @@ impl CopyBatchItemResult {
         &self.artifacts
     }
 
+    #[cfg(target_os = "macos")]
     fn from_operation(
         item_key: String,
         source: PathBuf,
@@ -6690,6 +6694,7 @@ impl CopyBatchItemResult {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn preflight_failed(
         item_key: String,
         source: PathBuf,
@@ -6710,6 +6715,7 @@ impl CopyBatchItemResult {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn cancelled(item_key: String, source: PathBuf, destination: Option<PathBuf>) -> Self {
         Self {
             item_key,
@@ -6725,6 +6731,7 @@ impl CopyBatchItemResult {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn not_started(item_key: String, source: PathBuf, destination: Option<PathBuf>) -> Self {
         Self {
             item_key,
@@ -7056,6 +7063,7 @@ fn plan_copy_batch_unix(request: CopyBatchRequest) -> Result<CopyBatchPlan, Oper
     })
 }
 
+#[cfg(target_os = "macos")]
 fn is_item_local_preflight_failure(code: OperationFailureCode) -> bool {
     matches!(
         code,
@@ -7436,6 +7444,7 @@ struct CopyBatchSessionState {
     cancel_requested: bool,
     cancellation: Option<CancellationHandle>,
     progress: CopyBatchProgress,
+    #[cfg(target_os = "macos")]
     current_item_base_bytes: u64,
     event_queue: std::collections::VecDeque<CopyBatchEvent>,
     event_queue_initial_capacity: usize,
@@ -7459,6 +7468,7 @@ impl CopyBatchSessionState {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn cancellation_flag(&self) -> bool {
         self.cancel_requested
             || self
@@ -7520,6 +7530,7 @@ fn observe_batch_cancellation(
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CopyBatchCompletionDecision {
     Complete,
@@ -7624,6 +7635,7 @@ impl CopyBatchSession {
             .map_err(|_| OperationFailureCode::SessionUnavailable)
     }
 
+    #[cfg(target_os = "macos")]
     fn admit(
         &self,
         cancellation: &CancellationHandle,
@@ -7671,6 +7683,7 @@ impl CopyBatchSession {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn cancellation_requested(&self) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return true;
@@ -7685,6 +7698,7 @@ impl CopyBatchSession {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn begin_completing(&self) -> Result<CopyBatchCompletionDecision, OperationFailureCode> {
         let mut state = self
             .state
@@ -7704,6 +7718,7 @@ impl CopyBatchSession {
         Ok(decision)
     }
 
+    #[cfg(target_os = "macos")]
     fn start_item(&self, item_key: &str, total_bytes: u64) {
         if let Ok(mut state) = self.state.lock() {
             state.current_item_base_bytes = state.progress.completed_bytes;
@@ -7721,6 +7736,7 @@ impl CopyBatchSession {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn record_item_progress(&self, item_key: &str, completed_bytes: u64) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -7735,6 +7751,7 @@ impl CopyBatchSession {
             .saturating_add(completed_bytes);
     }
 
+    #[cfg(target_os = "macos")]
     fn complete_item(&self, item: &CopyBatchItemResult, completed_bytes: u64) -> Option<()> {
         let mut state = self.state.lock().ok()?;
         state.progress.completed_items = state.progress.completed_items.saturating_add(1);
@@ -7777,6 +7794,7 @@ impl CopyBatchSession {
         Some(())
     }
 
+    #[cfg(target_os = "macos")]
     fn checkpoint_failed(&self, item_key: Option<String>) {
         if let Ok(mut state) = self.state.lock() {
             emit_batch_event(
@@ -7787,6 +7805,7 @@ impl CopyBatchSession {
         }
     }
 
+    #[cfg(target_os = "macos")]
     fn finish(&self, result: CopyBatchResult) {
         let Ok(mut state) = self.state.lock() else {
             return;
@@ -7821,6 +7840,7 @@ impl CopyBatchSession {
 /// The bound covers one start transition, up to two item transitions per
 /// planned item, the accepted and refused cancellation transitions, one
 /// checkpoint-failure transition, and one aggregate completion transition.
+#[cfg(target_os = "macos")]
 fn max_copy_batch_event_count(total_items: u64) -> Option<usize> {
     usize::try_from(total_items)
         .ok()?
@@ -7828,6 +7848,7 @@ fn max_copy_batch_event_count(total_items: u64) -> Option<usize> {
         .checked_add(5)
 }
 
+#[cfg(target_os = "macos")]
 fn batch_session_status(state: JobState) -> CopyBatchSessionStatus {
     match state {
         JobState::Succeeded => CopyBatchSessionStatus::Succeeded,
@@ -7837,6 +7858,7 @@ fn batch_session_status(state: JobState) -> CopyBatchSessionStatus {
     }
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn batch_contains_publication_uncertainty(items: &[CopyBatchItemResult]) -> bool {
     items.iter().any(|item| {
         item.state == CopyBatchItemState::Uncertain
@@ -7847,6 +7869,7 @@ fn batch_contains_publication_uncertainty(items: &[CopyBatchItemResult]) -> bool
     })
 }
 
+#[cfg(any(test, target_os = "macos"))]
 fn aggregate_batch_result(items: Vec<CopyBatchItemResult>) -> CopyBatchResult {
     let successes = items
         .iter()
@@ -7911,6 +7934,7 @@ fn operation_session_for_batch_item(
 /// Durable checkpoint failure takes precedence because execution cannot continue
 /// safely without the host's acknowledgement. Otherwise, uncertain publication
 /// outranks an accepted cancellation so the aggregate never understates it.
+#[cfg(any(test, target_os = "macos"))]
 fn finalize_batch_result(
     mut result: CopyBatchResult,
     completion: Result<CopyBatchCompletionDecision, OperationFailureCode>,
@@ -8112,6 +8136,20 @@ pub(crate) fn execute_copy_batch_with_checkpoint_and_cancellation(
     }
 }
 
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn unsupported_copy_batch_plan_for_test() -> CopyBatchPlan {
+    CopyBatchPlan {
+        snapshot: CopyBatchPlanSnapshot {
+            kind: "copy_batch_plan",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            destination_directory: PathBuf::from("/missing-output"),
+            workspace: PathBuf::from("/missing-workspace"),
+            conflict_policy: ConflictPolicy::Fail,
+            items: Vec::new(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod copy_batch_aggregation_tests {
     use super::*;
@@ -8284,23 +8322,6 @@ mod copy_batch_aggregation_tests {
                 Some(OperationFailureCode::CheckpointFailed)
             );
         }
-    }
-}
-
-#[cfg(all(test, not(target_os = "macos")))]
-pub(crate) fn unsupported_copy_batch_plan_for_test() -> CopyBatchPlan {
-    CopyBatchPlan {
-        snapshot: CopyBatchPlanSnapshot {
-            kind: "copy_batch_plan",
-            nscb_version: env!("CARGO_PKG_VERSION"),
-            destination_directory: PathBuf::from("/missing-output"),
-            workspace: PathBuf::from("/missing-workspace"),
-            conflict_policy: ConflictPolicy::Fail,
-            items: Vec::new(),
-        },
-        items: Vec::new(),
-        destination_directory_identity: path_identity(Path::new("."))
-            .expect("test working directory has a filesystem identity"),
     }
 }
 
