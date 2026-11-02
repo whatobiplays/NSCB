@@ -177,13 +177,19 @@ nonpruneable. An explicit publication-uncertain failure is recorded as
 cleanup ownership.
 
 For a nontrivial history migration, NSCB writes and verifies a recovery copy
-before applying schema changes. The V2-to-V3 migration first opens an immediate
+before applying schema changes. The v2-to-v3 migration opens an immediate
 transaction to coordinate writers and check legacy owners, then creates or
-validates the backup before executing schema statements inside that transaction.
-Reuse of an existing recovery copy is allowed only when its application ID,
-schema, and every current Job column match the source. The comparison derives
-its projection from the actual `jobs` table columns so added history fields
-cannot silently escape backup verification.
+validates its backup before executing schema statements in that transaction.
+The v3-to-v4 migration opens an immediate transaction and creates or verifies
+`jobs.sqlite3.v3.bak` against the committed v3 database before running schema
+statements. Verification runs SQLite integrity checks, confirms the NSCB
+application ID and v3 schema version, and compares the schema definitions and
+every table's rows with the source. If NSCB cannot create or verify the backup,
+migration stops before changing the schema. If the schema transaction fails,
+SQLite rolls it back and leaves the v3 database readable; the verified backup
+remains a recovery snapshot. An older binary that supports only schema v3
+rejects a v4 database. Running that binary requires an operator to restore the
+v3 snapshot, returning history to the point it captured.
 
 On Unix, directory creation, lock-file opens, and database or backup preflight
 opens use directory descriptors and no-follow opens for path components. The
@@ -394,14 +400,17 @@ Exit class 0 means success. Exit class 2 covers invalid command usage and
 configuration failures. Exit class 3 covers key validation, input or
 prerequisite failures, and paths that cannot be represented. Exit class 4 is a
 destination conflict or change, 6 is cancellation, and 7 is an internal,
-session, publication, persistence, or reporting failure. Exit class 8 applies
-when a batch has at least one `Copied` or `AlreadyUpToDate` item and at least
-one failed item. Skipped items do not count as actual successes. A batch with
-failures and no actual success returns `Failed` using the most severe item exit
-class. Human success goes to stdout and
-human failure to stderr. Machine stdout contains exactly one document and no
-human diagnostics. Existing Probe records and base Copy event semantics remain
-compatible.
+session, publication, persistence, or reporting failure. Exit class 8 is used
+for `CompletedWithIssues` when a batch has at least one actual copy success
+(`Copied` or `AlreadyUpToDate`) and a failed item, unless an item has an
+internal failure, which exits 7. Skipped items do not count as actual
+successes. A cancelled batch exits 6 unless an item has an internal failure,
+which exits 7. A failed batch selects the highest-ranked aggregate or item
+exit: internal 7 > cancellation 6 > conflict 4 > input 3 > other mapped exits
+(rank 0). If no mapped failure exit exists, it exits 7. A succeeded batch exits
+0. Human success goes to stdout and human failure to stderr. Machine stdout
+contains exactly one document and no human diagnostics. Existing Probe records
+and base Copy event semantics remain compatible.
 
 ## Qualification limits
 
@@ -415,7 +424,8 @@ qualification requires running the real binary and relevant failure cases on
 each platform.
 
 Job-history integration evidence currently comes from the macOS qualification
-host. Separate history, retry, recovery, concurrency, migration, retention,
-clear, and output tests exercise the standalone CLI there. Portable schema and
+host. Standalone CLI tests there cover history, retry, recovery, concurrency,
+migration, retention, clear, and output. They also verify that an unsupported
+failed-item retry is rejected before admission. Portable schema and
 path-composition tests keep other targets compiling but do not qualify their
 native SQLite locking, permissions, crash durability, or filesystem behavior.

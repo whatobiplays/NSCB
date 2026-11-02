@@ -338,10 +338,14 @@ Executable job-reporting tests use prefilled macOS pipes whose readers stay
 open and unread. They check human, JSON, and JSONL output with stdout blocked,
 both streams blocked, stderr blocked during a human failure, broken pipes,
 cancellation, and unchanged filesystem outcomes. This subprocess evidence is
-separate from the in-process stalled-writer unit test. A read-only history
-observer sends `Terminalized` over a separate control pipe after it sees the
-copy outcome committed in SQLite. The test leaves stdout and stderr unread,
-waits for that signal, then calls `child.wait()` and checks the exit status.
+separate from the in-process stalled-writer unit test. For the both-stream
+case, a read-only SQLite history poll waits for a committed terminal outcome.
+The test then calls `ChildGuard::wait_until` with a 30-second deadline while
+stdout and stderr remain unread, and checks the exit status, inherited
+descriptor flags, source bytes, and destination state. The deadline fails the
+test and terminates a hung process; it is a hang guard, not a reporting-latency
+target. The five-second reporting budget and exit-7 precedence are covered by
+the separate reporter unit tests in `src/cli_reporting.rs`.
 These subprocess tests run on macOS; they do not qualify other operating
 systems or sink drivers.
 
@@ -363,7 +367,8 @@ make embedded-boundary
 make all
 ```
 
-The final native macOS focused run reported no failures or ignored tests:
+The historical Issue #12 final native macOS focused run reported no failures
+or ignored tests:
 
 | Focused suite | Passed |
 | --- | ---: |
@@ -372,11 +377,16 @@ The final native macOS focused run reported no failures or ignored tests:
 | Configuration tests | 49 |
 | CLI subprocess tests | 29 |
 
-Current final-source evidence independently confirms 56 history tests and 23
-Job-history CLI tests on `src/standalone/history/tests.rs` SHA-256
+Historical Issue #12 final-source evidence independently confirms 56 history
+tests and 23 Job-history CLI tests on `src/standalone/history/tests.rs` SHA-256
 `b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`;
 the embedded boundary found no SQLite in the no-default graph, and formatter,
 content-policy, documentation-test, and diff checks also passed.
+These counts and source hash describe Issue #12. They do not describe the
+Issue #13 candidate.
+
+The current Issue #13 source hash and final focused counts remain to be
+recorded after final validation.
 
 An earlier qualification run recorded 47 passing history unit tests and 22
 passing real-binary Job history tests. Those results remain historical evidence
@@ -477,9 +487,11 @@ targets. The focused counts above are separate from these totals and must not
 be added to them.
 
 The `make test` and `make smoke` profiles set `RUST_TEST_THREADS=1` so
-subprocess timing assertions are measured without contention from other Rust
-tests. The reporting budget remains independent of the eventual-exit guard used
-by the blocked-pipe process test.
+subprocess time bounds run without contention from other Rust tests. The
+blocked-pipe subprocess tests use bounded watchdog deadlines to fail hung
+processes, then check exit and filesystem state. Those deadlines are hang
+guards, not reporting-latency targets. The separate reporter unit tests in
+`src/cli_reporting.rs` verify the five-second shared reporting budget.
 
 The history unit suite exercises schema creation, corruption and future-version
 rejection, pending-schema restart after migration, legacy live-lock migration,
@@ -506,7 +518,10 @@ contradictory options, single-Copy retry with `skip`, destination name and
 identity collisions, shared resolver budgets, item-local preflight failures,
 ordered bounded events, cancellation, checkpoint failure, execution-time
 destination revalidation, v3-to-v4 migration, rollback, recovery, and malformed
-history intent. The failed-item path retries only persisted rows whose state is
+history intent. The failed-item retry tests also reject unsafe publication
+states, unresolved claims, malformed or future record shapes, ineligible prior
+states, changed Split membership, and shared Split identities before admission.
+The failed-item path retries only persisted rows whose state is
 `failed`; it creates a fresh linked batch and leaves prior successful and
 skipped outputs untouched.
 
@@ -530,8 +545,9 @@ Windows GNU all-target check failed with `E0463` because Cargo invoked
 
 An earlier feature-enabled Windows GNU all-target compile-only check succeeded
 with Rust 1.98.1 before the corrected `src/standalone/history/tests.rs`; it
-remains historical pre-correction evidence. A fresh final-source validation
-used Rust 1.98.1 with feature-enabled `x86_64-pc-windows-gnu` `cargo check
+remains historical pre-correction evidence. A historical Issue #12 final-source
+validation used Rust 1.98.1 with feature-enabled
+`x86_64-pc-windows-gnu` `cargo check
 --all-targets`, exited 0 in 42.09 seconds, and is bound to
 `src/standalone/history/tests.rs` SHA-256
 `b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`.
@@ -545,10 +561,11 @@ run's disposable target directory:
 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=<temporary-validation-directory> rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
 ```
 
-The fresh run establishes feature-enabled all-target compile-only success for
-the corrected current source targeted at `x86_64-pc-windows-gnu`. Native
-Windows execution, ACL behavior, locking, lease behavior, crash recovery,
-retry, and copy-publication qualification remain excluded.
+This historical run establishes feature-enabled all-target compile-only success
+for the corrected Issue #12 source targeted at `x86_64-pc-windows-gnu`. It does
+not establish current Issue #13 compile-only success. Native Windows execution,
+ACL behavior, locking, lease behavior, crash recovery, retry, and
+copy-publication qualification remain excluded.
 
 The live, owner-approved prospective Issue #12 amendment adopted by this
 Delegation prompt replaces historical TAC-6 with NDR-1. The amendment applies

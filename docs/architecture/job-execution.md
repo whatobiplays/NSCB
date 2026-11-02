@@ -120,10 +120,13 @@ Exit classes are stable:
 `PublicationUncertain` is reported as a failed job with exit 7. The destination
 may exist; the result and artifact inventory carry the evidence and the
 operation does not roll back over uncertain data.
-Exit class 8 requires an actual copy success (`Copied` or `AlreadyUpToDate`) and
-a failed item. A batch with failures and no actual copy success returns
-`Failed` with the most severe item exit class. Skipped items do not count as
-successes.
+Exit class 8 is used when a batch has at least one actual copy success (`Copied`
+or `AlreadyUpToDate`) and a failed item. Skipped items do not count as successes.
+A `CompletedWithIssues` batch exits 8 unless an item has an internal failure,
+which exits 7. A cancelled batch exits 6 unless an item has an internal failure,
+which exits 7. A failed batch selects the highest-ranked aggregate or item exit:
+internal 7, cancellation 6, conflict 4, input 3; all other mapped exits rank 0.
+If no mapped failure exit exists, a failed batch exits 7. A succeeded batch exits 0.
 
 ## Planning, admission, and host-owned execution
 
@@ -176,9 +179,10 @@ result.
 ## Independent copy batches
 
 `CopyBatchRequest` accepts an existing output directory, a workspace, a
-conflict policy, and ordered items. `CopyBatchRequest::with_item` derives a
-stable item key and destination basename. `with_keyed_item` preserves a retry's
-recorded identity and destination. `with_preflight_failure` represents a
+conflict policy, and ordered items. `with_source` adds a source and derives its
+destination from the source basename in the output directory. `with_item` adds
+a source with an exact destination path. `with_keyed_item` preserves a retry's
+item key and destination. `with_preflight_failure` represents a
 general item-local failure that the resolver has already established.
 `SplitInputUnsupported` is different: it is item-local only after Split
 qualification succeeds. Callers pass the resolved qualification evidence to
@@ -230,9 +234,10 @@ only to a differing existing destination. That item has item state and outcome
 copied or already-up-to-date success for aggregate classification. `Fail` and
 `Replace` keep their existing conflict behavior.
 The CLI exits 0 for an all-skipped batch. Mixed success and failure exits 8
-unless a failure maps to a higher internal exit class. A failed batch uses the
-most severe item exit class, so a publication or session failure cannot be
-hidden by an earlier conflict or input failure.
+unless an item has an internal failure, which exits 7. For a failed batch, the
+CLI selects the highest-ranked aggregate or item exit: internal 7, cancellation
+6, conflict 4, input 3, then other mapped exits at rank 0. If no mapped failure
+exit exists, the CLI exits 7.
 
 ## Standalone Job lifecycle
 
@@ -343,7 +348,9 @@ exact plan-item order. It reconstructs the saved source, destination, item key,
 and path bases without expanding a directory or input list again. Prior
 successes and skipped items are excluded and remain unchanged. Unknown kinds,
 malformed intent, invalid successor states, an empty failed set, or missing
-absolute context is rejected before planning.
+absolute context is rejected before planning. A failed `empty_selection` item
+without a destination is also rejected before admission because reconstructing
+its selection would require expanding a directory or input list again.
 
 Before planning the retry, each saved Split failure is resolved at its exact
 logical path under the stored base and current local trust store. The source
@@ -353,6 +360,24 @@ rejects the whole retry before admission. Resolver-wide state or configuration
 failures retain their stable input-resolution code and exit class, including
 `split_state_unavailable` and `split_trust_store_configuration_invalid`. The
 input list is never read again.
+
+Version 4 stores each batch source item with a versioned provenance object:
+`schema_version: 1` and `kind: nscb.copy_batch_item_provenance`. The object
+records the top-level selection, request base, optional input-list entry, and
+optional directory discovery. A failure discovered while scanning or appending
+a directory stores the canonical directory in `discovered_directory` and the
+exact child path in `discovered_relative_path`. Failed-item retry joins those
+two saved values and reconstructs the item without scanning the selected
+directory again. The item keeps its original key, source, destination, order,
+and path bases while the new Job records the retry invocation directory
+separately. Successful and skipped siblings remain outside the retry selection,
+and children added after the parent batch receive no retry work.
+
+History written by the earlier v4 implementation can contain the same batch
+record with untagged item provenance. NSCB keeps those records available for
+inspection and preserves their stored evidence unchanged. It does not normalize
+the records or infer qualification from them. `jobs retry --failed-items`
+rejects them with `job_failed_items_unsupported`.
 
 Retention keeps the newest 1,000 ordinary pruneable terminal records.
 Nonterminal and `Interrupted` records, plus terminal records carrying unresolved
@@ -462,7 +487,9 @@ requests are idempotent and the journal remains within its fixed bound. A
 cancellation handle already set before batch admission
 causes every item to be attempted as cancelled without publishing it. Each
 later admission binds the handle supplied to that execution, and a caller-owned
-cancelled handle remains cancelled if the host deliberately reuses it.
+cancelled handle remains cancelled if the host deliberately reuses it. A later
+batch that needs independent cancellation must receive a fresh
+`CancellationHandle`; admission does not reset an existing handle.
 
 The CLI creates a fresh invocation-local cancellation handle and installs
 SIGINT/SIGTERM actions before planning or batch input resolution. `copy-batch`
@@ -593,10 +620,10 @@ not start another wait.
 SIGINT and SIGTERM do not unblock a synchronous OS pipe write. A cancellation
 request can affect filesystem execution only before its publication cutoff;
 reporting then has its own deadline. Subprocess qualification keeps both pipe
-readers open and unread, observes process exit within five seconds plus the
-documented scheduling allowance, and checks the resulting filesystem state.
-This is a macOS pipe qualification, not a hard real-time OS guarantee or a
-claim for other sink drivers.
+readers open and unread, waits for durable terminalization, then uses a bounded
+deadline to detect a process hang and checks the resulting filesystem state.
+The deadline is a hang guard, not a process-latency target. This is a macOS pipe
+qualification, not a claim for other sink drivers.
 
 ## Platform and qualification limits
 

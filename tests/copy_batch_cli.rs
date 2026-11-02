@@ -4,7 +4,7 @@
 #[path = "support/mod.rs"]
 mod support;
 
-use nscb::{LocalSplitTrustStore, SplitTrustStore};
+use nscb::{LocalSplitTrustStore, Sha256Digest, SplitTrustStore};
 use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
@@ -181,7 +181,7 @@ fn empty_input_list_does_not_hide_a_viable_batch_item() {
 }
 
 #[test]
-fn empty_parent_directory_selection_does_not_block_valid_sibling() {
+fn destinationless_empty_selection_failed_item_blocks_all_failed_items_retry() {
     let root = tempfile::tempdir().unwrap();
     let output = root.path().join("output");
     let workspace = root.path().join("workspace");
@@ -191,10 +191,18 @@ fn empty_parent_directory_selection_does_not_block_valid_sibling() {
     fs::create_dir(&workspace).unwrap();
     fs::create_dir_all(&child).unwrap();
     fs::write(child.join("good.nsp"), b"valid sibling").unwrap();
+    fs::write(child.join("retryable.nsp"), b"actionable failure").unwrap();
+    fs::write(output.join("retryable.nsp"), b"occupied").unwrap();
 
     let completed = command(&root)
         .current_dir(&child)
-        .args(["copy-batch", "good.nsp", "..", "--output-dir"])
+        .args([
+            "copy-batch",
+            "good.nsp",
+            "..",
+            "retryable.nsp",
+            "--output-dir",
+        ])
         .arg(&output)
         .args(["--workspace"])
         .arg(&workspace)
@@ -207,14 +215,49 @@ fn empty_parent_directory_selection_does_not_block_valid_sibling() {
     assert_eq!(document["kind"], "job.result");
     assert_eq!(document["result"]["state"], "completed_with_issues");
     let items = document["result"]["items"].as_array().unwrap();
-    assert_eq!(items.len(), 2);
+    assert_eq!(items.len(), 3);
     assert_eq!(items[0]["item_key"], "batch-item-0001");
     assert_eq!(items[0]["state"], "succeeded");
     assert_eq!(items[1]["item_key"], "batch-item-0002");
     assert_eq!(items[1]["state"], "preflight_failed");
     assert_eq!(items[1]["failure"]["code"], "empty_selection");
     assert!(items[1]["destination"].is_null());
+    assert_eq!(items[2]["item_key"], "batch-item-0003");
+    assert_eq!(items[2]["state"], "failed");
+    assert_eq!(items[2]["failure"]["code"], "destination_conflict");
     assert_eq!(fs::read(output.join("good.nsp")).unwrap(), b"valid sibling");
+    assert!(!output.join("empty-parent").exists());
+
+    let parent_id = document["job_id"].as_str().unwrap();
+    let persisted = command(&root)
+        .args(["jobs", "show", parent_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(persisted.status.code(), Some(0), "{persisted:?}");
+    let persisted: Value = serde_json::from_slice(&persisted.stdout).unwrap();
+    let persisted_items = persisted["result"]["job"]["items"].as_array().unwrap();
+    assert_eq!(persisted_items[1]["state"], "failed");
+    assert_eq!(persisted_items[1]["failure_code"], "empty_selection");
+    assert!(persisted_items[1]["destination"].is_null());
+    assert_eq!(persisted_items[2]["state"], "failed");
+    assert_eq!(persisted_items[2]["failure_code"], "destination_conflict");
+    let jobs_before = command(&root)
+        .args(["jobs", "list", "--json"])
+        .output()
+        .unwrap();
+    let retried = command(&root)
+        .args(["jobs", "retry", parent_id, "--failed-items", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(retried.status.code(), Some(3), "{retried:?}");
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    assert_eq!(retried["kind"], "error");
+    assert_eq!(retried["error"]["code"], "job_failed_items_unsupported");
+    let jobs_after = command(&root)
+        .args(["jobs", "list", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(jobs_before.stdout, jobs_after.stdout);
     assert!(!output.join("empty-parent").exists());
 }
 
@@ -323,9 +366,10 @@ fn empty_input_list_retry_is_ineligible_and_missing_input_list_fails_before_admi
         .args(["jobs", "retry", parent_id, "--failed-items", "--json"])
         .output()
         .unwrap();
-    assert_ne!(retry.status.code(), Some(0), "{retry:?}");
+    assert_eq!(retry.status.code(), Some(3), "{retry:?}");
     let retry: Value = serde_json::from_slice(&retry.stdout).unwrap();
     assert_eq!(retry["kind"], "error");
+    assert_eq!(retry["error"]["code"], "job_failed_items_unsupported");
     let after_retry = command(&root)
         .args(["jobs", "list", "--json"])
         .output()
@@ -473,6 +517,174 @@ fn failed_item_retry_skip_selects_only_the_exact_failure_and_preserves_success()
 }
 
 #[test]
+fn failed_item_retry_reconstructs_a_directory_child_without_reexpanding_it() {
+    let root = tempfile::tempdir().unwrap();
+    let initial_cwd = root.path().join("initial-cwd");
+    let retry_cwd = root.path().join("retry-cwd");
+    let inputs = initial_cwd.join("inputs");
+    let output = root.path().join("output");
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&inputs).unwrap();
+    fs::create_dir(&retry_cwd).unwrap();
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(inputs.join("good.nsp"), b"good initial").unwrap();
+    fs::write(inputs.join("failed.nsp"), b"failed initial").unwrap();
+    fs::write(output.join("failed.nsp"), b"occupied").unwrap();
+
+    let original = command(&root)
+        .current_dir(&initial_cwd)
+        .args(["copy-batch", "inputs", "--output-dir"])
+        .arg(&output)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(original.status.code(), Some(8), "{original:?}");
+    let original: Value = serde_json::from_slice(&original.stdout).unwrap();
+    let parent_id = original["job_id"].as_str().unwrap();
+    let original_items = original["result"]["items"].as_array().unwrap();
+    assert_eq!(original_items.len(), 2);
+    let failed_item = original_items
+        .iter()
+        .find(|item| item["failure"]["code"] == "destination_conflict")
+        .unwrap();
+    assert_eq!(failed_item["state"], "failed");
+    assert_eq!(
+        original_items
+            .iter()
+            .filter(|item| item["state"] == "succeeded")
+            .count(),
+        1
+    );
+    let failed_key = failed_item["item_key"].as_str().unwrap();
+
+    let parent_shown = command(&root)
+        .args(["jobs", "show", parent_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(parent_shown.status.code(), Some(0), "{parent_shown:?}");
+    let parent_shown: Value = serde_json::from_slice(&parent_shown.stdout).unwrap();
+    let parent_job = &parent_shown["result"]["job"];
+    assert_eq!(
+        parent_job["invocation_cwd"],
+        fs::canonicalize(&initial_cwd).unwrap().to_str().unwrap()
+    );
+    let failed_source_intent = parent_job["batch_source_intent"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["item_key"].as_str() == Some(failed_key))
+        .unwrap()
+        .clone();
+    let failed_job_item = parent_job["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["item_key"].as_str() == Some(failed_key))
+        .unwrap();
+    let good_output_hash = Sha256Digest::digest(&fs::read(output.join("good.nsp")).unwrap());
+
+    fs::write(inputs.join("good.nsp"), b"good changed").unwrap();
+    fs::write(inputs.join("failed.nsp"), b"failed retry").unwrap();
+    fs::write(inputs.join("added.nsp"), b"must stay out").unwrap();
+
+    let retried = command(&root)
+        .current_dir(&retry_cwd)
+        .args([
+            "jobs",
+            "retry",
+            parent_id,
+            "--failed-items",
+            "--replace",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(retried.status.code(), Some(0), "{retried:?}");
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    let retry_id = retried["job_id"].as_str().unwrap();
+    let retried_items = retried["result"]["items"].as_array().unwrap();
+    assert_eq!(retried_items.len(), 1);
+    assert_eq!(retried_items[0]["item_key"], failed_key);
+    assert_eq!(retried_items[0]["state"], "succeeded", "{retried}");
+    assert_eq!(
+        Path::new(retried_items[0]["source"].as_str().unwrap()),
+        fs::canonicalize(inputs.join("failed.nsp")).unwrap()
+    );
+    assert_eq!(
+        Path::new(retried_items[0]["destination"].as_str().unwrap()),
+        fs::canonicalize(&output).unwrap().join("failed.nsp")
+    );
+    assert_eq!(fs::read(output.join("good.nsp")).unwrap(), b"good initial");
+    assert_eq!(
+        Sha256Digest::digest(&fs::read(output.join("good.nsp")).unwrap()),
+        good_output_hash
+    );
+    assert_eq!(
+        fs::read(output.join("failed.nsp")).unwrap(),
+        b"failed retry"
+    );
+    assert!(!output.join("added.nsp").exists());
+
+    let shown = command(&root)
+        .args(["jobs", "show", retry_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(shown.status.code(), Some(0), "{shown:?}");
+    let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
+    let job = &shown["result"]["job"];
+    assert_eq!(
+        job["invocation_cwd"],
+        fs::canonicalize(&retry_cwd).unwrap().to_str().unwrap()
+    );
+    assert_eq!(job["parent_job_id"], parent_id);
+    assert_ne!(job["invocation_cwd"], parent_job["invocation_cwd"]);
+    assert_eq!(job["destination"], parent_job["destination"]);
+    assert_eq!(
+        job["destination_selection"],
+        parent_job["destination_selection"]
+    );
+    assert_eq!(job["workspace"], parent_job["workspace"]);
+    assert_eq!(job["conflict_policy"], "replace");
+    assert_eq!(job["conflict_policy_provenance"], "retry_explicit_replace");
+    assert_eq!(job["items"].as_array().unwrap().len(), 1);
+    assert_eq!(job["items"][0]["item_key"], failed_key);
+    assert_eq!(job["items"][0]["source"], failed_job_item["source"]);
+    assert_eq!(
+        job["items"][0]["destination"],
+        failed_job_item["destination"]
+    );
+    assert_eq!(
+        job["batch_source_intent"]["items"].as_array().unwrap(),
+        std::slice::from_ref(&failed_source_intent)
+    );
+    let provenance = &job["batch_source_intent"]["items"][0]["provenance"];
+    assert_eq!(provenance, &failed_source_intent["provenance"]);
+    assert_eq!(provenance["schema_version"], 1);
+    assert_eq!(provenance["kind"], "nscb.copy_batch_item_provenance");
+    assert_eq!(provenance["selection_path"], "inputs");
+    assert_eq!(
+        Path::new(provenance["base_directory"].as_str().unwrap()),
+        fs::canonicalize(&initial_cwd).unwrap()
+    );
+    assert_eq!(
+        Path::new(provenance["discovered_directory"].as_str().unwrap()),
+        fs::canonicalize(&inputs).unwrap()
+    );
+    assert_eq!(provenance["discovered_relative_path"], "failed.nsp");
+
+    let listed = command(&root)
+        .args(["jobs", "list", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(listed.status.code(), Some(0), "{listed:?}");
+    let listed: Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listed["result"]["jobs"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn failed_item_retry_defaults_to_fail_and_requires_unambiguous_fresh_authority() {
     let (root, output, workspace, first, second) = fixtures();
     fs::write(&first, b"first").unwrap();
@@ -595,6 +807,100 @@ fn failed_item_retry_uses_the_absolute_workspace_anchored_at_original_cwd() {
         fs::read(output.join("first.bin")).unwrap(),
         b"retry from another cwd"
     );
+}
+
+#[test]
+fn failed_item_retry_records_current_cwd_and_preserves_parent_batch_intent() {
+    let (root, output, workspace, _, _) = fixtures();
+    let initial_cwd = root.path().join("initial-cwd");
+    let retry_cwd = root.path().join("retry-cwd");
+    fs::create_dir(&initial_cwd).unwrap();
+    fs::create_dir(&retry_cwd).unwrap();
+    fs::write(initial_cwd.join("source.nsp"), b"retry payload").unwrap();
+    fs::write(output.join("source.nsp"), b"occupied").unwrap();
+
+    let original = command(&root)
+        .current_dir(&initial_cwd)
+        .args(["copy-batch", "source.nsp", "--output-dir"])
+        .arg(&output)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(original.status.code(), Some(4), "{original:?}");
+    let original: Value = serde_json::from_slice(&original.stdout).unwrap();
+    let parent_id = original["job_id"].as_str().unwrap();
+
+    let parent_before = command(&root)
+        .args(["jobs", "show", parent_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(parent_before.status.code(), Some(0), "{parent_before:?}");
+    let parent_before_bytes = parent_before.stdout.clone();
+    let parent_before: Value = serde_json::from_slice(&parent_before.stdout).unwrap();
+    let parent_job = &parent_before["result"]["job"];
+
+    let retried = command(&root)
+        .current_dir(&retry_cwd)
+        .args([
+            "jobs",
+            "retry",
+            parent_id,
+            "--failed-items",
+            "--replace",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(retried.status.code(), Some(0), "{retried:?}");
+    let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
+    let retry_id = retried["job_id"].as_str().unwrap();
+
+    let retry_shown = command(&root)
+        .args(["jobs", "show", retry_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(retry_shown.status.code(), Some(0), "{retry_shown:?}");
+    let retry_shown: Value = serde_json::from_slice(&retry_shown.stdout).unwrap();
+    let retry_job = &retry_shown["result"]["job"];
+    assert_eq!(
+        retry_job["invocation_cwd"],
+        retry_cwd.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert_eq!(retry_job["parent_job_id"], parent_id);
+    assert_eq!(
+        retry_job["batch_source_intent"],
+        parent_job["batch_source_intent"]
+    );
+    assert_eq!(retry_job["destination"], parent_job["destination"]);
+    assert_eq!(
+        retry_job["destination_selection"],
+        parent_job["destination_selection"]
+    );
+    assert_eq!(
+        retry_job["items"][0]["item_key"],
+        parent_job["items"][0]["item_key"]
+    );
+    assert_eq!(
+        retry_job["items"][0]["source"],
+        parent_job["items"][0]["source"]
+    );
+    assert_eq!(
+        retry_job["items"][0]["destination"],
+        parent_job["items"][0]["destination"]
+    );
+    assert_eq!(
+        fs::read(output.join("source.nsp")).unwrap(),
+        b"retry payload"
+    );
+
+    let parent_after = command(&root)
+        .args(["jobs", "show", parent_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(parent_after.status.code(), Some(0), "{parent_after:?}");
+    assert_eq!(parent_after.stdout, parent_before_bytes);
 }
 
 #[test]
@@ -721,6 +1027,7 @@ fn failed_item_retry_can_execute_a_previously_missing_exact_selection() {
         .args(["jobs", "retry", parent_id, "--failed-items", "--json"])
         .output()
         .unwrap();
+    assert_eq!(still_missing.status.code(), Some(3), "{still_missing:?}");
     let still_missing: Value = serde_json::from_slice(&still_missing.stdout).unwrap();
     assert_eq!(still_missing["kind"], "error", "{still_missing:#}");
     assert_eq!(still_missing["error"]["code"], "source_unavailable");
@@ -815,9 +1122,10 @@ fn failed_item_retry_rejects_a_missing_durable_batch_claim_before_admission() {
         .args(["jobs", "retry", parent_id, "--failed-items", "--json"])
         .output()
         .unwrap();
-    assert_ne!(retry.status.code(), Some(0), "{retry:?}");
+    assert_eq!(retry.status.code(), Some(3), "{retry:?}");
     let retry: Value = serde_json::from_slice(&retry.stdout).unwrap();
     assert_eq!(retry["kind"], "error");
+    assert_eq!(retry["error"]["code"], "job_failed_items_unsupported");
     let after = command(&root)
         .args(["jobs", "list", "--json"])
         .output()
@@ -1318,7 +1626,7 @@ fn failed_item_retry_rejects_changed_trusted_split_membership_before_admission()
         .output()
         .unwrap();
 
-    assert_ne!(retried.status.code(), Some(0), "{retried:?}");
+    assert_eq!(retried.status.code(), Some(3), "{retried:?}");
     let retried: Value = serde_json::from_slice(&retried.stdout).unwrap();
     assert_eq!(retried["kind"], "error", "{retried:#}");
     assert_eq!(retried["error"]["code"], "job_failed_items_unsupported");

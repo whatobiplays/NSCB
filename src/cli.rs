@@ -2,6 +2,7 @@
 use crate::cli_reporting::{ReportingControl, ReportingSession};
 use crate::standalone::history::{
     AdmissionInput, AdmissionItem, AdmissionSource, BatchFailedItemsRetryIntent,
+    COPY_BATCH_ITEM_PROVENANCE_KIND, COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
     ConflictPolicyProvenance, ConflictPolicyRecord, DestinationSelection, HistoryError,
     HistoryStore, JobDetail, JobKind, JobLease, JobSummary, PendingAdmission, RetryScope,
     SubmissionKind, WorkspaceSelection,
@@ -2231,6 +2232,30 @@ fn execute_copy_batch_failed_items_retry(
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
 ) -> i32 {
     let machine_requested = options.json || options.jsonl;
+    let retry_invocation_cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_jobs_error(
+                HistoryError::DirectoryUnavailable,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    if let Err(exit) =
+        validate_invocation_cwd(&retry_invocation_cwd, machine_requested, stdout, stderr)
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        return exit;
+    }
     let cancellation = match scoped_cancellation() {
         Ok(cancellation) => cancellation,
         Err(_) => {
@@ -2382,7 +2407,7 @@ fn execute_copy_batch_failed_items_retry(
     let history_input = AdmissionInput {
         kind: JobKind::CopyThrough,
         submission_kind: SubmissionKind::IndependentBatch,
-        invocation_cwd: intent.invocation_cwd,
+        invocation_cwd: retry_invocation_cwd,
         source: AdmissionSource::IndependentBatch,
         destination: intent.destination,
         destination_selection: intent.destination_selection,
@@ -3368,6 +3393,8 @@ fn run_copy_batch_impl(
 
 fn copy_batch_provenance(provenance: &nscb::InputProvenance) -> serde_json::Value {
     serde_json::json!({
+        "schema_version": COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
+        "kind": COPY_BATCH_ITEM_PROVENANCE_KIND,
         "selection_index": provenance.selection_index,
         "source": provenance.source,
         "selection_path": provenance.selection_path,
@@ -3398,12 +3425,16 @@ fn copy_batch_selection_provenance(selection: &ResolvedCopyBatchItem) -> serde_j
 
 fn copy_batch_failure_provenance(failure: &nscb::InputResolutionFailure) -> serde_json::Value {
     serde_json::json!({
+        "schema_version": COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
+        "kind": COPY_BATCH_ITEM_PROVENANCE_KIND,
         "selection_index": failure.selection_index(),
         "source": failure.source(),
         "selection_path": failure.selection_path(),
         "base_directory": failure.base_directory(),
         "input_list_entry_index": failure.input_list_entry_index(),
         "input_list_entry_path": failure.input_list_entry_path(),
+        "discovered_directory": failure.discovered_directory(),
+        "discovered_relative_path": failure.discovered_relative_path(),
         "requested_path": failure.requested_path(),
         "failure_code": failure.code(),
         "phase": "resolution",
@@ -3577,6 +3608,12 @@ fn copy_batch_resolution_paths_are_json_representable(
             nscb::InputResolutionBatchEntry::Failed(failure) => {
                 paths.push(failure.selection_path());
                 if let Some(path) = failure.input_list_entry_path() {
+                    paths.push(path);
+                }
+                if let Some(path) = failure.discovered_directory() {
+                    paths.push(path);
+                }
+                if let Some(path) = failure.discovered_relative_path() {
                     paths.push(path);
                 }
                 paths.push(failure.requested_path());
@@ -5622,14 +5659,17 @@ mod copy_cli_tests {
         let output = root.path().join("output");
         let workspace = root.path().join("workspace");
         let source = root.path().join("source.bin");
+        let pending = root.path().join("pending.bin");
         fs::create_dir(&output).unwrap();
         fs::create_dir(&workspace).unwrap();
         fs::write(&source, b"checkpoint diagnostic bytes").unwrap();
+        fs::write(&pending, b"not started after the checkpoint failure").unwrap();
         let engine = Engine::new();
         let plan = engine
             .plan_copy_batch(
                 CopyBatchRequest::new(&output, &workspace)
-                    .with_item(&source, output.join("source.bin")),
+                    .with_item(&source, output.join("source.bin"))
+                    .with_item(&pending, output.join("pending.bin")),
             )
             .unwrap();
         let session = CopyBatchSession::new();
@@ -5654,7 +5694,7 @@ mod copy_cli_tests {
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
             concat!(
-                "Copy batch failed: 1 item, 1 succeeded or skipped, 0 failed, 0 cancelled.\n",
+                "Copy batch failed: 2 items, 1 succeeded or skipped, 0 failed, 1 not started, 0 cancelled.\n",
                 "Job ID: job-batch-test.\n",
                 "Reason: The host could not durably record an item result.\n",
             )

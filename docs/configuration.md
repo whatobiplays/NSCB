@@ -360,10 +360,12 @@ cannot be represented. A startup configuration failure requested with
 admitted yet. Exit class 7 covers internal execution, persistence, and reporting
 failures. Exit class 8 applies when a batch has at least one `Copied` or
 `AlreadyUpToDate` item and at least one failed item. Skipped items do not count
-as actual successes. A batch with failures and no actual success returns
-`Failed` using the most severe item exit class. Conflict or cancellation exits
-from batch item results are not hidden by an earlier ordinary failure; an
-internal failure has the highest precedence.
+as actual successes. For a batch, `Succeeded` exits 0. `CompletedWithIssues`
+exits 8 unless an item has an internal failure, which exits 7. `Cancelled` exits
+6 unless an item has an internal failure, which exits 7. `Failed` uses the
+highest-ranked aggregate or item failure class: internal 7 > cancellation 6 >
+conflict 4 > input 3 > other mapped exits (rank 0). A failed batch with no
+mapped item failure exits 7.
 Standalone Copy adds top-level `job_id` to terminal `job.result`. If durable
 completion persistence fails after filesystem execution, the same terminal
 record also carries `history_error`; the operation result and filesystem state
@@ -409,14 +411,35 @@ Job history uses SQLite `user_version` and an NSCB application ID. A new
 database is created transactionally at schema version 4. A recognized version 1
 database first receives a recovery copy at `jobs.sqlite3.v1.bak` and upgrades to
 version 2. The same open then creates `jobs.sqlite3.v2.bak` before adding the
-slot registry and Job lease claims in version 3. It then creates a
-`jobs.sqlite3.v3.bak` recovery copy before adding batch intent and per-item
-checkpoint tables in version 4. Each step validates a backup of its exact source
-version, and each schema change runs in one transaction. An
-existing recovery copy is accepted only when it is healthy, has the NSCB
-application ID and expected user version, and matches the source schema and
-every current Job column. Different or unsafe backups fail closed. A failed
-schema change rolls back and leaves the previous database readable.
+slot registry and Job lease claims in version 3. Before adding batch intent and
+per-item checkpoint tables in version 4, NSCB creates or verifies
+`jobs.sqlite3.v3.bak` against the committed v3 source. Verification runs SQLite
+integrity checks, confirms the NSCB application ID and v3 schema version, and
+compares the schema definitions and every table's rows with the source. If NSCB
+cannot create or verify the backup, migration stops before changing the schema.
+Each schema change runs in one transaction. If the v3-to-v4 schema transaction
+fails, it rolls back and leaves the v3 database readable; the verified backup
+remains a pre-migration snapshot for recovery. A binary that supports only v3
+cannot open a v4 database. Restoring the v3 snapshot is operator-managed and
+returns history to the snapshot state, discarding later history.
+
+Version 4 keeps independent batch source intent in `batch_source_intents`;
+`jobs.source` continues to hold the filesystem source path for single-copy Jobs
+and is null for independent batches. New batch items use `schema_version: 1`
+with `kind: nscb.copy_batch_item_provenance`. A directory-discovered failure
+also stores `discovered_directory` and `discovered_relative_path`. When NSCB
+migrates v3 independently admitted batch rows, it writes explicit
+`nscb.legacy_unqualified_batch_sources` and
+`nscb.legacy_unqualified_copy_batch_item_provenance` markers. Those rows remain
+readable, but the markers do not establish child or Split identity and cannot
+authorize `jobs retry --failed-items`.
+
+History written by the earlier v4 implementation can contain regular batch
+item provenance without the version tags above. NSCB keeps those records
+available for inspection and preserves their stored evidence unchanged. It
+does not normalize the records or infer qualification from them.
+`jobs retry --failed-items` rejects them with
+`job_failed_items_unsupported`.
 
 Unknown newer schema versions, corrupt/non-database files, missing required
 tables, and unsafe file types fail with a typed Job-history error. NSCB does

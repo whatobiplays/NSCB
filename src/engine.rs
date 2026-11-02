@@ -94,7 +94,7 @@ impl Engine {
     ) -> OperationResult {
         crate::operation::execute_operation_with_cancellation(plan, session, &cancellation)
     }
-    /// Executes one immutable batch with no cooperative cancellation signal.
+    /// Executes one immutable copy batch without caller-supplied cancellation.
     pub fn execute_copy_batch(
         &self,
         plan: CopyBatchPlan,
@@ -104,7 +104,12 @@ impl Engine {
         self.execute_copy_batch_with_checkpoint(plan, session, cancellation, |_| Ok(()))
             .into_result()
     }
-    /// Executes one immutable batch with caller-owned cancellation.
+    /// Executes one immutable copy batch with caller-owned cancellation.
+    ///
+    /// Cancellation is latched on the caller-owned handle. Once cancellation
+    /// has been accepted, a later independent batch using the same handle is
+    /// also cancelled. Pass a fresh `CancellationHandle` for each independent
+    /// batch that should remain separately cancellable.
     pub fn execute_copy_batch_with_cancellation(
         &self,
         plan: CopyBatchPlan,
@@ -118,6 +123,11 @@ impl Engine {
     ///
     /// A checkpoint error stops execution before the next item. Completed item
     /// evidence remains in the returned aggregate and session completion.
+    ///
+    /// Cancellation is latched on the caller-owned handle. An already-cancelled
+    /// handle remains cancelled for later calls. Pass a fresh
+    /// `CancellationHandle` for each independent batch that should remain
+    /// separately cancellable.
     pub fn execute_copy_batch_with_checkpoint(
         &self,
         plan: CopyBatchPlan,

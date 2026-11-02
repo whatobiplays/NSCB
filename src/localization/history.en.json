@@ -4,6 +4,8 @@
   "show": "Job: {job_id}\nState: {state}\nAdmitted: {admitted_at}\nTerminal: {terminal_at}\nSource: {source}\nDestination: {destination}\nWorkspace: {workspace}",
   "show_item": "Item: {item_key} {state} {source} -> {destination}",
   "terminal_not_recorded": "Not yet terminal",
+  "independent_batch_source": "Independent batch (item sources below)",
+  "not_assigned": "Not assigned",
   "clear_result": "Deleted {deleted} terminal Job records. Active Jobs were preserved.",
   "unknown_state": "Unknown state",
   "states": {

@@ -504,10 +504,9 @@ mod copy_subprocess {
     use super::*;
     use fs2::FileExt;
     use rusqlite::{Connection, OpenFlags};
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read};
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-    use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
     use tempfile::tempdir;
 
@@ -610,34 +609,82 @@ mod copy_subprocess {
         unsafe { Stdio::from_raw_fd(duplicate) }
     }
 
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    #[repr(u8)]
-    enum ChildControlSignal {
-        Terminalized = b'T',
-    }
-
+    #[cfg(unix)]
     struct ChildGuard(std::process::Child);
 
+    #[cfg(unix)]
     impl ChildGuard {
+        const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
         fn new(child: std::process::Child) -> Self {
             Self(child)
         }
 
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            self.0.wait()
+        fn wait_until(&mut self, deadline: Instant) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(status) = self.try_wait_until(deadline)? {
+                return Ok(status);
+            }
+            self.terminate_and_reap();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "copy process did not exit before test deadline",
+            ))
+        }
+
+        fn try_wait_until(
+            &mut self,
+            deadline: Instant,
+        ) -> std::io::Result<Option<std::process::ExitStatus>> {
+            loop {
+                if let Some(status) = self.0.try_wait()? {
+                    return Ok(Some(status));
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(None);
+                }
+                thread::sleep((deadline - now).min(Duration::from_millis(10)));
+            }
+        }
+
+        fn terminate_and_reap(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.try_wait_until(Instant::now() + Self::CLEANUP_TIMEOUT);
         }
     }
 
+    #[cfg(unix)]
     impl Drop for ChildGuard {
         fn drop(&mut self) {
             match self.0.try_wait() {
                 Ok(Some(_)) => {}
-                _ => {
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
-                }
+                _ => self.terminate_and_reap(),
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_guard_timeout_returns_after_reaping_the_child() {
+        let mut child = ChildGuard::new(
+            Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn timeout fixture"),
+        );
+        let started = Instant::now();
+        let error = child
+            .wait_until(Instant::now())
+            .expect_err("live child must hit the deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout cleanup must remain bounded"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_some(),
+            "timeout cleanup must reap the child"
+        );
     }
 
     fn history_database(home: &std::path::Path) -> std::path::PathBuf {
@@ -647,24 +694,33 @@ mod copy_subprocess {
             .join("jobs.sqlite3")
     }
 
-    fn wait_for_committed_terminal_outcome(database: &std::path::Path) {
+    fn wait_for_committed_terminal_outcome(database: &std::path::Path, deadline: Instant) -> bool {
         let connection = loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
             match Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY) {
                 Ok(connection) => break connection,
-                Err(_) => thread::yield_now(),
+                Err(_) => thread::sleep(Duration::from_millis(10)),
             }
         };
+        connection
+            .busy_timeout(Duration::from_millis(100))
+            .expect("set bounded history query wait");
 
         loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
             match connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM jobs WHERE terminal_at IS NOT NULL)",
                 [],
                 |row| row.get::<_, bool>(0),
             ) {
-                Ok(true) => return,
-                Ok(false) => thread::yield_now(),
+                Ok(true) => return true,
+                Ok(false) => thread::sleep(Duration::from_millis(10)),
                 Err(error) if error.to_string().contains("no such table: jobs") => {
-                    thread::yield_now();
+                    thread::sleep(Duration::from_millis(10));
                 }
                 Err(error) => panic!("read copy terminalization from history: {error}"),
             }
@@ -985,24 +1041,15 @@ mod copy_subprocess {
                 command.arg(mode);
             }
             let mut child = ChildGuard::new(command.spawn().expect("launch copy with full pipes"));
-            let (mut control_reader, mut control_writer) =
-                UnixStream::pair().expect("create terminalization control pipe");
             let database = history_database(&home);
-            let terminalization_observer = thread::spawn(move || {
-                wait_for_committed_terminal_outcome(&database);
-                control_writer
-                    .write_all(&[ChildControlSignal::Terminalized as u8])
-                    .expect("signal committed copy terminalization");
-            });
-            let mut signal = [0];
-            control_reader
-                .read_exact(&mut signal)
-                .expect("wait for committed copy terminalization");
-            assert_eq!(signal[0], ChildControlSignal::Terminalized as u8);
-            let status = child.wait().expect("wait for terminalized copy process");
-            terminalization_observer
-                .join()
-                .expect("join terminalization observer");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            assert!(
+                wait_for_committed_terminal_outcome(&database, deadline),
+                "copy did not commit a terminal outcome before the test deadline"
+            );
+            let status = child
+                .wait_until(deadline)
+                .expect("wait for terminalized copy process");
             assert_eq!(status.code(), Some(7));
             assert_eq!(
                 unsafe { libc::fcntl(stdout_writer.as_raw_fd(), libc::F_GETFL) },

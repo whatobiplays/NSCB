@@ -948,20 +948,252 @@ fn current_schema_validation_rejects_missing_v4_objects_and_contracts() {
          CREATE INDEX jobs_history_order ON jobs(state, terminal_at DESC, admitted_at DESC, job_id DESC);
          CREATE INDEX jobs_parent ON jobs(parent_job_id);
          CREATE INDEX jobs_lease_slot ON jobs(lease_slot_id);",
+        "PRAGMA foreign_keys = OFF;
+         PRAGMA legacy_alter_table = ON;
+         ALTER TABLE job_items RENAME TO damaged_job_items;
+         CREATE TABLE job_items (
+             job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+             ordinal INTEGER NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL,
+             source TEXT NOT NULL, destination TEXT NOT NULL, state TEXT NOT NULL,
+             outcome TEXT, failure_code TEXT, evidence_json TEXT, provenance_json TEXT,
+             PRIMARY KEY (job_id, ordinal), UNIQUE (job_id, item_key)
+         );
+         DROP TABLE damaged_job_items;",
+        "PRAGMA foreign_keys = OFF;
+         PRAGMA legacy_alter_table = ON;
+         ALTER TABLE job_items RENAME TO damaged_job_items;
+         CREATE TABLE job_items (
+             job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+             ordinal INTEGER NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL,
+             source TEXT NOT NULL, destination TEXT NOT NULL,
+             destination_assigned INTEGER NOT NULL DEFAULT 1,
+             state TEXT NOT NULL, outcome TEXT, failure_code TEXT,
+             evidence_json TEXT, provenance_json TEXT,
+             PRIMARY KEY (job_id, ordinal), UNIQUE (job_id, item_key)
+         );
+         DROP TABLE damaged_job_items;",
+        "PRAGMA foreign_keys = OFF;
+         PRAGMA legacy_alter_table = ON;
+         ALTER TABLE job_items RENAME TO damaged_job_items;
+         CREATE TABLE job_items (
+             job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+             ordinal INTEGER NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL,
+             source TEXT NOT NULL, destination TEXT NOT NULL,
+             destination_assigned INTEGER NOT NULL DEFAULT 1
+                 CHECK (destination_assigned IN (0, 1)),
+             state TEXT NOT NULL, outcome TEXT, failure_code TEXT,
+             evidence_json TEXT, provenance_json TEXT,
+             PRIMARY KEY (job_id, ordinal), UNIQUE (job_id, item_key)
+         );
+         DROP TABLE damaged_job_items;",
+"PRAGMA foreign_keys = OFF;
+PRAGMA legacy_alter_table = ON;
+ALTER TABLE job_items RENAME TO damaged_job_items;
+CREATE TABLE job_items (
+    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL,
+    source TEXT NOT NULL, destination TEXT NOT NULL,
+    destination_assigned INTEGER DEFAULT 1,
+    state TEXT NOT NULL, outcome TEXT, failure_code TEXT,
+    evidence_json TEXT, provenance_json TEXT,
+    PRIMARY KEY (job_id, ordinal), UNIQUE (job_id, item_key),
+    CONSTRAINT job_items_destination_representation CHECK (
+        (destination_assigned = 1 AND length(destination) > 0)
+        OR (destination_assigned = 0 AND destination = '')
+    )
+);
+DROP TABLE damaged_job_items;",
     ];
-    for mutation in mutations {
+
+    let rebuild_job_items = |destination: &str, destination_assigned: &str, constraint: &str| {
+        format!(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;
+             ALTER TABLE job_items RENAME TO damaged_job_items;
+             CREATE TABLE job_items (
+                 job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+                 ordinal INTEGER NOT NULL, item_key TEXT NOT NULL, kind TEXT NOT NULL,
+                 source TEXT NOT NULL, destination {destination},
+                 destination_assigned {destination_assigned},
+                 state TEXT NOT NULL, outcome TEXT, failure_code TEXT,
+                 evidence_json TEXT, provenance_json TEXT,
+                 PRIMARY KEY (job_id, ordinal), UNIQUE (job_id, item_key){constraint}
+             );
+             DROP TABLE damaged_job_items;"
+        )
+    };
+    let expected_destination_check = ",
+        CONSTRAINT job_items_destination_representation CHECK (
+            (destination_assigned = 1 AND length(destination) > 0)
+            OR (destination_assigned = 0 AND destination = '')
+        )";
+    let spoofed_destination_check = "( (destination_assigned = 1 AND length(destination) > 0) OR (destination_assigned = 0 AND destination = '') )";
+    let spoofed_single_quoted_literal =
+        format!("'CHECK {}'", spoofed_destination_check.replace('\'', "''"));
+    let metadata_mutations = [
+        (
+            "destination wrong declared type",
+            rebuild_job_items(
+                "INTEGER NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                expected_destination_check,
+            ),
+        ),
+        (
+            "destination_assigned wrong declared type",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "TEXT NOT NULL DEFAULT 1",
+                expected_destination_check,
+            ),
+        ),
+        (
+            "destination wrong default",
+            rebuild_job_items(
+                "TEXT NOT NULL DEFAULT ''",
+                "INTEGER NOT NULL DEFAULT 1",
+                expected_destination_check,
+            ),
+        ),
+        (
+            "destination_assigned missing default",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL",
+                expected_destination_check,
+            ),
+        ),
+        (
+            "destination_assigned wrong default",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 0",
+                expected_destination_check,
+            ),
+        ),
+        (
+            "destination nullable",
+            rebuild_job_items(
+                "TEXT",
+                "INTEGER NOT NULL DEFAULT 1",
+                expected_destination_check,
+            ),
+        ),
+        (
+            "expected check text only in double-quoted constraint name",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                ",
+                 CONSTRAINT \"CHECK ((destination_assigned = 1 AND length(destination) > 0) OR (destination_assigned = 0 AND destination = ''))\"
+                 CHECK (destination_assigned IN (0, 1))",
+            ),
+        ),
+        (
+            "expected check text only in a line comment",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                &format!(
+                    ",
+                     CONSTRAINT job_items_destination_representation CHECK (
+                         destination_assigned IN (0, 1) -- CHECK {spoofed_destination_check}
+                     )"
+                ),
+            ),
+        ),
+        (
+            "expected check text only in a block comment",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                &format!(
+                    ",
+                     CONSTRAINT job_items_destination_representation CHECK (
+                         destination_assigned IN (0, 1) /* CHECK {spoofed_destination_check} */
+                     )"
+                ),
+            ),
+        ),
+        (
+            "expected check text only in a single-quoted literal",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                &format!(
+                    ",
+                     CONSTRAINT job_items_destination_representation CHECK (
+                         destination_assigned IN (0, 1)
+                         AND {spoofed_single_quoted_literal} IS NOT NULL
+                     )"
+                ),
+            ),
+        ),
+        (
+            "expected check text only in a backtick-quoted constraint name",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                &format!(
+                    ",
+                     CONSTRAINT `CHECK {spoofed_destination_check}`
+                     CHECK (destination_assigned IN (0, 1))"
+                ),
+            ),
+        ),
+        (
+            "expected check text only in a bracket-quoted constraint name",
+            rebuild_job_items(
+                "TEXT NOT NULL",
+                "INTEGER NOT NULL DEFAULT 1",
+                &format!(
+                    ",
+                     CONSTRAINT [CHECK {spoofed_destination_check}]
+                     CHECK (destination_assigned IN (0, 1))"
+                ),
+            ),
+        ),
+    ];
+    for (case, mutation) in mutations
+        .into_iter()
+        .map(|mutation| ("existing fixture", mutation.to_owned()))
+        .chain(metadata_mutations)
+    {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("jobs.sqlite3");
         drop(HistoryStore::open_at(&path).unwrap());
         Connection::open(&path)
             .unwrap()
-            .execute_batch(mutation)
+            .execute_batch(&mutation)
             .unwrap();
         assert!(
             matches!(HistoryStore::open_at(&path), Err(HistoryError::Corrupt)),
-            "accepted damaged current schema after: {mutation}"
+            "accepted damaged current schema after {case}: {mutation}"
         );
     }
+
+    let commented_destination_check = ",
+        CONSTRAINT job_items_destination_representation CHECK (
+            -- Comments do not change the required expression.
+            (destination_assigned = 1 AND length(destination) > 0)
+            /* Block comments are also inert. */
+            OR (destination_assigned = 0 AND destination = '')
+        )";
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("jobs.sqlite3");
+    drop(HistoryStore::open_at(&path).unwrap());
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(&rebuild_job_items(
+            "TEXT NOT NULL",
+            "INTEGER NOT NULL DEFAULT 1",
+            commented_destination_check,
+        ))
+        .unwrap();
+    assert!(
+        HistoryStore::open_at(&path).is_ok(),
+        "rejected canonical destination constraint with internal comments"
+    );
 }
 
 #[test]
@@ -2614,19 +2846,27 @@ fn valid_failed_batch_intent() -> serde_json::Value {
         },
         "selections": [
             {
+                "schema_version": 1,
+                "kind": "nscb.copy_batch_item_provenance",
                 "selection_index": 0,
                 "source": "path",
                 "selection_path": "first.bin",
+                "base_directory": "/fixture",
                 "input_list_entry_index": null,
                 "input_list_entry_path": null,
+                "discovered_directory": null,
+                "discovered_relative_path": null,
                 "requested_path": "/fixture/first.bin",
                 "failure_code": "input_unavailable",
                 "phase": "resolution"
             },
             {
+                "schema_version": 1,
+                "kind": "nscb.copy_batch_item_provenance",
                 "selection_index": 1,
                 "source": "path",
                 "selection_path": "second.bin",
+                "base_directory": "/fixture",
                 "input_list_entry_index": null,
                 "input_list_entry_path": null,
                 "discovered_directory": null,
@@ -2850,6 +3090,110 @@ fn valid_failed_batch_store() -> HistoryStore {
     store
 }
 
+fn parent_v4_unversioned_batch_store() -> HistoryStore {
+    let store = valid_failed_batch_store();
+    let mut batch_intent = valid_failed_batch_intent();
+    for provenance in batch_intent["selections"].as_array_mut().unwrap() {
+        let provenance = provenance.as_object_mut().unwrap();
+        provenance.remove("schema_version");
+        provenance.remove("kind");
+    }
+    batch_intent["selections"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("discovered_directory");
+    batch_intent["selections"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("discovered_relative_path");
+    store
+        .connection
+        .execute(
+            "UPDATE jobs SET source_provenance = 'independent_batch_items'
+             WHERE job_id = 'batch'",
+            [],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE batch_intents SET intent_json = ?1 WHERE job_id = 'batch'",
+            [batch_intent.to_string()],
+        )
+        .unwrap();
+    let source_intent = batch_source_intent_for_retry(&batch_intent);
+    store
+        .connection
+        .execute(
+            "UPDATE batch_source_intents SET intent_json = ?1 WHERE job_id = 'batch'",
+            [source_intent.to_string()],
+        )
+        .unwrap();
+    for (ordinal, provenance) in batch_intent["selections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        store
+            .connection
+            .execute(
+                "UPDATE job_items SET provenance_json = ?1
+                 WHERE job_id = 'batch' AND ordinal = ?2",
+                params![provenance.to_string(), ordinal],
+            )
+            .unwrap();
+    }
+    store
+}
+
+fn replace_parent_v4_batch_provenance(store: &HistoryStore, replacement: &serde_json::Value) {
+    store
+        .connection
+        .execute(
+            "UPDATE job_items SET provenance_json = ?1
+             WHERE job_id = 'batch' AND ordinal = 0",
+            [replacement.to_string()],
+        )
+        .unwrap();
+
+    let source_intent = store
+        .connection
+        .query_row(
+            "SELECT intent_json FROM batch_source_intents WHERE job_id = 'batch'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    let mut source_intent: serde_json::Value = serde_json::from_str(&source_intent).unwrap();
+    source_intent["items"][0]["provenance"] = replacement.clone();
+    store
+        .connection
+        .execute(
+            "UPDATE batch_source_intents SET intent_json = ?1 WHERE job_id = 'batch'",
+            [source_intent.to_string()],
+        )
+        .unwrap();
+
+    let batch_intent = store
+        .connection
+        .query_row(
+            "SELECT intent_json FROM batch_intents WHERE job_id = 'batch'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap();
+    let mut batch_intent: serde_json::Value = serde_json::from_str(&batch_intent).unwrap();
+    batch_intent["selections"][0] = replacement.clone();
+    store
+        .connection
+        .execute(
+            "UPDATE batch_intents SET intent_json = ?1 WHERE job_id = 'batch'",
+            [batch_intent.to_string()],
+        )
+        .unwrap();
+}
+
 fn replace_batch_intent(store: &HistoryStore, intent: &serde_json::Value) {
     store
         .connection
@@ -3035,6 +3379,20 @@ fn failed_items_retry_rejects_missing_extra_and_malformed_intent_fields() {
     assert_mutated_retry_intent_is_rejected("extra selection field", |intent| {
         intent["selections"][0]["future"] = serde_json::Value::Bool(true);
     });
+    assert_mutated_retry_intent_is_rejected("missing provenance version", |intent| {
+        intent["selections"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("schema_version");
+    });
+    assert_mutated_retry_intent_is_rejected("unknown provenance kind", |intent| {
+        intent["selections"][0]["kind"] =
+            serde_json::Value::String("nscb.future_item_provenance".to_owned());
+    });
+    assert_mutated_retry_intent_is_rejected("partial discovery evidence", |intent| {
+        intent["selections"][0]["discovered_directory"] =
+            serde_json::Value::String("/fixture".to_owned());
+    });
     assert_mutated_retry_intent_is_rejected("unknown selection source", |intent| {
         intent["selections"][0]["source"] = serde_json::Value::String("future".to_owned());
     });
@@ -3209,12 +3567,157 @@ fn failed_items_retry_verifies_intent_against_durable_job_and_item_rows() {
 }
 
 #[test]
+fn parent_v4_unversioned_batch_provenance_is_inspectable_without_retry_authority() {
+    let store = parent_v4_unversioned_batch_store();
+    let stored_before = store
+        .connection
+        .query_row(
+            "SELECT source.intent_json, item.provenance_json
+             FROM batch_source_intents source
+             JOIN job_items item ON item.job_id = source.job_id
+             WHERE source.job_id = 'batch' AND item.ordinal = 0",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+
+    let job = store.load("batch").unwrap();
+    assert_eq!(job.job_id, "batch");
+    assert_eq!(job.submission_kind, "independent_batch");
+    assert_eq!(job.items.len(), 2);
+    let source_intent = job.batch_source_intent.as_ref().unwrap();
+    assert_eq!(source_intent.items.len(), job.items.len());
+    let legacy_provenance = job.items[0].provenance.as_ref().unwrap();
+    assert!(legacy_provenance.is_object());
+    assert!(legacy_provenance.get("schema_version").is_none());
+    assert!(legacy_provenance.get("kind").is_none());
+    assert_eq!(source_intent.items[0].provenance, legacy_provenance.clone());
+    assert_eq!(
+        job.batch_intent.as_ref().unwrap()["selections"][0],
+        legacy_provenance.clone()
+    );
+
+    let stored_after = store
+        .connection
+        .query_row(
+            "SELECT source.intent_json, item.provenance_json
+             FROM batch_source_intents source
+             JOIN job_items item ON item.job_id = source.job_id
+             WHERE source.job_id = 'batch' AND item.ordinal = 0",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_after, stored_before);
+    assert_eq!(
+        store.failed_items_retry_intent("batch"),
+        Err(HistoryError::UnsupportedFailedItems),
+        "legacy provenance must remain inspectable without granting retry authority"
+    );
+}
+
+#[test]
+fn parent_v4_legacy_batch_provenance_rejects_mixed_and_malformed_records() {
+    let replacements = [
+        (
+            "mixed versioned and unversioned provenance",
+            valid_failed_batch_intent()["selections"][0].clone(),
+        ),
+        (
+            "partial provenance version",
+            serde_json::json!({ "schema_version": 1, "selection_index": 0 }),
+        ),
+        (
+            "non-object provenance",
+            serde_json::Value::String("not provenance".to_owned()),
+        ),
+    ];
+
+    for (case, replacement) in replacements {
+        let store = parent_v4_unversioned_batch_store();
+        assert!(
+            store.load("batch").is_ok(),
+            "parent-v4 fixture did not load before applying {case}"
+        );
+        replace_parent_v4_batch_provenance(&store, &replacement);
+        assert_eq!(
+            store.load("batch"),
+            Err(HistoryError::QueryFailed),
+            "accepted {case}"
+        );
+    }
+}
+
+#[test]
+fn failed_items_retry_accepts_directory_discovered_resolution_failure() {
+    let store = valid_failed_batch_store();
+    let mut intent = valid_failed_batch_intent();
+    intent["plan"]["items"][0]["source"] =
+        serde_json::Value::String("/fixture/inputs/first.bin".to_owned());
+    intent["selections"][0]["schema_version"] = serde_json::json!(1);
+    intent["selections"][0]["kind"] =
+        serde_json::Value::String("nscb.copy_batch_item_provenance".to_owned());
+    intent["selections"][0]["selection_path"] = serde_json::Value::String("inputs".to_owned());
+    intent["selections"][0]["base_directory"] = serde_json::Value::String("/fixture".to_owned());
+    intent["selections"][0]["discovered_directory"] =
+        serde_json::Value::String("/fixture/inputs".to_owned());
+    intent["selections"][0]["discovered_relative_path"] =
+        serde_json::Value::String("first.bin".to_owned());
+    intent["selections"][0]["requested_path"] =
+        serde_json::Value::String("/fixture/inputs/first.bin".to_owned());
+    replace_batch_intent(&store, &intent);
+    replace_batch_source_intent(&store, &intent);
+    store
+        .connection
+        .execute(
+            "UPDATE job_items
+             SET source = '/fixture/inputs/first.bin', provenance_json = ?1,
+                 evidence_json = json_set(
+                     evidence_json, '$.item.source', '/fixture/inputs/first.bin'
+                 )
+             WHERE job_id = 'batch' AND item_key = 'failed-item'",
+            [intent["selections"][0].to_string()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE batch_item_checkpoints
+             SET evidence_json = json_set(
+                 evidence_json, '$.item.source', '/fixture/inputs/first.bin'
+             )
+             WHERE job_id = 'batch' AND item_key = 'failed-item'",
+            [],
+        )
+        .unwrap();
+
+    let retry = store.failed_items_retry_intent("batch").unwrap();
+    assert_eq!(retry.items.len(), 1);
+    assert_eq!(retry.items[0].item_key, "failed-item");
+    assert_eq!(
+        retry.items[0].source,
+        PathBuf::from("/fixture/inputs/first.bin")
+    );
+    assert_eq!(
+        retry.items[0].destination,
+        Some(PathBuf::from("/output/first.bin"))
+    );
+    assert_eq!(
+        retry.items[0].provenance.as_ref().unwrap()["discovered_relative_path"],
+        "first.bin"
+    );
+}
+
+#[test]
 fn failed_items_retry_accepts_an_item_local_qualified_split_failure() {
     let store = valid_failed_batch_store();
     let split_selection = serde_json::json!({
+        "schema_version": 1,
+        "kind": "nscb.copy_batch_item_provenance",
         "selection_index": 0,
         "source": "path",
         "selection_path": "first.bin",
+        "base_directory": "/fixture",
         "input_list_entry_index": null,
         "input_list_entry_path": null,
         "discovered_directory": null,
@@ -3581,6 +4084,8 @@ fn failed_item_selection_rejects_unsupported_future_record_shapes() {
             )
             .unwrap();
         let provenance = serde_json::json!({
+            "schema_version": 1,
+            "kind": "nscb.copy_batch_item_provenance",
             "selection_index": 0,
             "source": "path",
             "selection_path": "/s",
@@ -3780,9 +4285,16 @@ fn admit_copy_batch_for_history(
             source: item.source().to_path_buf(),
             destination: item.destination().map(Path::to_path_buf),
             provenance: Some(serde_json::json!({
+                "schema_version": 1,
+                "kind": "nscb.copy_batch_item_provenance",
                 "selection_index": index,
                 "source": "path",
                 "selection_path": item.source(),
+                "base_directory": root,
+                "input_list_entry_index": null,
+                "input_list_entry_path": null,
+                "discovered_directory": null,
+                "discovered_relative_path": null,
             })),
             split_qualification: None,
             split_manifest_sha256: None,
@@ -4235,6 +4747,249 @@ fn v3_database_for_migration(path: &Path) -> Connection {
     connection
 }
 
+fn populate_v3_migration_evidence(connection: &Connection) -> (String, String) {
+    let (slot_id, slot_key) = connection
+        .query_row(
+            "SELECT slot_id, slot_key FROM lease_slots ORDER BY ordinal LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE jobs
+             SET submission_kind = 'independent_batch', state = 'failed',
+                 invocation_cwd = '/fixture',
+                 started_at = '2026-01-01T00:00:00Z',
+                 terminal_at = '2026-01-01T00:00:01Z', failure_code = 'source_unavailable',
+                 publication_state = 'not_completed', retry_scope = 'failed_items',
+                 lease_slot_id = ?1
+             WHERE job_id = 'migration-job'",
+            [&slot_id],
+        )
+        .unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO job_items
+                 (job_id, ordinal, item_key, kind, source, destination, state,
+                  outcome, failure_code, evidence_json)
+             VALUES
+                 ('migration-job', 0, 'legacy-item', 'copy_through',
+'/fixture/inputs/source.bin', '/fixture/output.bin', 'failed',
+                  NULL, 'source_unavailable', '{\"legacy_item\":true}');
+             INSERT INTO job_artifacts
+                 (job_id, ordinal, role, path, retained, identity_known,
+                  content_known, evidence_json)
+             VALUES
+                 ('migration-job', 0, 'workspace', '/fixture/workspace', 1, 1, 1,
+                  '{\"legacy_artifact\":true}');",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO job_lease_claims
+                 (claim_id, job_id, slot_id, claim_token, state, created_at, resolved_at)
+             VALUES
+                 ('legacy-claim', 'migration-job', ?1, 'legacy-token', 'released',
+                  '2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z')",
+            [&slot_id],
+        )
+        .unwrap();
+    (slot_id, slot_key)
+}
+
+#[test]
+fn finalized_v3_store_migrates_and_preserves_legacy_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("jobs.sqlite3");
+    let connection = v3_database_for_migration(&path);
+    let (slot_id, slot_key) = populate_v3_migration_evidence(&connection);
+    super::lease::initialize_slot_files(&connection, &path, true).unwrap();
+    connection
+        .execute_batch("UPDATE history_registry SET ready = 1")
+        .unwrap();
+    let original_schema = query_rows_for_test(
+        &connection,
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema
+         WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+    );
+    let original_jobs = query_rows_for_test(&connection, "SELECT * FROM jobs ORDER BY rowid");
+    let original_items = query_rows_for_test(&connection, "SELECT * FROM job_items ORDER BY rowid");
+    let original_artifacts =
+        query_rows_for_test(&connection, "SELECT * FROM job_artifacts ORDER BY rowid");
+    let original_claims =
+        query_rows_for_test(&connection, "SELECT * FROM job_lease_claims ORDER BY rowid");
+    let original_slots =
+        query_rows_for_test(&connection, "SELECT * FROM lease_slots ORDER BY rowid");
+    let original_registry =
+        query_rows_for_test(&connection, "SELECT * FROM history_registry ORDER BY rowid");
+    drop(connection);
+
+    let store = HistoryStore::open_at(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT ready FROM history_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
+    let job = store.load("migration-job").unwrap();
+    assert_eq!(job.submission_kind, "independent_batch");
+    assert_eq!(job.state, "failed");
+    assert_eq!(job.retry_scope, "failed_items");
+    assert_eq!(job.items.len(), 1);
+    assert_eq!(job.items[0].item_key, "legacy-item");
+    assert_eq!(job.items[0].state, "failed");
+    assert_eq!(
+        job.items[0].provenance.as_ref().unwrap()["kind"],
+        "nscb.legacy_unqualified_copy_batch_item_provenance"
+    );
+    assert_eq!(
+        job.batch_source_intent.as_ref().unwrap().kind,
+        "nscb.legacy_unqualified_batch_sources"
+    );
+    assert!(
+        matches!(
+            &store.failed_items_retry_intent("migration-job"),
+            Err(HistoryError::UnsupportedFailedItems)
+        ),
+        "legacy provenance must not authorize failed item retry"
+    );
+
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT lease_slot_id FROM jobs", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        slot_id
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT role, path, evidence_json FROM job_artifacts",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap(),
+        (
+            "workspace".to_owned(),
+            "/fixture/workspace".to_owned(),
+            "{\"legacy_artifact\":true}".to_owned()
+        )
+    );
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT c.claim_token, s.slot_key FROM job_lease_claims c
+                 JOIN lease_slots s USING (slot_id) WHERE c.job_id = 'migration-job'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        ("legacy-token".to_owned(), slot_key)
+    );
+
+    let backup_path = path.with_extension("sqlite3.v3.bak");
+    assert!(backup_path.is_file());
+    let backup =
+        Connection::open_with_flags(&backup_path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        backup
+            .pragma_query_value(None, "application_id", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        APPLICATION_ID
+    );
+    assert_eq!(
+        backup
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+    assert_eq!(
+        backup
+            .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    assert_eq!(
+        query_rows_for_test(
+            &backup,
+            "SELECT type, name, tbl_name, sql FROM sqlite_schema
+             WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        ),
+        original_schema
+    );
+    assert_eq!(
+        query_rows_for_test(&backup, "SELECT * FROM jobs ORDER BY rowid"),
+        original_jobs
+    );
+    assert_eq!(
+        query_rows_for_test(&backup, "SELECT * FROM job_items ORDER BY rowid"),
+        original_items
+    );
+    assert_eq!(
+        query_rows_for_test(&backup, "SELECT * FROM job_artifacts ORDER BY rowid"),
+        original_artifacts
+    );
+    assert_eq!(
+        query_rows_for_test(&backup, "SELECT * FROM job_lease_claims ORDER BY rowid"),
+        original_claims
+    );
+    assert_eq!(
+        query_rows_for_test(&backup, "SELECT * FROM lease_slots ORDER BY rowid"),
+        original_slots
+    );
+    assert_eq!(
+        query_rows_for_test(&backup, "SELECT * FROM history_registry ORDER BY rowid"),
+        original_registry
+    );
+}
+
+#[test]
+fn malformed_v3_schema_or_registry_fails_closed_before_migration() {
+    for malformation in [
+        "DROP TABLE job_artifacts",
+        "DROP TABLE history_registry;
+         CREATE TABLE history_registry (singleton INTEGER NOT NULL, ready INTEGER NOT NULL);
+         INSERT INTO history_registry VALUES (1, 2);",
+        "DROP TABLE history_registry;
+         CREATE TABLE history_registry (singleton INTEGER NOT NULL, ready INTEGER NOT NULL);
+         INSERT INTO history_registry VALUES (1, 1), (2, 1);",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("jobs.sqlite3");
+        let connection = v3_database_for_migration(&path);
+        connection.execute_batch(malformation).unwrap();
+        drop(connection);
+
+        assert_eq!(
+            HistoryStore::open_at(&path).unwrap_err(),
+            HistoryError::Corrupt
+        );
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert!(!path.with_extension("sqlite3.v3.bak").exists());
+    }
+}
+
 #[test]
 fn v3_to_v4_migration_preserves_history_and_creates_batch_evidence_schema() {
     let root = tempfile::tempdir().unwrap();
@@ -4350,10 +5105,18 @@ fn v4_pending_finalization_still_rejects_incomplete_schema() {
 }
 
 #[test]
-fn v3_batch_history_remains_readable_with_incomplete_nonretryable_provenance() {
+fn pending_v3_batch_history_remains_readable_with_incomplete_nonretryable_provenance() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("jobs.sqlite3");
     let connection = v3_database_for_migration(&path);
+    assert_eq!(
+        connection
+            .query_row("SELECT ready FROM history_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
     connection
         .execute_batch(
             "UPDATE jobs
@@ -4365,7 +5128,7 @@ fn v3_batch_history_remains_readable_with_incomplete_nonretryable_provenance() {
                   outcome, failure_code, evidence_json)
              VALUES
                  ('migration-job', 0, 'legacy-item', 'copy_through',
-                  '/fixture/source.bin', '/fixture/output.bin', 'failed',
+'/fixture/inputs/source.bin', '/fixture/output.bin', 'failed',
                   NULL, 'source_unavailable', NULL);",
         )
         .unwrap();
@@ -4373,10 +5136,23 @@ fn v3_batch_history_remains_readable_with_incomplete_nonretryable_provenance() {
     drop(connection);
 
     let store = HistoryStore::open_at(&path).unwrap();
+    assert_eq!(store.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT ready FROM history_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
+    );
     let job = store.load("migration-job").unwrap();
     assert_eq!(job.submission_kind, "independent_batch");
     assert_eq!(job.items.len(), 1);
-    assert!(job.items[0].provenance.is_none());
+    assert_eq!(
+        job.items[0].provenance.as_ref().unwrap()["kind"],
+        "nscb.legacy_unqualified_copy_batch_item_provenance"
+    );
     let source_intent = job.batch_source_intent.as_ref().unwrap();
     assert_eq!(source_intent.kind, "nscb.legacy_unqualified_batch_sources");
     assert!(source_intent.items.is_empty());
@@ -4394,6 +5170,9 @@ fn failed_v3_to_v4_migration_rolls_back_schema_and_retains_recovery_copy() {
     connection
         .execute_batch("CREATE TABLE batch_intents (conflict INTEGER);")
         .unwrap();
+    connection
+        .execute_batch("UPDATE history_registry SET ready = 1")
+        .unwrap();
 
     assert_eq!(
         super::storage::migrate_v3_to_v4(&mut connection, &path),
@@ -4404,6 +5183,14 @@ fn failed_v3_to_v4_migration_rolls_back_schema_and_retains_recovery_copy() {
             .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
         3
+    );
+    assert_eq!(
+        connection
+            .query_row("SELECT ready FROM history_registry", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        1
     );
     let provenance_column: i64 = connection
         .query_row(

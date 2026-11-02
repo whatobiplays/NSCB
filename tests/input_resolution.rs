@@ -78,18 +78,16 @@ fn batch_resolution_retains_an_unavailable_path_failure_beside_a_viable_item() {
 }
 
 #[test]
-fn pre_cancelled_batch_resolution_rejects_before_returning_partial_entries() {
-    let tree = TempTree::new();
-    tree.write("batch/present.nsp", b"present");
+fn pre_cancelled_batch_resolution_precedes_base_directory_validation() {
     let control = InputResolutionControl::new();
     control.cancel();
 
     let error = Engine::new()
-        .resolve_inputs_batch_with(
-            request(&tree).with_path("batch"),
+        .resolve_inputs_batch_request_with(
+            InputResolutionBatchRequest::new().with_path("relative-base", "item.bin"),
             InputResolutionCapabilities::new().with_control(&control),
         )
-        .expect_err("cancelled batch resolution must not return partial success");
+        .expect_err("cancellation must precede base directory validation");
 
     assert_eq!(
         error.code(),
@@ -962,7 +960,7 @@ fn batch_resolution_shares_input_list_budget_across_all_entries() {
 }
 
 #[test]
-fn batch_split_budget_is_global_and_includes_prior_item_failures() {
+fn batch_split_budget_is_cumulative_across_items() {
     let tree = TempTree::new();
     tree.write("present.bin", b"present");
     for (name, length) in [("first.nsp", 10), ("second.nsp", 11)] {
@@ -982,7 +980,7 @@ fn batch_split_budget_is_global_and_includes_prior_item_failures() {
                 .with_split_trust_store(&store)
                 .with_max_split_validation_bytes(15),
         )
-        .expect_err("Split bytes are cumulative even when an earlier item failed");
+        .expect_err("Split bytes remain cumulative across batch items");
     assert_eq!(
         error.code(),
         InputResolutionErrorCode::ResourceLimitExceeded

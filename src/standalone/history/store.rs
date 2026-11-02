@@ -542,7 +542,9 @@ impl HistoryStore {
         ) {
             ("single", Some(_), None) => {}
             ("independent_batch", None, Some(intent))
-                if intent.is_legacy_incomplete() || intent.matches_items(&detail.items) => {}
+                if intent.is_legacy_incomplete()
+                    || intent.matches_items(&detail.items)
+                    || intent.matches_legacy_unversioned_items(&detail.items) => {}
             _ => return Err(HistoryError::QueryFailed),
         }
         detail.batch_intent = self.load_batch_intent(job_id)?;
@@ -1734,6 +1736,8 @@ enum FailedItemsRetryPlanState {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FailedItemsRetrySelectionRecord {
+    schema_version: u64,
+    kind: String,
     selection_index: usize,
     source: FailedItemsRetrySelectionSource,
     selection_path: PathBuf,
@@ -2016,23 +2020,30 @@ fn parse_retry_selection(
         .ok_or(HistoryError::UnsupportedFailedItems)?;
     let is_failure = object.contains_key("requested_path");
     let has_split_qualification = object.contains_key("split_qualification");
-    let has_base_directory = object.contains_key("base_directory");
     let expected_fields = if is_failure {
         &[
+            "schema_version",
+            "kind",
             "selection_index",
             "source",
             "selection_path",
+            "base_directory",
             "input_list_entry_index",
             "input_list_entry_path",
+            "discovered_directory",
+            "discovered_relative_path",
             "requested_path",
             "failure_code",
             "phase",
         ][..]
     } else {
         &[
+            "schema_version",
+            "kind",
             "selection_index",
             "source",
             "selection_path",
+            "base_directory",
             "input_list_entry_index",
             "input_list_entry_path",
             "discovered_directory",
@@ -2042,17 +2053,17 @@ fn parse_retry_selection(
     if !expected_fields
         .iter()
         .all(|field| object.contains_key(*field))
-        || object.len()
-            != expected_fields.len()
-                + usize::from(has_split_qualification)
-                + usize::from(has_base_directory)
+        || object.len() != expected_fields.len() + usize::from(has_split_qualification)
         || (is_failure && has_split_qualification)
     {
         return Err(HistoryError::UnsupportedFailedItems);
     }
     let selection: FailedItemsRetrySelectionRecord =
         serde_json::from_value(value.clone()).map_err(|_| HistoryError::UnsupportedFailedItems)?;
-    if selection.selection_path.as_os_str().is_empty()
+    if selection.schema_version
+        != crate::standalone::history::COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION
+        || selection.kind != crate::standalone::history::COPY_BATCH_ITEM_PROVENANCE_KIND
+        || selection.selection_path.as_os_str().is_empty()
         || selection.input_list_entry_index.is_some() != selection.input_list_entry_path.is_some()
         || (selection.source == FailedItemsRetrySelectionSource::Path
             && (selection.input_list_entry_index.is_some()
@@ -2083,10 +2094,7 @@ fn validate_retry_selection_paths(
     let base_directory = match selection.base_directory.as_deref() {
         Some(base) if base.is_absolute() => base,
         Some(_) => return Err(HistoryError::UnsupportedFailedItems),
-        None if selection.source == FailedItemsRetrySelectionSource::InputList => {
-            return Err(HistoryError::UnsupportedFailedItems);
-        }
-        None => invocation_cwd,
+        None => return Err(HistoryError::UnsupportedFailedItems),
     };
     let selected_path = anchored_retry_path(base_directory, &selection.selection_path);
     let list_parent = selected_path

@@ -130,6 +130,8 @@ struct HistoryMessages {
     show: String,
     show_item: String,
     terminal_not_recorded: String,
+    independent_batch_source: String,
+    not_assigned: String,
     clear_result: String,
     unknown_state: String,
     states: HashMap<String, String>,
@@ -185,6 +187,11 @@ pub(crate) fn copy_batch_result(result: &CopyBatchResult) -> String {
         .iter()
         .filter(|item| item.state() == CopyBatchItemState::Cancelled)
         .count();
+    let not_started = result
+        .items()
+        .iter()
+        .filter(|item| item.state() == CopyBatchItemState::NotStarted)
+        .count();
     let messages = copy_messages();
     let template = match result.state() {
         JobState::Succeeded => &messages.batch_succeeded,
@@ -197,6 +204,7 @@ pub(crate) fn copy_batch_result(result: &CopyBatchResult) -> String {
     let item_label = copy_batch_item_label(total_items, messages);
     let succeeded = succeeded.to_string();
     let failed = failed.to_string();
+    let not_started = not_started.to_string();
     let cancelled = cancelled.to_string();
     interpolate(
         template,
@@ -205,6 +213,7 @@ pub(crate) fn copy_batch_result(result: &CopyBatchResult) -> String {
             ("item_label", item_label),
             ("succeeded", succeeded.as_str()),
             ("failed", failed.as_str()),
+            ("not_started", not_started.as_str()),
             ("cancelled", cancelled.as_str()),
         ],
     )
@@ -282,7 +291,12 @@ pub(crate) fn jobs_show(job: &JobDetail) -> String {
             ("state", state),
             ("admitted_at", &job.admitted_at),
             ("terminal_at", terminal),
-            ("source", job.source.as_deref().unwrap_or("")),
+            (
+                "source",
+                job.source
+                    .as_deref()
+                    .unwrap_or(&messages.independent_batch_source),
+            ),
             ("destination", &job.destination),
             ("workspace", &job.workspace),
         ],
@@ -291,15 +305,18 @@ pub(crate) fn jobs_show(job: &JobDetail) -> String {
 
 /// Formats one human Job-history item without exposing its stored state token.
 pub(crate) fn jobs_show_item(item: &JobItem) -> String {
+    let messages = history_messages();
     interpolate(
-        &history_messages().show_item,
+        &messages.show_item,
         &[
             ("item_key", &item.item_key),
             ("state", history_state_label(&item.state)),
             ("source", &item.source),
             (
                 "destination",
-                item.destination.as_deref().unwrap_or("Not assigned"),
+                item.destination
+                    .as_deref()
+                    .unwrap_or(&messages.not_assigned),
             ),
         ],
     )
@@ -916,6 +933,12 @@ mod tests {
             super::copy_history_error("job_history_unavailable"),
             "The standalone Job history could not be updated. The reported operation result and filesystem evidence remain unchanged; inspect them before retrying."
         );
+        let messages = super::history_messages();
+        assert_eq!(
+            messages.independent_batch_source,
+            "Independent batch (item sources below)"
+        );
+        assert_eq!(messages.not_assigned, "Not assigned");
     }
 
     #[test]

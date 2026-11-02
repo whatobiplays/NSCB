@@ -749,6 +749,18 @@ PRAGMA user_version = 4;"#,
             serde_json::to_string(&legacy_intent).map_err(|_| HistoryError::MigrationFailed)?;
         let legacy_intent_schema_version = i64::try_from(legacy_intent.schema_version)
             .map_err(|_| HistoryError::MigrationFailed)?;
+        let legacy_item_provenance =
+            serde_json::to_string(&super::model::legacy_unqualified_item_provenance())
+                .map_err(|_| HistoryError::MigrationFailed)?;
+        transaction
+            .execute(
+                "UPDATE job_items SET provenance_json = ?1
+                 WHERE job_id IN (
+                     SELECT job_id FROM jobs WHERE submission_kind = 'independent_batch'
+                 )",
+                [&legacy_item_provenance],
+            )
+            .map_err(|_| HistoryError::MigrationFailed)?;
         transaction
             .execute(
                 "INSERT INTO batch_source_intents
@@ -1160,6 +1172,10 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 /// Validates a database before opening it through `HistoryStore`.
 ///
+/// Version 3 databases may have registry `ready = 0` while pending or
+/// `ready = 1` after finalization. Both states must contain the complete v3
+/// schema and exactly one registry row.
+///
 /// A version 4 database with registry `ready = 0` is the durable state after
 /// the final migration transaction commits and before finalization. Accepting
 /// only the complete current schema in that state lets the store resume the
@@ -1220,7 +1236,7 @@ fn verify_database_health_state(
             if application_id != APPLICATION_ID {
                 return Err(HistoryError::Corrupt);
             }
-            validate_v3_schema(connection, false)
+            validate_v3_schema(connection, true)
         }
         4 => {
             if application_id != APPLICATION_ID {
@@ -1405,6 +1421,7 @@ const V4_REQUIRED_COLUMNS: &[(&str, &[&str])] = &[
             "kind",
             "source",
             "destination",
+            "destination_assigned",
             "state",
             "outcome",
             "failure_code",
@@ -1452,6 +1469,33 @@ const V4_REQUIRED_COLUMNS: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+#[derive(Clone, Copy)]
+struct RequiredColumnDefinition {
+    table: &'static str,
+    column: &'static str,
+    declared_type: &'static str,
+    not_null: bool,
+    default_value: Option<&'static str>,
+}
+
+const V4_REQUIRED_COLUMN_DEFINITIONS: &[RequiredColumnDefinition] = &[
+    RequiredColumnDefinition {
+        table: "job_items",
+        column: "destination",
+        declared_type: "TEXT",
+        not_null: true,
+        default_value: None,
+    },
+    RequiredColumnDefinition {
+        table: "job_items",
+        column: "destination_assigned",
+        declared_type: "INTEGER",
+        not_null: true,
+        default_value: Some("1"),
+    },
+];
+
 const V4_REQUIRED_TABLES: &[&str] = &[
     "jobs",
     "job_items",
@@ -1464,9 +1508,13 @@ const V4_REQUIRED_TABLES: &[&str] = &[
     "batch_item_checkpoints",
 ];
 
-fn validate_v3_schema(connection: &Connection, require_ready: bool) -> Result<(), HistoryError> {
+fn validate_v3_schema(connection: &Connection, allow_finalized: bool) -> Result<(), HistoryError> {
     validate_required_columns(connection, V3_REQUIRED_TABLES, V3_REQUIRED_COLUMNS)?;
-    validate_registry_ready(connection, require_ready)
+    if allow_finalized {
+        validate_registry_row(connection).map(|_| ())
+    } else {
+        validate_registry_ready(connection, false)
+    }
 }
 
 fn validate_current_schema(
@@ -1482,6 +1530,14 @@ fn validate_registry_ready(
     connection: &Connection,
     require_ready: bool,
 ) -> Result<(), HistoryError> {
+    let registry_state = validate_registry_row(connection)?;
+    if (require_ready && registry_state != 1) || (!require_ready && registry_state != 0) {
+        return Err(HistoryError::Corrupt);
+    }
+    Ok(())
+}
+
+fn validate_registry_row(connection: &Connection) -> Result<i64, HistoryError> {
     let registry_state = connection
         .query_row(
             "SELECT ready FROM history_registry WHERE singleton = 1",
@@ -1494,13 +1550,10 @@ fn validate_registry_ready(
             row.get::<_, i64>(0)
         })
         .map_err(|_| HistoryError::Corrupt)?;
-    if registry_rows != 1
-        || (require_ready && registry_state != 1)
-        || (!require_ready && registry_state != 0)
-    {
+    if registry_rows != 1 || !matches!(registry_state, 0 | 1) {
         return Err(HistoryError::Corrupt);
     }
-    Ok(())
+    Ok(registry_state)
 }
 
 fn validate_required_columns(
@@ -1591,6 +1644,10 @@ const V4_REQUIRED_CHECKS: &[(&str, &str)] = &[
     (
         "jobs",
         "( (submission_kind = 'single' and source is not null) or (submission_kind = 'independent_batch' and source is null) )",
+    ),
+    (
+        "job_items",
+        "( (destination_assigned = 1 AND length(destination) > 0) OR (destination_assigned = 0 AND destination = '') )",
     ),
     ("batch_intents", "(schema_version = 1)"),
     ("batch_intents", "(kind = 'nscb.copy_batch_intent')"),
@@ -1698,11 +1755,51 @@ const V4_REQUIRED_FOREIGN_KEYS: &[ForeignKeyRequirement] = &[
 ];
 
 fn validate_v4_integrity(connection: &Connection) -> Result<(), HistoryError> {
+    validate_required_column_definitions(connection, V4_REQUIRED_COLUMN_DEFINITIONS)?;
     validate_required_sqlite_definitions(connection, "index", V4_REQUIRED_INDEXES)?;
     validate_required_sqlite_definitions(connection, "trigger", V4_REQUIRED_TRIGGERS)?;
     validate_required_constraints(connection)?;
     validate_required_foreign_keys(connection)?;
     validate_foreign_key_integrity(connection)
+}
+
+fn validate_required_column_definitions(
+    connection: &Connection,
+    required: &[RequiredColumnDefinition],
+) -> Result<(), HistoryError> {
+    for requirement in required {
+        let mut statement = connection
+            .prepare(&format!(
+                "PRAGMA table_info(\"{}\")",
+                requirement.table.replace('"', "\"\"")
+            ))
+            .map_err(|_| HistoryError::Corrupt)?;
+        let columns = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|_| HistoryError::Corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| HistoryError::Corrupt)?;
+        let Some((_, declared_type, not_null, default_value)) = columns
+            .into_iter()
+            .find(|(column, _, _, _)| column == requirement.column)
+        else {
+            return Err(HistoryError::Corrupt);
+        };
+        if !declared_type.eq_ignore_ascii_case(requirement.declared_type)
+            || (not_null != 0) != requirement.not_null
+            || default_value.as_deref() != requirement.default_value
+        {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    Ok(())
 }
 
 fn validate_required_sqlite_definitions(
@@ -1735,9 +1832,9 @@ fn validate_required_constraints(connection: &Connection) -> Result<(), HistoryE
                 |row| row.get::<_, String>(0),
             )
             .map_err(|_| HistoryError::Corrupt)?;
-        let normalized = normalize_sql_definition(&sql);
-        let required = normalize_sql_definition(&format!("check {expression}"));
-        if !normalized.contains(&required) {
+        let expected = tokenize_sql_expression(expression).ok_or(HistoryError::Corrupt)?;
+        let checks = table_check_expressions(&sql).ok_or(HistoryError::Corrupt)?;
+        if !checks.iter().any(|actual| actual == &expected) {
             return Err(HistoryError::Corrupt);
         }
     }
@@ -1754,6 +1851,119 @@ fn normalize_sql_definition(sql: &str) -> String {
         .replace(", ", ",")
         .trim_end_matches(';')
         .to_owned()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SqlToken {
+    Word(String),
+    QuotedIdentifier(String),
+    StringLiteral(String),
+    Symbol(char),
+}
+
+fn tokenize_sql_expression(sql: &str) -> Option<Vec<SqlToken>> {
+    let bytes = sql.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            byte if byte.is_ascii_whitespace() => index += 1,
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                loop {
+                    if index + 1 >= bytes.len() {
+                        return None;
+                    }
+                    if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            quote @ (b'\'' | b'"' | b'`' | b'[') => {
+                let closing = if quote == b'[' { b']' } else { quote };
+                let start = index + 1;
+                index = start;
+                loop {
+                    if index >= bytes.len() {
+                        return None;
+                    }
+                    if bytes[index] == closing {
+                        if bytes.get(index + 1) == Some(&closing) {
+                            index += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    index += 1;
+                }
+                let raw = String::from_utf8_lossy(&bytes[start..index]).into_owned();
+                tokens.push(if quote == b'\'' {
+                    SqlToken::StringLiteral(raw)
+                } else {
+                    SqlToken::QuotedIdentifier(raw.to_ascii_lowercase())
+                });
+                index += 1;
+            }
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') => {
+                let start = index;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'$'))
+                {
+                    index += 1;
+                }
+                tokens.push(SqlToken::Word(
+                    String::from_utf8_lossy(&bytes[start..index]).to_ascii_lowercase(),
+                ));
+            }
+            byte => {
+                tokens.push(SqlToken::Symbol(char::from(byte)));
+                index += 1;
+            }
+        }
+    }
+    Some(tokens)
+}
+
+fn table_check_expressions(sql: &str) -> Option<Vec<Vec<SqlToken>>> {
+    let tokens = tokenize_sql_expression(sql)?;
+    let mut checks = Vec::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] == SqlToken::Word("check".to_owned())
+            && matches!(tokens.get(index + 1), Some(SqlToken::Symbol('(')))
+        {
+            let start = index + 1;
+            let mut depth = 0usize;
+            let mut end = None;
+            for (offset, token) in tokens[start..].iter().enumerate() {
+                match token {
+                    SqlToken::Symbol('(') => depth += 1,
+                    SqlToken::Symbol(')') => {
+                        depth = depth.checked_sub(1)?;
+                        if depth == 0 {
+                            end = Some(start + offset);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let end = end?;
+            checks.push(tokens[start..=end].to_vec());
+            index = end + 1;
+        } else {
+            index += 1;
+        }
+    }
+    Some(checks)
 }
 
 fn validate_required_foreign_keys(connection: &Connection) -> Result<(), HistoryError> {

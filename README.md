@@ -164,7 +164,7 @@ The standalone CLI reads Split receipts from the state directory selected by the
 
 See [Input selection and resolution](docs/input-selection.md) for the Rust API, the additive resolve_inputs_with capability, JSON v1 qualification fields, relative-path bases, traversal and Split budgets, cancellation, state-directory rules, duplicate identity behavior, and the test-only issuance seam.
 
-Embedding hosts that need item-local resolver failures for an independent copy batch call `Engine::resolve_inputs_batch` or `Engine::resolve_inputs_batch_with`. The batch resolver keeps selection order and shares duplicate detection, traversal, input-list, segment, and Split-byte budgets across the request. An unavailable direct selection, an unavailable input-list file, or an empty selected directory becomes a failed batch entry. Malformed input-list content, duplicate identity, unsafe filesystem layout, resource limits, cancellation, and unsafe Split qualification failures reject the whole request.
+Embedding hosts that need item-local resolver failures for an independent copy batch call `Engine::resolve_inputs_batch` or `Engine::resolve_inputs_batch_with`. The batch resolver keeps selection order and shares duplicate detection, traversal, input-list, segment, and Split-byte budgets across the request. An unavailable ordinary direct path, an unavailable ordinary path named by a readable list, an empty input list, or an empty selected directory becomes a failed batch entry. An unavailable input-list file, malformed input-list content, a missing Split-like path, duplicate identity, unsafe filesystem layout, resource limits, cancellation, or unsafe, incomplete, or ambiguous Split qualification rejects the whole request.
 
 Split receipts are host-local. Preserve the store root and its sibling continuity file as a unit: a copied root without local continuity evidence, a rolled-back authority index, or a receipt from another store fails closed. Recover a lost store root with `LocalSplitTrustStore::restore_from_snapshot`, which runs under the store lock and preserves later local revocations. Issuance and revocation are lock-serialized and journaled before state files are replaced. Newly created directories are synchronized on Unix; Windows uses write-through file replacement, but ordering of newly created directories is not qualified there.
 
@@ -318,13 +318,13 @@ remain source selections. Each item uses its source basename in the output direc
 rejects duplicate inputs, case or normalization aliases, hard links to the same
 ordinary file, and destination basename collisions before creating a Job.
 Items execute sequentially through the same validated copy and publication
-core as `nscb copy`. A batch whose items all fail preflight also fails before
-admission. Unsafe, incomplete, or ambiguous Split qualification rejects the
+core as `nscb copy`. A batch whose items all fail preflight fails during
+planning, before admission. Unsafe, incomplete, or ambiguous Split qualification rejects the
 request. A qualified Split selection remains one item-local failure with
 `split_input_unsupported` because copy-through does not accept Split members.
 The embedded host passes that resolver evidence through
 `CopyBatchRequest::with_qualified_split_input_unsupported`; a forced Split
-failure without qualification evidence is rejected during admission.
+failure without qualification evidence is rejected during planning.
 
 Rust hosts receive semantic batch events in order through a nonblocking journal.
 Its fixed limit covers the start, two transitions for each admitted item, one
@@ -340,12 +340,14 @@ errors. Under `skip`, an existing destination with identical bytes produces
 an authoritative `already_up_to_date` result. Only a differing existing
 destination produces `skipped`. Both results leave the destination unchanged.
 A batch in which every item is skipped or already current succeeds with exit
-0. When a batch has failures, at least one copied or already-current item
-produces `completed_with_issues` and exit 8; skipped items do not count as
-successes. Failures without an actual success produce `failed` and the most
-severe item exit. Cancellation reports its own aggregate state.
-Internal execution or persistence failures take precedence over an ordinary
-per-item exit class.
+0. When failures accompany at least one copied or already-current item, it
+reports `completed_with_issues` and exits 8 unless an item has an internal
+failure, which exits 7. Failures without an actual success report `failed`; the
+CLI selects the highest-ranked aggregate or item failure exit: internal 7,
+cancellation 6, conflict 4, then input 3. Other mapped exits have rank 0, and a
+failed batch with no mapped failure exits 7. A cancelled batch exits 6 unless
+an internal item failure raises it to 7. Skipped items do not count as
+successes. A succeeded batch exits 0.
 
 `--json` emits one aggregate `job.result`. `--jsonl` emits bounded, ordered
 `job.event` records followed by exactly one aggregate `job.result`. Events

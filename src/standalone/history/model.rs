@@ -203,6 +203,20 @@ pub(crate) struct BatchSourceItemIntent {
     pub(crate) provenance: serde_json::Value,
 }
 
+/// Version tag for the per-item resolver evidence stored with a batch Job.
+pub(crate) const COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION: u64 = 1;
+pub(crate) const COPY_BATCH_ITEM_PROVENANCE_KIND: &str = "nscb.copy_batch_item_provenance";
+pub(crate) const LEGACY_UNQUALIFIED_ITEM_PROVENANCE_KIND: &str =
+    "nscb.legacy_unqualified_copy_batch_item_provenance";
+
+/// Marks pre-v4 batch items that lack enough evidence for exact retry.
+pub(crate) fn legacy_unqualified_item_provenance() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
+        "kind": LEGACY_UNQUALIFIED_ITEM_PROVENANCE_KIND,
+    })
+}
+
 impl BatchSourceIntent {
     const SCHEMA_VERSION: u64 = 1;
     const KIND: &'static str = "nscb.copy_batch_sources";
@@ -231,7 +245,7 @@ impl BatchSourceIntent {
                     || !item
                         .provenance
                         .as_ref()
-                        .is_some_and(serde_json::Value::is_object)
+                        .is_some_and(is_versioned_item_provenance)
                 {
                     return Err(HistoryError::AdmissionFailed);
                 }
@@ -272,7 +286,7 @@ impl BatchSourceIntent {
         self.items.iter().all(|item| {
             !item.item_key.is_empty()
                 && PathBuf::from(&item.source).is_absolute()
-                && item.provenance.is_object()
+                && is_versioned_item_provenance(&item.provenance)
                 && item_keys.insert(item.item_key.as_str())
         })
     }
@@ -287,6 +301,48 @@ impl BatchSourceIntent {
                     && item.provenance.as_ref() == Some(&source_item.provenance)
             })
     }
+
+    /// Verifies the parent-v4 batch source shape for read-only inspection.
+    ///
+    /// Schema v4 originally required each item's provenance to be a JSON
+    /// object without requiring version tags. This compatibility check keeps
+    /// those records inspectable while leaving [`Self::matches_items`] as the
+    /// strict gate for retry and newly admitted batches.
+    pub(crate) fn matches_legacy_unversioned_items(&self, items: &[JobItem]) -> bool {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || self.kind != Self::KIND
+            || self.items.is_empty()
+            || self.items.len() != items.len()
+        {
+            return false;
+        }
+
+        let mut item_keys = HashSet::with_capacity(self.items.len());
+        self.items.iter().zip(items).all(|(source_item, item)| {
+            !source_item.item_key.is_empty()
+                && PathBuf::from(&source_item.source).is_absolute()
+                && is_legacy_unversioned_item_provenance(&source_item.provenance)
+                && item_keys.insert(source_item.item_key.as_str())
+                && item.item_key == source_item.item_key
+                && item.source == source_item.source
+                && item.provenance.as_ref() == Some(&source_item.provenance)
+        })
+    }
+}
+
+fn is_versioned_item_provenance(value: &serde_json::Value) -> bool {
+    value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION)
+        && value.get("kind").and_then(serde_json::Value::as_str)
+            == Some(COPY_BATCH_ITEM_PROVENANCE_KIND)
+}
+
+fn is_legacy_unversioned_item_provenance(value: &serde_json::Value) -> bool {
+    value.as_object().is_some_and(|provenance| {
+        !provenance.contains_key("schema_version") && !provenance.contains_key("kind")
+    })
 }
 
 /// Compile-time distinction between a single filesystem source and an

@@ -209,6 +209,55 @@ fn copy_batch_executes_independent_items_in_order_with_one_authoritative_result(
 
 #[cfg(target_os = "macos")]
 #[test]
+fn human_batch_job_source_is_explicit_while_machine_source_remains_null() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("output");
+    let workspace = root.path().join("workspace");
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(&first, b"first independent item").unwrap();
+    fs::write(&second, b"second independent item").unwrap();
+
+    let completed = command(&root)
+        .args(["copy-batch", "--output-dir"])
+        .arg(&output)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--json")
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+    assert_eq!(completed.status.code(), Some(0), "{completed:?}");
+    let document: Value = serde_json::from_slice(&completed.stdout).unwrap();
+    let job_id = document["job_id"].as_str().unwrap();
+
+    let machine = command(&root)
+        .args(["jobs", "show", job_id, "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(machine.status.code(), Some(0), "{machine:?}");
+    let machine: Value = serde_json::from_slice(&machine.stdout).unwrap();
+    assert_eq!(machine["result"]["job"]["source"], Value::Null);
+
+    let human = command(&root)
+        .args(["jobs", "show", job_id])
+        .output()
+        .unwrap();
+    assert_eq!(human.status.code(), Some(0), "{human:?}");
+    assert!(human.stderr.is_empty(), "{human:?}");
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(
+        human.contains("Source: Independent batch (item sources below)\n"),
+        "{human}"
+    );
+    assert!(human.contains("Item: "), "{human}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn copy_history_is_inspectable_after_the_copy_process_exits() {
     let root = tempfile::tempdir().unwrap();
     let (source, destination, workspace) = write_source(&root);

@@ -1,5 +1,5 @@
 {
-  "global_help": "Usage: nscb <command> [options]\n\nCommands:\n  probe <path>\n  recognize <path>\n  resolve\n  inspect <path>\n  verify <path>\n  copy <source> [destination]\n  copy-batch <source>... --output-dir <path>\n  jobs <list|show|retry|clear>\n  config <path|show|set|reset>\n  keys set <source>\n\nGlobal options:\n  -h, --help       Show this help without initializing configuration.\n  -V, --version    Show the NSCB version without initializing configuration.",
+  "global_help": "Usage: nscb <command> [options]\n\nCommands:\n  probe <path>\n  recognize <path>\n  resolve\n  inspect <path>\n  verify <path>\n  copy <source> [destination]\n  copy-batch <source>... [--input-list <path>]... --output-dir <path>\n  jobs <list|show|retry|clear>\n  config <path|show|set|reset>\n  keys set <source>\n\nGlobal options:\n  -h, --help       Show this help without initializing configuration.\n  -V, --version    Show the NSCB version without initializing configuration.",
   "global_version": "nscb {version}",
   "config_usage": "Usage: nscb config <path|show|set|reset> [--json]",
   "config_path": "Configuration file: {path}",
