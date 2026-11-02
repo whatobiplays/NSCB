@@ -244,7 +244,13 @@ planner is called. It delivers both signals through the real invocation guard,
 then verifies cancellation before staging, preservation of the typed error when
 planning fails, and isolation from later invocations. Other CLI tests pause at
 the plan-result handoff. Each barrier uses channel synchronization rather than
-timing sleeps. Planning I/O itself is not interruptible.
+timing sleeps. Batch resolution has a separate signal test that pauses after
+the invocation guard is installed, delivers SIGINT and SIGTERM separately, and
+checks the typed exit-6 cancellation error, unchanged output, and isolation from
+later invocations. A library unit test cancels between deterministic traversal
+entry checkpoints to cover cancellation during a directory scan without sleeps.
+Planning and filesystem I/O already in progress remain noninterruptible until the
+next check.
 
 The retained-verified-competitor case proves that an independently captured
 alias matching the earlier observation remains inventoried and counted after a
@@ -332,10 +338,11 @@ Executable job-reporting tests use prefilled macOS pipes whose readers stay
 open and unread. They check human, JSON, and JSONL output with stdout blocked,
 both streams blocked, stderr blocked during a human failure, broken pipes,
 cancellation, and unchanged filesystem outcomes. This subprocess evidence is
-separate from the in-process stalled-writer unit test. The five-second shared
-reporting budget begins immediately after Engine execution and operation-owned
-cleanup return. Tests allow a documented two-second scheduling margin; they do
-not claim a hard real-time exit or equivalent behavior on other operating
+separate from the in-process stalled-writer unit test. A read-only history
+observer sends `Terminalized` over a separate control pipe after it sees the
+copy outcome committed in SQLite. The test leaves stdout and stderr unread,
+waits for that signal, then calls `child.wait()` and checks the exit status.
+These subprocess tests run on macOS; they do not qualify other operating
 systems or sink drivers.
 
 ## Standalone Job history validation
@@ -346,6 +353,9 @@ Focused runs use the same toolchain:
 ```sh
 rustup run 1.98.1 cargo test --locked --features standalone-job-history --bin nscb standalone::history::tests
 rustup run 1.98.1 cargo test --locked --features standalone-job-history --test job_history_cli
+rustup run 1.98.1 cargo test --locked --features standalone-job-history --test copy_batch_cli
+rustup run 1.98.1 cargo test --locked --test operations batch_
+rustup run 1.98.1 cargo test --locked --test input_resolution batch_
 rustup run 1.98.1 cargo test --locked --features standalone-job-history --test config_cli
 rustup run 1.98.1 cargo test --locked --features standalone-job-history --test cli_subprocess
 make check-standalone-tests
@@ -468,8 +478,8 @@ be added to them.
 
 The `make test` and `make smoke` profiles set `RUST_TEST_THREADS=1` so
 subprocess timing assertions are measured without contention from other Rust
-tests; the five-second reporting budget and seven-second assertion remain
-unchanged.
+tests. The reporting budget remains independent of the eventual-exit guard used
+by the blocked-pipe process test.
 
 The history unit suite exercises schema creation, corruption and future-version
 rejection, pending-schema restart after migration, legacy live-lock migration,
@@ -490,16 +500,15 @@ different working directory, retry output transport failure, and clear with
 published-output, configuration, key, cache, workspace, and uncertain-artifact
 preservation.
 
-Under the amended Issue #12 acceptance contract,
-`jobs retry <id> --failed-items` returns a stable typed unsupported-execution
-error before Job admission. This candidate creates no Job for that request and
-does not fabricate a runnable batch or `CompletedWithIssues`. Executable
-failed-item retry belongs to Issue #13.
-
-ADR-0025’s retry-failed-items behavior remains a phased requirement. This Issue
-#12 candidate implements durable failed-item data, selection, eligibility
-validation, and the typed pre-admission unsupported-execution rejection;
-executable retry for `CompletedWithIssues` remains Issue #13.
+The Issue #13 candidate adds tests for all-skipped success, mixed success and
+failure, exact failed-item retry, fresh `fail`/`replace`/`skip` authorization,
+contradictory options, single-Copy retry with `skip`, destination name and
+identity collisions, shared resolver budgets, item-local preflight failures,
+ordered bounded events, cancellation, checkpoint failure, execution-time
+destination revalidation, v3-to-v4 migration, rollback, recovery, and malformed
+history intent. The failed-item path retries only persisted rows whose state is
+`failed`; it creates a fresh linked batch and leaves prior successful and
+skipped outputs untouched.
 
 History integration evidence is currently limited to the native macOS
 qualification host. On Unix, directory creation, lock opens, and database or

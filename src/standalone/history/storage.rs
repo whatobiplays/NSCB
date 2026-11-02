@@ -7,6 +7,7 @@ use fs2::FileExt;
 use rusqlite::ffi;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use std::collections::HashMap;
 #[cfg(unix)]
 use std::ffi::CString;
 #[cfg(not(unix))]
@@ -24,47 +25,254 @@ use std::path::{Path, PathBuf};
 pub(crate) fn create_schema(connection: &mut Connection) -> Result<(), HistoryError> {
     connection
         .execute_batch(&format!(
-            "BEGIN IMMEDIATE;\n\
-            PRAGMA application_id = {APPLICATION_ID};\n\
-             CREATE TABLE jobs (\n                job_id TEXT PRIMARY KEY,\n                parent_job_id TEXT,\n                kind TEXT NOT NULL,\n                submission_kind TEXT NOT NULL,\n                source TEXT NOT NULL,\n                invocation_cwd TEXT NOT NULL,\n                source_provenance TEXT NOT NULL,\n                destination TEXT NOT NULL,\n                destination_selection TEXT NOT NULL,\n                workspace TEXT NOT NULL,\n                workspace_selection TEXT NOT NULL,\n                conflict_policy TEXT NOT NULL,\n                conflict_policy_provenance TEXT NOT NULL,\n                parent_conflict_policy TEXT,\n                parent_conflict_policy_provenance TEXT,\n                retry_scope TEXT NOT NULL,\n                state TEXT NOT NULL,\n                admitted_at TEXT NOT NULL,\n                started_at TEXT,\n                terminal_at TEXT,\n                outcome TEXT,\n                failure_code TEXT,\n                cleanup_warning_code TEXT,\n                publication_state TEXT NOT NULL,\n                pruneable INTEGER NOT NULL DEFAULT 0,\n                required_providers_json TEXT NOT NULL DEFAULT '[]',\n                required_keys_json TEXT NOT NULL DEFAULT '[]',\n                result_json TEXT,\n                snapshot_json TEXT\n            );\n\
-             CREATE TABLE job_items (\n                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,\n                ordinal INTEGER NOT NULL,\n                item_key TEXT NOT NULL,\n                kind TEXT NOT NULL,\n                source TEXT NOT NULL,\n                destination TEXT NOT NULL,\n                state TEXT NOT NULL,\n                outcome TEXT,\n                failure_code TEXT,\n                evidence_json TEXT,\n                PRIMARY KEY (job_id, ordinal),\n                UNIQUE (job_id, item_key)\n            );\n\
-             CREATE TABLE job_artifacts (\n                job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,\n                ordinal INTEGER NOT NULL,\n                role TEXT NOT NULL,\n                path TEXT NOT NULL,\n                retained INTEGER NOT NULL,\n                identity_known INTEGER NOT NULL,\n                content_known INTEGER NOT NULL,\n                evidence_json TEXT NOT NULL,\n                PRIMARY KEY (job_id, ordinal)\n            );\n\
-             CREATE INDEX jobs_history_order\n                ON jobs(state, terminal_at DESC, admitted_at DESC, job_id DESC);\n\
-            CREATE INDEX jobs_parent ON jobs(parent_job_id);\n\
-            CREATE TABLE lease_slots (\n\
-                slot_id TEXT PRIMARY KEY,\n\
-                slot_key TEXT NOT NULL UNIQUE,\n\
-                ordinal INTEGER NOT NULL UNIQUE\n\
-            );\n\
-            CREATE TABLE job_lease_claims (\n\
-                claim_id TEXT PRIMARY KEY,\n\
-                job_id TEXT NOT NULL UNIQUE REFERENCES jobs(job_id) ON DELETE CASCADE,\n\
-                slot_id TEXT NOT NULL REFERENCES lease_slots(slot_id),\n\
-                claim_token TEXT NOT NULL UNIQUE,\n\
-                state TEXT NOT NULL CHECK (state IN ('outstanding', 'released', 'unresolved')),\n\
-                created_at TEXT NOT NULL,\n\
-                resolved_at TEXT,\n\
-                CHECK ((state = 'outstanding' AND resolved_at IS NULL)\n\
-                    OR (state IN ('released', 'unresolved') AND resolved_at IS NOT NULL))\n\
-            );\n\
-            CREATE UNIQUE INDEX job_lease_claims_blocking_slot\n\
-                ON job_lease_claims(slot_id) WHERE state != 'released';\n\
-            ALTER TABLE jobs ADD COLUMN lease_slot_id TEXT REFERENCES lease_slots(slot_id);\n\
-            CREATE INDEX jobs_lease_slot ON jobs(lease_slot_id);\n\
-            CREATE TABLE history_registry (\n\
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\n\
-                ready INTEGER NOT NULL CHECK (ready IN (0, 1))\n\
-            );\n\
-            INSERT INTO history_registry(singleton, ready) VALUES (1, 0);\n\
-            WITH RECURSIVE slot_ord(ordinal) AS (\n\
-                SELECT 0 UNION ALL\n\
-                SELECT ordinal + 1 FROM slot_ord WHERE ordinal + 1 < {LEASE_SLOT_COUNT}\n\
-            )\n\
-            INSERT INTO lease_slots(slot_id, slot_key, ordinal)\n\
-                SELECT lower(hex(randomblob(16))),\n\
-                    printf('lease-slot-%03d.lock', ordinal), ordinal\n\
-                FROM slot_ord;\n\
-             COMMIT;"
+            r#"BEGIN IMMEDIATE;
+PRAGMA application_id = {APPLICATION_ID};
+CREATE TABLE jobs (
+    job_id TEXT PRIMARY KEY,
+    parent_job_id TEXT,
+    kind TEXT NOT NULL,
+    submission_kind TEXT NOT NULL,
+    source TEXT,
+    invocation_cwd TEXT NOT NULL,
+    source_provenance TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    destination_selection TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    workspace_selection TEXT NOT NULL,
+    conflict_policy TEXT NOT NULL,
+    conflict_policy_provenance TEXT NOT NULL,
+    parent_conflict_policy TEXT,
+    parent_conflict_policy_provenance TEXT,
+    retry_scope TEXT NOT NULL,
+    state TEXT NOT NULL,
+    admitted_at TEXT NOT NULL,
+    started_at TEXT,
+    terminal_at TEXT,
+    outcome TEXT,
+    failure_code TEXT,
+    cleanup_warning_code TEXT,
+    publication_state TEXT NOT NULL,
+    pruneable INTEGER NOT NULL DEFAULT 0,
+    required_providers_json TEXT NOT NULL DEFAULT '[]',
+    required_keys_json TEXT NOT NULL DEFAULT '[]',
+    result_json TEXT,
+    snapshot_json TEXT,
+    CONSTRAINT jobs_source_submission_contract CHECK (
+        (submission_kind = 'single' AND source IS NOT NULL)
+        OR (submission_kind = 'independent_batch' AND source IS NULL)
+    )
+);
+CREATE TABLE job_items (
+    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL,
+    item_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    destination_assigned INTEGER NOT NULL DEFAULT 1
+        CONSTRAINT job_items_destination_representation CHECK (
+            (destination_assigned = 1 AND length(destination) > 0)
+            OR (destination_assigned = 0 AND destination = '')
+        ),
+    state TEXT NOT NULL,
+    outcome TEXT,
+    failure_code TEXT,
+    evidence_json TEXT,
+    provenance_json TEXT,
+    PRIMARY KEY (job_id, ordinal),
+    UNIQUE (job_id, item_key)
+);
+CREATE TABLE job_artifacts (
+    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    item_key TEXT,
+    ordinal INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    path TEXT NOT NULL,
+    retained INTEGER NOT NULL,
+    identity_known INTEGER NOT NULL,
+    content_known INTEGER NOT NULL,
+    evidence_json TEXT NOT NULL,
+    PRIMARY KEY (job_id, ordinal),
+    FOREIGN KEY (job_id, item_key)
+        REFERENCES job_items(job_id, item_key) ON DELETE CASCADE
+);
+CREATE INDEX job_artifacts_item_owner ON job_artifacts(job_id, item_key);
+CREATE TABLE batch_intents (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL
+        CONSTRAINT batch_intents_schema_version CHECK (schema_version = 1),
+    kind TEXT NOT NULL
+        CONSTRAINT batch_intents_kind CHECK (kind = 'nscb.copy_batch_intent'),
+    intent_json TEXT NOT NULL
+        CONSTRAINT batch_intents_payload CHECK (length(intent_json) > 0)
+);
+CREATE TABLE batch_source_intents (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL
+        CONSTRAINT batch_source_intents_schema_version CHECK (schema_version = 1),
+    kind TEXT NOT NULL
+        CONSTRAINT batch_source_intents_kind CHECK (
+            kind IN ('nscb.copy_batch_sources', 'nscb.legacy_unqualified_batch_sources')
+        ),
+    intent_json TEXT NOT NULL
+        CONSTRAINT batch_source_intents_payload CHECK (length(intent_json) > 0)
+);
+CREATE TABLE batch_item_checkpoints (
+    job_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    sequence INTEGER NOT NULL
+        CONSTRAINT batch_item_checkpoints_sequence CHECK (sequence >= 0),
+    item_state TEXT NOT NULL
+        CONSTRAINT batch_item_checkpoints_state CHECK (item_state IN (
+            'preflight_failed', 'succeeded', 'skipped', 'failed',
+            'uncertain', 'cancelled', 'not_started'
+        )),
+    outcome TEXT,
+    failure_code TEXT,
+    publication_state TEXT NOT NULL
+        CONSTRAINT batch_item_checkpoints_publication CHECK (publication_state IN (
+            'not_completed', 'completed', 'published_unresolved', 'uncertain', 'unknown'
+        )),
+    evidence_json TEXT NOT NULL
+        CONSTRAINT batch_item_checkpoints_payload CHECK (length(evidence_json) > 0),
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, item_key),
+    UNIQUE (job_id, sequence),
+    FOREIGN KEY (job_id, item_key)
+        REFERENCES job_items(job_id, item_key) ON DELETE CASCADE
+);
+CREATE TRIGGER independent_batch_intent_on_terminal
+BEFORE UPDATE OF state ON jobs
+WHEN NEW.submission_kind = 'independent_batch'
+  AND NEW.state IN ('succeeded', 'completed_with_issues', 'failed', 'cancelled')
+  AND NOT EXISTS (SELECT 1 FROM batch_intents WHERE job_id = NEW.job_id)
+BEGIN
+    SELECT RAISE(ABORT, 'independent batch intent missing');
+END;
+CREATE TRIGGER batch_intent_owner_on_insert
+BEFORE INSERT ON batch_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch intent owner is not an independent batch');
+END;
+CREATE TRIGGER batch_intent_owner_on_update
+BEFORE UPDATE OF job_id ON batch_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch intent owner is not an independent batch');
+END;
+CREATE TRIGGER job_batch_intent_owner_on_update
+BEFORE UPDATE OF submission_kind ON jobs
+WHEN NEW.submission_kind = 'single'
+  AND (
+      EXISTS (SELECT 1 FROM batch_intents WHERE job_id = NEW.job_id)
+      OR EXISTS (SELECT 1 FROM batch_source_intents WHERE job_id = NEW.job_id)
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'single job cannot own a batch intent');
+END;
+CREATE TRIGGER independent_batch_source_intent_on_terminal
+BEFORE UPDATE OF state ON jobs
+WHEN NEW.submission_kind = 'independent_batch'
+  AND NEW.state IN ('succeeded', 'completed_with_issues', 'failed', 'cancelled')
+  AND NOT EXISTS (SELECT 1 FROM batch_source_intents WHERE job_id = NEW.job_id)
+BEGIN
+    SELECT RAISE(ABORT, 'independent batch source intent missing');
+END;
+CREATE TRIGGER batch_source_intent_owner_on_insert
+BEFORE INSERT ON batch_source_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch source intent owner is not an independent batch');
+END;
+CREATE TRIGGER batch_source_intent_owner_on_update
+BEFORE UPDATE OF job_id ON batch_source_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch source intent owner is not an independent batch');
+END;
+CREATE TRIGGER batch_artifact_owner_on_insert
+BEFORE INSERT ON job_artifacts
+WHEN (
+    NEW.item_key IS NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        = 'independent_batch'
+) OR (
+    NEW.item_key IS NOT NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        != 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact owner does not match the Job submission kind');
+END;
+CREATE TRIGGER batch_artifact_owner_on_update
+BEFORE UPDATE OF job_id, item_key ON job_artifacts
+WHEN (
+    NEW.item_key IS NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        = 'independent_batch'
+) OR (
+    NEW.item_key IS NOT NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        != 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact owner does not match the Job submission kind');
+END;
+CREATE INDEX jobs_history_order
+    ON jobs(state, terminal_at DESC, admitted_at DESC, job_id DESC);
+CREATE INDEX jobs_parent ON jobs(parent_job_id);
+CREATE TABLE lease_slots (
+    slot_id TEXT PRIMARY KEY,
+    slot_key TEXT NOT NULL UNIQUE,
+    ordinal INTEGER NOT NULL UNIQUE
+);
+CREATE TABLE job_lease_claims (
+    claim_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL UNIQUE REFERENCES jobs(job_id) ON DELETE CASCADE,
+    slot_id TEXT NOT NULL REFERENCES lease_slots(slot_id),
+    claim_token TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL
+        CONSTRAINT job_lease_claims_state CHECK (state IN ('outstanding', 'released', 'unresolved')),
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    CONSTRAINT job_lease_claims_resolution CHECK (
+        (state = 'outstanding' AND resolved_at IS NULL)
+        OR (state IN ('released', 'unresolved') AND resolved_at IS NOT NULL)
+    )
+);
+CREATE UNIQUE INDEX job_lease_claims_blocking_slot
+    ON job_lease_claims(slot_id) WHERE state != 'released';
+ALTER TABLE jobs ADD COLUMN lease_slot_id TEXT REFERENCES lease_slots(slot_id);
+CREATE INDEX jobs_lease_slot ON jobs(lease_slot_id);
+CREATE TABLE history_registry (
+    singleton INTEGER PRIMARY KEY
+        CONSTRAINT history_registry_singleton CHECK (singleton = 1),
+    ready INTEGER NOT NULL
+        CONSTRAINT history_registry_ready CHECK (ready IN (0, 1))
+);
+INSERT INTO history_registry(singleton, ready) VALUES (1, 0);
+WITH RECURSIVE slot_ord(ordinal) AS (
+    SELECT 0 UNION ALL
+    SELECT ordinal + 1 FROM slot_ord WHERE ordinal + 1 < {LEASE_SLOT_COUNT}
+)
+INSERT INTO lease_slots(slot_id, slot_key, ordinal)
+SELECT lower(hex(randomblob(16))),
+       printf('lease-slot-%03d.lock', ordinal), ordinal
+FROM slot_ord;
+COMMIT;"#
         ))
         .map_err(|error| {
             #[cfg(test)]
@@ -264,6 +472,318 @@ pub(super) fn migrate_v2_to_v3_with_parent_sync(
     transaction
         .commit()
         .map_err(|_| HistoryError::MigrationFailed)
+}
+
+/// Adds independently admitted batch intent, source intent, and item-owned
+/// artifact evidence to a version 3 database.
+///
+/// The rebuild runs in one transaction after foreign-key enforcement is
+/// disabled outside that transaction. Every required relationship is checked
+/// before commit, and the prior enforcement state is restored on both success
+/// and failure. A recovery backup is created before schema changes commit.
+pub(crate) fn migrate_v3_to_v4(
+    connection: &mut Connection,
+    path: &Path,
+) -> Result<(), HistoryError> {
+    let foreign_keys_enabled = connection
+        .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
+        .map_err(|_| HistoryError::MigrationFailed)?;
+    if foreign_keys_enabled {
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .map_err(|_| HistoryError::MigrationFailed)?;
+        let disabled = connection
+            .pragma_query_value(None, "foreign_keys", |row| row.get::<_, bool>(0))
+            .map_err(|_| HistoryError::MigrationFailed)?;
+        if disabled {
+            return Err(HistoryError::MigrationFailed);
+        }
+    }
+
+    let migration = (|| {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|_| HistoryError::MigrationFailed)?;
+        create_recovery_backup(&transaction, path, 3)?;
+        transaction
+            .execute_batch(
+                r#"ALTER TABLE job_items ADD COLUMN provenance_json TEXT;
+ALTER TABLE job_items ADD COLUMN destination_assigned INTEGER NOT NULL DEFAULT 1
+    CONSTRAINT job_items_destination_representation CHECK (
+        (destination_assigned = 1 AND length(destination) > 0)
+        OR (destination_assigned = 0 AND destination = '')
+    );
+CREATE TABLE jobs_v4 (
+    job_id TEXT PRIMARY KEY,
+    parent_job_id TEXT,
+    kind TEXT NOT NULL,
+    submission_kind TEXT NOT NULL,
+    source TEXT,
+    invocation_cwd TEXT,
+    source_provenance TEXT NOT NULL,
+    destination TEXT NOT NULL,
+    destination_selection TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    workspace_selection TEXT NOT NULL,
+    conflict_policy TEXT NOT NULL,
+    conflict_policy_provenance TEXT NOT NULL,
+    parent_conflict_policy TEXT,
+    parent_conflict_policy_provenance TEXT,
+    retry_scope TEXT NOT NULL,
+    state TEXT NOT NULL,
+    admitted_at TEXT NOT NULL,
+    started_at TEXT,
+    terminal_at TEXT,
+    outcome TEXT,
+    failure_code TEXT,
+    cleanup_warning_code TEXT,
+    publication_state TEXT NOT NULL,
+    pruneable INTEGER NOT NULL DEFAULT 0,
+    required_providers_json TEXT NOT NULL DEFAULT '[]',
+    required_keys_json TEXT NOT NULL DEFAULT '[]',
+    result_json TEXT,
+    snapshot_json TEXT,
+    lease_slot_id TEXT REFERENCES lease_slots(slot_id),
+    CONSTRAINT jobs_source_submission_contract CHECK (
+        (submission_kind = 'single' AND source IS NOT NULL)
+        OR (submission_kind = 'independent_batch' AND source IS NULL)
+    )
+);
+INSERT INTO jobs_v4 (
+    job_id, parent_job_id, kind, submission_kind, source, invocation_cwd,
+    source_provenance, destination, destination_selection, workspace,
+    workspace_selection, conflict_policy, conflict_policy_provenance,
+    parent_conflict_policy, parent_conflict_policy_provenance, retry_scope,
+    state, admitted_at, started_at, terminal_at, outcome, failure_code,
+    cleanup_warning_code, publication_state, pruneable,
+    required_providers_json, required_keys_json, result_json, snapshot_json,
+    lease_slot_id
+)
+SELECT
+    job_id, parent_job_id, kind, submission_kind,
+    CASE WHEN submission_kind = 'independent_batch' THEN NULL ELSE source END,
+    invocation_cwd, source_provenance, destination, destination_selection,
+    workspace, workspace_selection, conflict_policy,
+    conflict_policy_provenance, parent_conflict_policy,
+    parent_conflict_policy_provenance, retry_scope, state, admitted_at,
+    started_at, terminal_at, outcome, failure_code, cleanup_warning_code,
+    publication_state, pruneable, required_providers_json,
+    required_keys_json, result_json, snapshot_json, lease_slot_id
+FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v4 RENAME TO jobs;
+CREATE INDEX jobs_history_order
+    ON jobs(state, terminal_at DESC, admitted_at DESC, job_id DESC);
+CREATE INDEX jobs_parent ON jobs(parent_job_id);
+CREATE INDEX jobs_lease_slot ON jobs(lease_slot_id);
+CREATE TABLE job_artifacts_v4 (
+    job_id TEXT NOT NULL REFERENCES jobs(job_id) ON DELETE CASCADE,
+    item_key TEXT,
+    ordinal INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    path TEXT NOT NULL,
+    retained INTEGER NOT NULL,
+    identity_known INTEGER NOT NULL,
+    content_known INTEGER NOT NULL,
+    evidence_json TEXT NOT NULL,
+    PRIMARY KEY (job_id, ordinal),
+    FOREIGN KEY (job_id, item_key)
+        REFERENCES job_items(job_id, item_key) ON DELETE CASCADE
+);
+CREATE TABLE batch_intents (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL
+        CONSTRAINT batch_intents_schema_version CHECK (schema_version = 1),
+    kind TEXT NOT NULL
+        CONSTRAINT batch_intents_kind CHECK (kind = 'nscb.copy_batch_intent'),
+    intent_json TEXT NOT NULL
+        CONSTRAINT batch_intents_payload CHECK (length(intent_json) > 0)
+);
+INSERT INTO job_artifacts_v4 (
+    job_id, item_key, ordinal, role, path, retained, identity_known,
+    content_known, evidence_json
+)
+SELECT
+    job_id, NULL, ordinal, role, path, retained, identity_known,
+    content_known, evidence_json
+FROM job_artifacts;
+DROP TABLE job_artifacts;
+ALTER TABLE job_artifacts_v4 RENAME TO job_artifacts;
+CREATE INDEX job_artifacts_item_owner ON job_artifacts(job_id, item_key);
+CREATE TABLE batch_source_intents (
+    job_id TEXT PRIMARY KEY REFERENCES jobs(job_id) ON DELETE CASCADE,
+    schema_version INTEGER NOT NULL
+        CONSTRAINT batch_source_intents_schema_version CHECK (schema_version = 1),
+    kind TEXT NOT NULL
+        CONSTRAINT batch_source_intents_kind CHECK (
+            kind IN ('nscb.copy_batch_sources', 'nscb.legacy_unqualified_batch_sources')
+        ),
+    intent_json TEXT NOT NULL
+        CONSTRAINT batch_source_intents_payload CHECK (length(intent_json) > 0)
+);
+CREATE TABLE batch_item_checkpoints (
+    job_id TEXT NOT NULL,
+    item_key TEXT NOT NULL,
+    sequence INTEGER NOT NULL
+        CONSTRAINT batch_item_checkpoints_sequence CHECK (sequence >= 0),
+    item_state TEXT NOT NULL
+        CONSTRAINT batch_item_checkpoints_state CHECK (item_state IN (
+            'preflight_failed', 'succeeded', 'skipped', 'failed',
+            'uncertain', 'cancelled', 'not_started'
+        )),
+    outcome TEXT,
+    failure_code TEXT,
+    publication_state TEXT NOT NULL
+        CONSTRAINT batch_item_checkpoints_publication CHECK (publication_state IN (
+            'not_completed', 'completed', 'published_unresolved', 'uncertain', 'unknown'
+        )),
+    evidence_json TEXT NOT NULL
+        CONSTRAINT batch_item_checkpoints_payload CHECK (length(evidence_json) > 0),
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (job_id, item_key),
+    UNIQUE (job_id, sequence),
+    FOREIGN KEY (job_id, item_key)
+        REFERENCES job_items(job_id, item_key) ON DELETE CASCADE
+);
+CREATE TRIGGER independent_batch_intent_on_terminal
+BEFORE UPDATE OF state ON jobs
+WHEN NEW.submission_kind = 'independent_batch'
+  AND NEW.state IN ('succeeded', 'completed_with_issues', 'failed', 'cancelled')
+  AND NOT EXISTS (SELECT 1 FROM batch_intents WHERE job_id = NEW.job_id)
+BEGIN
+    SELECT RAISE(ABORT, 'independent batch intent missing');
+END;
+CREATE TRIGGER batch_intent_owner_on_insert
+BEFORE INSERT ON batch_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch intent owner is not an independent batch');
+END;
+CREATE TRIGGER batch_intent_owner_on_update
+BEFORE UPDATE OF job_id ON batch_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch intent owner is not an independent batch');
+END;
+CREATE TRIGGER job_batch_intent_owner_on_update
+BEFORE UPDATE OF submission_kind ON jobs
+WHEN NEW.submission_kind = 'single'
+  AND (
+      EXISTS (SELECT 1 FROM batch_intents WHERE job_id = NEW.job_id)
+      OR EXISTS (SELECT 1 FROM batch_source_intents WHERE job_id = NEW.job_id)
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'single job cannot own a batch intent');
+END;
+CREATE TRIGGER independent_batch_source_intent_on_terminal
+BEFORE UPDATE OF state ON jobs
+WHEN NEW.submission_kind = 'independent_batch'
+  AND NEW.state IN ('succeeded', 'completed_with_issues', 'failed', 'cancelled')
+  AND NOT EXISTS (SELECT 1 FROM batch_source_intents WHERE job_id = NEW.job_id)
+BEGIN
+    SELECT RAISE(ABORT, 'independent batch source intent missing');
+END;
+CREATE TRIGGER batch_source_intent_owner_on_insert
+BEFORE INSERT ON batch_source_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch source intent owner is not an independent batch');
+END;
+CREATE TRIGGER batch_source_intent_owner_on_update
+BEFORE UPDATE OF job_id ON batch_source_intents
+WHEN NOT EXISTS (
+    SELECT 1 FROM jobs
+    WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'batch source intent owner is not an independent batch');
+END;
+CREATE TRIGGER batch_artifact_owner_on_insert
+BEFORE INSERT ON job_artifacts
+WHEN (
+    NEW.item_key IS NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        = 'independent_batch'
+) OR (
+    NEW.item_key IS NOT NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        != 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact owner does not match the Job submission kind');
+END;
+CREATE TRIGGER batch_artifact_owner_on_update
+BEFORE UPDATE OF job_id, item_key ON job_artifacts
+WHEN (
+    NEW.item_key IS NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        = 'independent_batch'
+) OR (
+    NEW.item_key IS NOT NULL
+    AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '')
+        != 'independent_batch'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'artifact owner does not match the Job submission kind');
+END;
+PRAGMA user_version = 4;"#,
+            )
+            .map_err(|error| {
+                #[cfg(test)]
+                eprintln!("history v3 migration failed: {error}");
+                #[cfg(not(test))]
+                let _ = error;
+                HistoryError::MigrationFailed
+            })?;
+        let legacy_intent = super::model::BatchSourceIntent::legacy_incomplete();
+        let legacy_intent_json =
+            serde_json::to_string(&legacy_intent).map_err(|_| HistoryError::MigrationFailed)?;
+        let legacy_intent_schema_version = i64::try_from(legacy_intent.schema_version)
+            .map_err(|_| HistoryError::MigrationFailed)?;
+        transaction
+            .execute(
+                "INSERT INTO batch_source_intents
+                     (job_id, schema_version, kind, intent_json)
+                 SELECT job_id, ?1, ?2, ?3 FROM jobs
+                 WHERE submission_kind = 'independent_batch'",
+                rusqlite::params![
+                    legacy_intent_schema_version,
+                    legacy_intent.kind,
+                    legacy_intent_json
+                ],
+            )
+            .map_err(|_| HistoryError::MigrationFailed)?;
+        validate_foreign_key_integrity(&transaction).map_err(|_| HistoryError::MigrationFailed)?;
+        #[cfg(test)]
+        if let Some(marker) = std::env::var_os("NSCB_TEST_V3_MIGRATION_DDL_REACHED") {
+            std::fs::write(marker, b"ddl-applied")
+                .expect("test migration crash marker could not be written");
+            loop {
+                std::thread::park();
+            }
+        }
+        transaction
+            .commit()
+            .map_err(|_| HistoryError::MigrationFailed)
+    })();
+
+    if foreign_keys_enabled
+        && connection
+            .execute_batch("PRAGMA foreign_keys = ON")
+            .is_err()
+    {
+        return Err(HistoryError::MigrationFailed);
+    }
+    migration
 }
 
 fn acquire_legacy_active_job_locks(
@@ -638,7 +1158,24 @@ fn encode_hex(bytes: &[u8]) -> String {
     encoded
 }
 
+/// Validates a database before opening it through `HistoryStore`.
+///
+/// A version 4 database with registry `ready = 0` is the durable state after
+/// the final migration transaction commits and before finalization. Accepting
+/// only the complete current schema in that state lets the store resume the
+/// interrupted finalization without admitting partially migrated databases.
+pub(crate) fn verify_database_health_for_open(connection: &Connection) -> Result<(), HistoryError> {
+    verify_database_health_state(connection, true)
+}
+
 pub(crate) fn verify_database_health(connection: &Connection) -> Result<(), HistoryError> {
+    verify_database_health_state(connection, false)
+}
+
+fn verify_database_health_state(
+    connection: &Connection,
+    allow_pending_finalization: bool,
+) -> Result<(), HistoryError> {
     let result = connection
         .query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0))
         .map_err(|_| HistoryError::Corrupt)?;
@@ -674,7 +1211,7 @@ pub(crate) fn verify_database_health(connection: &Connection) -> Result<(), Hist
                 return Err(HistoryError::Corrupt);
             }
             if database_has_table(connection, "history_registry")? {
-                validate_current_schema(connection, false)
+                validate_v3_schema(connection, false)
             } else {
                 validate_required_columns(connection, V2_REQUIRED_TABLES, V2_REQUIRED_COLUMNS)
             }
@@ -682,6 +1219,24 @@ pub(crate) fn verify_database_health(connection: &Connection) -> Result<(), Hist
         3 => {
             if application_id != APPLICATION_ID {
                 return Err(HistoryError::Corrupt);
+            }
+            validate_v3_schema(connection, false)
+        }
+        4 => {
+            if application_id != APPLICATION_ID {
+                return Err(HistoryError::Corrupt);
+            }
+            if allow_pending_finalization
+                && connection
+                    .query_row(
+                        "SELECT ready FROM history_registry WHERE singleton = 1",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|_| HistoryError::Corrupt)?
+                    == 0
+            {
+                return validate_current_schema(connection, false);
             }
             validate_current_schema(connection, true)
         }
@@ -839,11 +1394,94 @@ const V3_REQUIRED_TABLES: &[&str] = &[
     "history_registry",
 ];
 
+const V4_REQUIRED_COLUMNS: &[(&str, &[&str])] = &[
+    V3_REQUIRED_COLUMNS[0],
+    (
+        "job_items",
+        &[
+            "job_id",
+            "ordinal",
+            "item_key",
+            "kind",
+            "source",
+            "destination",
+            "state",
+            "outcome",
+            "failure_code",
+            "evidence_json",
+            "provenance_json",
+        ],
+    ),
+    (
+        "job_artifacts",
+        &[
+            "job_id",
+            "item_key",
+            "ordinal",
+            "role",
+            "path",
+            "retained",
+            "identity_known",
+            "content_known",
+            "evidence_json",
+        ],
+    ),
+    V3_REQUIRED_COLUMNS[3],
+    V3_REQUIRED_COLUMNS[4],
+    V3_REQUIRED_COLUMNS[5],
+    (
+        "batch_intents",
+        &["job_id", "schema_version", "kind", "intent_json"],
+    ),
+    (
+        "batch_source_intents",
+        &["job_id", "schema_version", "kind", "intent_json"],
+    ),
+    (
+        "batch_item_checkpoints",
+        &[
+            "job_id",
+            "item_key",
+            "sequence",
+            "item_state",
+            "outcome",
+            "failure_code",
+            "publication_state",
+            "evidence_json",
+            "recorded_at",
+        ],
+    ),
+];
+const V4_REQUIRED_TABLES: &[&str] = &[
+    "jobs",
+    "job_items",
+    "job_artifacts",
+    "lease_slots",
+    "job_lease_claims",
+    "history_registry",
+    "batch_intents",
+    "batch_source_intents",
+    "batch_item_checkpoints",
+];
+
+fn validate_v3_schema(connection: &Connection, require_ready: bool) -> Result<(), HistoryError> {
+    validate_required_columns(connection, V3_REQUIRED_TABLES, V3_REQUIRED_COLUMNS)?;
+    validate_registry_ready(connection, require_ready)
+}
+
 fn validate_current_schema(
     connection: &Connection,
     require_ready: bool,
 ) -> Result<(), HistoryError> {
-    validate_required_columns(connection, V3_REQUIRED_TABLES, V3_REQUIRED_COLUMNS)?;
+    validate_required_columns(connection, V4_REQUIRED_TABLES, V4_REQUIRED_COLUMNS)?;
+    validate_registry_ready(connection, require_ready)?;
+    validate_v4_integrity(connection)
+}
+
+fn validate_registry_ready(
+    connection: &Connection,
+    require_ready: bool,
+) -> Result<(), HistoryError> {
     let registry_state = connection
         .query_row(
             "SELECT ready FROM history_registry WHERE singleton = 1",
@@ -883,6 +1521,302 @@ fn validate_required_columns(
         {
             return Err(HistoryError::Corrupt);
         }
+    }
+    Ok(())
+}
+
+const V4_REQUIRED_INDEXES: &[(&str, &str)] = &[
+    (
+        "job_artifacts_item_owner",
+        "CREATE INDEX job_artifacts_item_owner ON job_artifacts(job_id, item_key)",
+    ),
+    (
+        "jobs_history_order",
+        "CREATE INDEX jobs_history_order ON jobs(state, terminal_at DESC, admitted_at DESC, job_id DESC)",
+    ),
+    (
+        "jobs_parent",
+        "CREATE INDEX jobs_parent ON jobs(parent_job_id)",
+    ),
+    (
+        "job_lease_claims_blocking_slot",
+        "CREATE UNIQUE INDEX job_lease_claims_blocking_slot ON job_lease_claims(slot_id) WHERE state != 'released'",
+    ),
+    (
+        "jobs_lease_slot",
+        "CREATE INDEX jobs_lease_slot ON jobs(lease_slot_id)",
+    ),
+];
+
+const V4_REQUIRED_TRIGGERS: &[(&str, &str)] = &[
+    (
+        "independent_batch_intent_on_terminal",
+        "CREATE TRIGGER independent_batch_intent_on_terminal BEFORE UPDATE OF state ON jobs WHEN NEW.submission_kind = 'independent_batch' AND NEW.state IN ('succeeded', 'completed_with_issues', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM batch_intents WHERE job_id = NEW.job_id) BEGIN SELECT RAISE(ABORT, 'independent batch intent missing'); END",
+    ),
+    (
+        "batch_intent_owner_on_insert",
+        "CREATE TRIGGER batch_intent_owner_on_insert BEFORE INSERT ON batch_intents WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch') BEGIN SELECT RAISE(ABORT, 'batch intent owner is not an independent batch'); END",
+    ),
+    (
+        "batch_intent_owner_on_update",
+        "CREATE TRIGGER batch_intent_owner_on_update BEFORE UPDATE OF job_id ON batch_intents WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch') BEGIN SELECT RAISE(ABORT, 'batch intent owner is not an independent batch'); END",
+    ),
+    (
+        "job_batch_intent_owner_on_update",
+        "CREATE TRIGGER job_batch_intent_owner_on_update BEFORE UPDATE OF submission_kind ON jobs WHEN NEW.submission_kind = 'single' AND (EXISTS (SELECT 1 FROM batch_intents WHERE job_id = NEW.job_id) OR EXISTS (SELECT 1 FROM batch_source_intents WHERE job_id = NEW.job_id)) BEGIN SELECT RAISE(ABORT, 'single job cannot own a batch intent'); END",
+    ),
+    (
+        "independent_batch_source_intent_on_terminal",
+        "CREATE TRIGGER independent_batch_source_intent_on_terminal BEFORE UPDATE OF state ON jobs WHEN NEW.submission_kind = 'independent_batch' AND NEW.state IN ('succeeded', 'completed_with_issues', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM batch_source_intents WHERE job_id = NEW.job_id) BEGIN SELECT RAISE(ABORT, 'independent batch source intent missing'); END",
+    ),
+    (
+        "batch_source_intent_owner_on_insert",
+        "CREATE TRIGGER batch_source_intent_owner_on_insert BEFORE INSERT ON batch_source_intents WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch') BEGIN SELECT RAISE(ABORT, 'batch source intent owner is not an independent batch'); END",
+    ),
+    (
+        "batch_source_intent_owner_on_update",
+        "CREATE TRIGGER batch_source_intent_owner_on_update BEFORE UPDATE OF job_id ON batch_source_intents WHEN NOT EXISTS (SELECT 1 FROM jobs WHERE job_id = NEW.job_id AND submission_kind = 'independent_batch') BEGIN SELECT RAISE(ABORT, 'batch source intent owner is not an independent batch'); END",
+    ),
+    (
+        "batch_artifact_owner_on_insert",
+        "CREATE TRIGGER batch_artifact_owner_on_insert BEFORE INSERT ON job_artifacts WHEN (NEW.item_key IS NULL AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '') = 'independent_batch') OR (NEW.item_key IS NOT NULL AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '') != 'independent_batch') BEGIN SELECT RAISE(ABORT, 'artifact owner does not match the Job submission kind'); END",
+    ),
+    (
+        "batch_artifact_owner_on_update",
+        "CREATE TRIGGER batch_artifact_owner_on_update BEFORE UPDATE OF job_id, item_key ON job_artifacts WHEN (NEW.item_key IS NULL AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '') = 'independent_batch') OR (NEW.item_key IS NOT NULL AND COALESCE((SELECT submission_kind FROM jobs WHERE job_id = NEW.job_id), '') != 'independent_batch') BEGIN SELECT RAISE(ABORT, 'artifact owner does not match the Job submission kind'); END",
+    ),
+];
+
+const V4_REQUIRED_CHECKS: &[(&str, &str)] = &[
+    (
+        "jobs",
+        "( (submission_kind = 'single' and source is not null) or (submission_kind = 'independent_batch' and source is null) )",
+    ),
+    ("batch_intents", "(schema_version = 1)"),
+    ("batch_intents", "(kind = 'nscb.copy_batch_intent')"),
+    ("batch_intents", "(length(intent_json) > 0)"),
+    ("batch_source_intents", "(schema_version = 1)"),
+    (
+        "batch_source_intents",
+        "(kind IN ('nscb.copy_batch_sources', 'nscb.legacy_unqualified_batch_sources'))",
+    ),
+    ("batch_source_intents", "(length(intent_json) > 0)"),
+    ("batch_item_checkpoints", "(sequence >= 0)"),
+    (
+        "batch_item_checkpoints",
+        "(item_state in ('preflight_failed', 'succeeded', 'skipped', 'failed', 'uncertain', 'cancelled', 'not_started'))",
+    ),
+    (
+        "batch_item_checkpoints",
+        "(publication_state in ('not_completed', 'completed', 'published_unresolved', 'uncertain', 'unknown'))",
+    ),
+    ("batch_item_checkpoints", "(length(evidence_json) > 0)"),
+    (
+        "job_lease_claims",
+        "(state in ('outstanding', 'released', 'unresolved'))",
+    ),
+    (
+        "job_lease_claims",
+        "( (state = 'outstanding' and resolved_at is null) or (state in ('released', 'unresolved') and resolved_at is not null) )",
+    ),
+    ("history_registry", "(singleton = 1)"),
+    ("history_registry", "(ready in (0, 1))"),
+];
+
+struct ForeignKeyRequirement {
+    child: &'static str,
+    parent: &'static str,
+    columns: &'static [&'static str],
+    parent_columns: &'static [&'static str],
+    on_delete: &'static str,
+}
+
+const V4_REQUIRED_FOREIGN_KEYS: &[ForeignKeyRequirement] = &[
+    ForeignKeyRequirement {
+        child: "job_items",
+        parent: "jobs",
+        columns: &["job_id"],
+        parent_columns: &["job_id"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "job_artifacts",
+        parent: "jobs",
+        columns: &["job_id"],
+        parent_columns: &["job_id"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "job_artifacts",
+        parent: "job_items",
+        columns: &["job_id", "item_key"],
+        parent_columns: &["job_id", "item_key"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "batch_intents",
+        parent: "jobs",
+        columns: &["job_id"],
+        parent_columns: &["job_id"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "batch_source_intents",
+        parent: "jobs",
+        columns: &["job_id"],
+        parent_columns: &["job_id"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "batch_item_checkpoints",
+        parent: "job_items",
+        columns: &["job_id", "item_key"],
+        parent_columns: &["job_id", "item_key"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "job_lease_claims",
+        parent: "jobs",
+        columns: &["job_id"],
+        parent_columns: &["job_id"],
+        on_delete: "CASCADE",
+    },
+    ForeignKeyRequirement {
+        child: "job_lease_claims",
+        parent: "lease_slots",
+        columns: &["slot_id"],
+        parent_columns: &["slot_id"],
+        on_delete: "NO ACTION",
+    },
+    ForeignKeyRequirement {
+        child: "jobs",
+        parent: "lease_slots",
+        columns: &["lease_slot_id"],
+        parent_columns: &["slot_id"],
+        on_delete: "NO ACTION",
+    },
+];
+
+fn validate_v4_integrity(connection: &Connection) -> Result<(), HistoryError> {
+    validate_required_sqlite_definitions(connection, "index", V4_REQUIRED_INDEXES)?;
+    validate_required_sqlite_definitions(connection, "trigger", V4_REQUIRED_TRIGGERS)?;
+    validate_required_constraints(connection)?;
+    validate_required_foreign_keys(connection)?;
+    validate_foreign_key_integrity(connection)
+}
+
+fn validate_required_sqlite_definitions(
+    connection: &Connection,
+    object_type: &str,
+    required: &[(&str, &str)],
+) -> Result<(), HistoryError> {
+    for (name, expected) in required {
+        let definition = connection
+            .query_row(
+                "SELECT COALESCE(sql, '') FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+                rusqlite::params![object_type, name],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| HistoryError::Corrupt)?;
+        if normalize_sql_definition(&definition) != normalize_sql_definition(expected) {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+fn validate_required_constraints(connection: &Connection) -> Result<(), HistoryError> {
+    for (table, expression) in V4_REQUIRED_CHECKS {
+        let sql = connection
+            .query_row(
+                "SELECT COALESCE(sql, '') FROM sqlite_schema
+                 WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|_| HistoryError::Corrupt)?;
+        let normalized = normalize_sql_definition(&sql);
+        let required = normalize_sql_definition(&format!("check {expression}"));
+        if !normalized.contains(&required) {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+fn normalize_sql_definition(sql: &str) -> String {
+    sql.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+        .replace("( ", "(")
+        .replace(" )", ")")
+        .replace(", ", ",")
+        .trim_end_matches(';')
+        .to_owned()
+}
+
+fn validate_required_foreign_keys(connection: &Connection) -> Result<(), HistoryError> {
+    type ForeignKeyColumn = (i64, String, Option<String>);
+    type GroupedForeignKey = (String, Vec<ForeignKeyColumn>, String);
+
+    for requirement in V4_REQUIRED_FOREIGN_KEYS {
+        let mut statement = connection
+            .prepare(&format!(
+                "PRAGMA foreign_key_list(\"{}\")",
+                requirement.child.replace('"', "\"\"")
+            ))
+            .map_err(|_| HistoryError::Corrupt)?;
+        let definitions = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(6)?,
+                ))
+            })
+            .map_err(|_| HistoryError::Corrupt)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| HistoryError::Corrupt)?;
+        let mut grouped: HashMap<i64, GroupedForeignKey> = HashMap::new();
+        for (id, sequence, parent, child_column, parent_column, on_delete) in definitions {
+            grouped
+                .entry(id)
+                .or_insert_with(|| (parent, Vec::new(), on_delete))
+                .1
+                .push((sequence, child_column, parent_column));
+        }
+        let found = grouped.values().any(|(parent, columns, on_delete)| {
+            let mut columns = columns.clone();
+            columns.sort_by_key(|(sequence, _, _)| *sequence);
+            parent == requirement.parent
+                && on_delete.eq_ignore_ascii_case(requirement.on_delete)
+                && columns.len() == requirement.columns.len()
+                && columns
+                    .iter()
+                    .zip(requirement.columns)
+                    .all(|((_, child, _), expected)| child == expected)
+                && columns.iter().zip(requirement.parent_columns).all(
+                    |((_, _, parent_column), expected)| parent_column.as_deref() == Some(*expected),
+                )
+        });
+        if !found {
+            return Err(HistoryError::Corrupt);
+        }
+    }
+    Ok(())
+}
+
+fn validate_foreign_key_integrity(connection: &Connection) -> Result<(), HistoryError> {
+    let mut statement = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(|_| HistoryError::Corrupt)?;
+    let mut rows = statement.query([]).map_err(|_| HistoryError::Corrupt)?;
+    if rows.next().map_err(|_| HistoryError::Corrupt)?.is_some() {
+        return Err(HistoryError::Corrupt);
     }
     Ok(())
 }

@@ -45,6 +45,7 @@ pub(crate) struct QualifiedSegment {
 /// A complete logical Split input.
 pub(crate) struct QualifiedSplit {
     pub(crate) segments: Vec<QualifiedSegment>,
+    pub(crate) manifest_sha256: Sha256Digest,
     pub(crate) qualification: SplitQualification,
 }
 
@@ -194,6 +195,7 @@ pub(crate) fn qualify_directory(
                 identity: segment.identity(),
             })
             .collect(),
+        manifest_sha256,
         qualification: SplitQualification {
             kind: SplitQualificationKind::LocalSplitReceipt,
             manifest_schema_version: 1,

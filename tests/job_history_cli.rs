@@ -8,7 +8,7 @@ mod support;
 #[cfg(target_os = "macos")]
 use rusqlite::Connection;
 use serde_json::Value;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::fs;
 #[cfg(target_os = "macos")]
 use std::io::{BufRead, BufReader};
@@ -156,6 +156,55 @@ fn copy_json(root: &TempDir, source: &Path, destination: &Path, workspace: &Path
         .unwrap();
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn copy_batch_executes_independent_items_in_order_with_one_authoritative_result() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("output");
+    let workspace = root.path().join("workspace");
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(&first, b"first independent item").unwrap();
+    fs::write(&second, b"second independent item").unwrap();
+
+    let completed = command(&root)
+        .args(["copy-batch", "--output-dir"])
+        .arg(&output)
+        .args(["--workspace"])
+        .arg(&workspace)
+        .args(["--json"])
+        .arg(&first)
+        .arg(&second)
+        .output()
+        .unwrap();
+
+    assert_eq!(completed.status.code(), Some(0), "{completed:?}");
+    let document: Value = serde_json::from_slice(&completed.stdout).unwrap();
+    assert_eq!(document["kind"], "job.result");
+    assert_eq!(document["result"]["state"], "succeeded");
+    assert_eq!(document["result"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        document["result"]["items"][0]["source"],
+        fs::canonicalize(&first).unwrap().to_str().unwrap()
+    );
+    assert_eq!(
+        document["result"]["items"][1]["source"],
+        fs::canonicalize(&second).unwrap().to_str().unwrap()
+    );
+    assert_eq!(document["result"]["items"][0]["state"], "succeeded");
+    assert_eq!(document["result"]["items"][1]["state"], "succeeded");
+    assert_eq!(
+        fs::read(output.join("first.bin")).unwrap(),
+        fs::read(&first).unwrap()
+    );
+    assert_eq!(
+        fs::read(output.join("second.bin")).unwrap(),
+        fs::read(&second).unwrap()
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -561,11 +610,13 @@ fn retry_rejects_future_job_kind_submission_and_scope_contracts() {
         let first = copy_json(&root, &source, &destination, &workspace);
         let first_id = first["job_id"].as_str().unwrap();
         let connection = Connection::open(history_database(&root)).unwrap();
+        let update = if column == "submission_kind" {
+            "UPDATE jobs SET submission_kind = ?1, source = NULL WHERE job_id = ?2".to_owned()
+        } else {
+            format!("UPDATE jobs SET {column} = ?1 WHERE job_id = ?2")
+        };
         connection
-            .execute(
-                &format!("UPDATE jobs SET {column} = ?1 WHERE job_id = ?2"),
-                rusqlite::params![value, first_id],
-            )
+            .execute(&update, rusqlite::params![value, first_id])
             .unwrap();
         drop(connection);
 
@@ -955,6 +1006,53 @@ fn completion_write_failure_is_reported_and_remains_recoverable() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn human_batch_completion_failure_does_not_report_success() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("batch-source.bin");
+    let output = root.path().join("output");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    fs::write(&source, b"batch history completion source").unwrap();
+    let initialized = command(&root)
+        .args(["jobs", "list", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(initialized.status.code(), Some(0), "{initialized:?}");
+    let connection = Connection::open(history_database(&root)).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_terminal_completion
+             BEFORE UPDATE OF state ON jobs
+             WHEN NEW.state IN ('succeeded', 'failed', 'cancelled')
+             BEGIN SELECT RAISE(ABORT, 'injected completion failure'); END;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let completed = command(&root)
+        .args(["copy-batch", "--output-dir"])
+        .arg(&output)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert_eq!(completed.status.code(), Some(7), "{completed:?}");
+    assert!(completed.stdout.is_empty(), "{completed:?}");
+    assert_eq!(
+        String::from_utf8(completed.stderr).unwrap(),
+        "NSCB could not record the final Job result. Inspect the operation output before retrying.\n"
+    );
+    assert_eq!(
+        fs::read(output.join("batch-source.bin")).unwrap(),
+        b"batch history completion source"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn jsonl_completion_write_failure_has_one_terminal_record_and_uncertain_history() {
     let root = tempfile::tempdir().unwrap();
     let (source, destination, workspace) = write_source(&root);
@@ -1150,6 +1248,40 @@ fn human_copy_non_utf8_path_returns_input_exit_without_copy() {
     assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert!(!destination.exists());
     assert_eq!(fs::read(source).unwrap(), b"durable Job history source");
+}
+
+#[cfg(unix)]
+#[test]
+fn human_copy_batch_non_utf8_path_returns_localized_input_error() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("output");
+    let workspace = root.path().join("workspace");
+    let source = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source-\xFF.bin".to_vec()));
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    let initialized = command(&root).args(["config", "path"]).output().unwrap();
+    assert_eq!(initialized.status.code(), Some(0), "{initialized:?}");
+
+    let completed = command(&root)
+        .args(["copy-batch", "--output-dir"])
+        .arg(&output)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg(&source)
+        .output()
+        .unwrap();
+
+    assert_eq!(completed.status.code(), Some(3), "{completed:?}");
+    assert!(completed.stdout.is_empty(), "{completed:?}");
+    assert_eq!(
+        String::from_utf8(completed.stderr).unwrap(),
+        "A filesystem path cannot be represented losslessly in JSON.\n"
+    );
+    assert!(fs::read_dir(&output).unwrap().next().is_none());
 }
 
 #[cfg(target_os = "macos")]

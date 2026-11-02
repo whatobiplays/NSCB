@@ -219,20 +219,21 @@ one typed `error` record with no fictional Job sequence or snapshot. Event
 cardinality stays bounded for large input; progress does not add per-byte
 records.
 
-The executable stalled-pipe tests prefill actual OS pipes and keep their
-readers open and unread until process exit. They cover human, `--json`, and
-`--jsonl` with stdout alone blocked; all three modes with both streams blocked;
-and a human destination-conflict diagnostic with stderr alone blocked. Each
-process exits within the five-second report budget plus a two-second
-scheduling allowance after observed publication or pre-admission failure. The
-tests check source bytes and destination state, and the both-stream test checks
-that inherited descriptor flags are unchanged. A source-lock checkpoint test
-holds execution for longer than the reporting budget with both pipes blocked,
-then delivers SIGINT before publication and releases the lock. It verifies exit
-7, preserved source bytes, and no destination publication. Broken stdout after
-successful publication and after a source-change execution failure exits 7
-without changing the corresponding filesystem state. Broken stderr after a
-pre-admission destination conflict also exits 7 and preserves both files.
+The executable stalled-pipe tests prefill actual OS pipes and leave stdout and
+stderr unread while the copy runs. They cover human, `--json`, and `--jsonl`
+with stdout alone blocked; all three modes with both streams blocked; and a
+human destination-conflict diagnostic with stderr alone blocked. For the
+both-stream case, a read-only history observer sends `Terminalized` over a
+separate control pipe only after SQLite shows the copy outcome committed. The
+test waits for that event, then calls `child.wait()` while the output pipes
+remain unread. It checks source bytes, destination state, and inherited
+descriptor flags. A source-lock checkpoint test holds execution while both
+pipes are blocked, sends SIGINT before publication, then releases the lock. It
+verifies exit 7, preserved source bytes, and no destination publication. Broken
+stdout after successful publication and after a source-change execution
+failure exits 7 without changing the corresponding filesystem state. Broken
+stderr after a pre-admission destination conflict also exits 7 and preserves
+both files.
 
 Reporter unit tests exercise bounded queue admission, write and flush failure,
 the exact shared deadline origin, late worker failure diagnostics, and dropping
@@ -551,7 +552,7 @@ live-owner preservation, concurrent processes, current-configuration retry,
 retry from a different working directory, malformed future retry records,
 parent conflict-policy provenance, noninheritance of replacement
 authorization, retry reporting failure with exit 7 and durable completion,
-failed-item rejection, JSONL completion failure with one terminal record, and
+exact failed-item selection, JSONL completion failure with one terminal record, and
 configuration/key/cache/output/artifact-preserving clear.
 
 ### Historical TAC-6 cleanup and NDR-1 boundary

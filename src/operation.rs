@@ -5,6 +5,8 @@
 //! state, writes to a private staging file, validates the staged bytes, and
 //! only then promotes the file into the destination.
 //!
+#[cfg(any(target_os = "macos", test))]
+use crate::file_identity::path_identity;
 use crate::file_identity::{FileIdentity, FileSnapshot};
 #[cfg(target_os = "macos")]
 use crate::file_identity::{file_snapshot, handle_identity};
@@ -12,6 +14,7 @@ use crate::file_identity::{file_snapshot, handle_identity};
 use crate::input_resolution::{
     InputResolutionErrorCode, InputResolutionRequest, looks_like_split_segment,
 };
+use crate::input_resolution::{ResolvedInput, SplitQualification};
 use crate::inspection::CancellationHandle;
 use crate::sha256::Sha256Digest;
 #[cfg(target_os = "macos")]
@@ -39,6 +42,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "macos")]
+use unicode_normalization::UnicodeNormalization;
 
 #[cfg(target_os = "macos")]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -68,6 +73,96 @@ pub enum ConflictPolicy {
     Fail,
     /// Replace using qualified Darwin renameatx_np(RENAME_SWAP) exchange semantics.
     Replace,
+    /// Leave an existing different destination unchanged and report a skipped item.
+    Skip,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod copy_batch_completion_tests {
+    use super::{
+        CancellationHandle, CopyBatchEventKind, CopyBatchSession, CopyBatchSessionPhase,
+        CopyBatchSessionStatus,
+    };
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn cancellation_racing_with_completion_is_serialized_and_late_cancel_is_refused() {
+        let session = CopyBatchSession::new();
+        let consumer = session.subscribe_events_with_capacity(8).unwrap();
+        session.admit(&CancellationHandle::new(), 0, 0).unwrap();
+        let gate = Arc::new(Barrier::new(2));
+        let racing_session = session.clone();
+        let racing_gate = Arc::clone(&gate);
+        let cancellation = std::thread::spawn(move || {
+            racing_gate.wait();
+            racing_session.cancel()
+        });
+
+        gate.wait();
+        session.begin_completing().unwrap();
+        let accepted_before_completion = cancellation.join().unwrap();
+
+        assert_eq!(
+            session.current_operation().unwrap().phase(),
+            CopyBatchSessionPhase::Completing
+        );
+        assert!(!session.cancel(), "completion rejects late cancellation");
+        let mut transitions = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            if let CopyBatchEventKind::CancellationRequested { accepted } = event.event() {
+                transitions.push(*accepted);
+            }
+        }
+        assert_eq!(
+            transitions,
+            if accepted_before_completion {
+                vec![true, false]
+            } else {
+                vec![false]
+            }
+        );
+        assert_eq!(
+            session.current_operation().unwrap().status(),
+            if accepted_before_completion {
+                CopyBatchSessionStatus::CancellationRequested
+            } else {
+                CopyBatchSessionStatus::Running
+            }
+        );
+    }
+
+    #[test]
+    fn pre_cancelled_handle_emits_exactly_one_cancellation_transition() {
+        let session = CopyBatchSession::new();
+        let consumer = session.subscribe_events_with_capacity(8).unwrap();
+        let cancellation = CancellationHandle::new();
+        cancellation.cancel();
+        session.admit(&cancellation, 1, 0).unwrap();
+
+        assert!(session.cancel());
+        let mut events = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            events.push(event);
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.event(),
+                        CopyBatchEventKind::CancellationRequested { accepted: true }
+                    )
+                })
+                .count(),
+            1
+        );
+        let snapshot = session.current_operation().unwrap();
+        assert_eq!(snapshot.phase(), CopyBatchSessionPhase::Running);
+        assert_eq!(
+            snapshot.status(),
+            CopyBatchSessionStatus::CancellationRequested
+        );
+    }
 }
 
 /// Describes one byte-preserving regular-file copy operation.
@@ -164,6 +259,8 @@ pub enum JobState {
     Succeeded,
     /// The operation did not reach a validated publication outcome.
     Failed,
+    /// Independent items completed with both authoritative successes and failures.
+    CompletedWithIssues,
     /// The host cancelled the operation before promotion or result finalization began.
     Cancelled,
 }
@@ -177,6 +274,8 @@ pub enum OperationOutcome {
     Copied,
     /// The destination was already proven byte-identical to the planned source.
     AlreadyUpToDate,
+    /// An existing destination was deliberately left unchanged by `skip`.
+    Skipped,
 }
 
 /// A stable category for planning, execution, and publication failures.
@@ -184,6 +283,14 @@ pub enum OperationOutcome {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OperationFailureCode {
+    /// An independent batch contained no item selection.
+    EmptyBatch,
+    /// Input resolution found no usable files for a selected input.
+    EmptySelection,
+    /// Two independent items resolve the same logical input identity.
+    DuplicateInput,
+    /// Two independent items map to colliding destination identities.
+    DestinationCollision,
     /// The source path is missing, unreadable, or not a regular file.
     SourceUnavailable,
     /// Copy-through does not accept physical members or directories resolved as Split inputs.
@@ -229,12 +336,18 @@ pub enum OperationFailureCode {
     PublicationUncertain,
     /// Execution ended with an artifact retained because safe removal could not be proven.
     CleanupIncomplete,
+    /// A host could not durably checkpoint an independent item.
+    CheckpointFailed,
 }
 
 impl OperationFailureCode {
     /// Returns the canonical machine-readable name used by serialization and display.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::EmptyBatch => "empty_batch",
+            Self::EmptySelection => "empty_selection",
+            Self::DuplicateInput => "duplicate_input",
+            Self::DestinationCollision => "destination_collision",
             Self::SourceUnavailable => "source_unavailable",
             Self::SplitInputUnsupported => "split_input_unsupported",
             Self::SourceChanged => "source_changed",
@@ -255,6 +368,7 @@ impl OperationFailureCode {
             Self::PublicationFailed => "publication_failed",
             Self::PublicationUncertain => "publication_uncertain",
             Self::CleanupIncomplete => "cleanup_incomplete",
+            Self::CheckpointFailed => "checkpoint_failed",
         }
     }
 }
@@ -861,6 +975,8 @@ pub struct OperationPlan {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     already_up_to_date: bool,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    skipped: bool,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stage_directory_name: Option<OsString>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     stage_file_name: Option<OsString>,
@@ -1166,6 +1282,26 @@ struct SessionState {
     cancellation_event_emitted: bool,
     #[cfg(target_os = "macos")]
     emitted_milestone: Option<OperationMilestone>,
+    #[cfg(target_os = "macos")]
+    progress_observer: Option<ProgressObserver>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct ProgressObserver(std::sync::Arc<dyn Fn(u64) + Send + Sync>);
+
+#[cfg(target_os = "macos")]
+impl ProgressObserver {
+    fn report(&self, completed_bytes: u64) {
+        (self.0)(completed_bytes);
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::fmt::Debug for ProgressObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProgressObserver(..)")
+    }
 }
 
 impl SessionState {
@@ -1261,6 +1397,17 @@ impl OperationSession {
     /// Creates an idle operation session without a runtime or global registration.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an operation session that reports copied source bytes while a
+    /// copy is still active. This is an execution hook for the batch runner.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn with_progress_observer(observer: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        let session = Self::new();
+        if let Ok(mut state) = session.state.lock() {
+            state.progress_observer = Some(ProgressObserver(std::sync::Arc::new(observer)));
+        }
+        session
     }
 
     /// Returns the current-operation state shared by this session's clones.
@@ -1469,8 +1616,14 @@ impl OperationSession {
 
     #[cfg(target_os = "macos")]
     fn record_progress(&self, completed_bytes: u64) {
-        if let Ok(mut state) = self.state.lock() {
+        let observer = if let Ok(mut state) = self.state.lock() {
             state.completed_bytes = completed_bytes;
+            state.progress_observer.clone()
+        } else {
+            None
+        };
+        if let Some(observer) = observer {
+            observer.report(completed_bytes);
         }
     }
 
@@ -1550,6 +1703,7 @@ impl AdmissionGuard {
             state.execution_cancellation = None;
             state.status = match result.state() {
                 JobState::Succeeded => OperationSessionStatus::Succeeded,
+                JobState::CompletedWithIssues => OperationSessionStatus::Failed,
                 JobState::Failed => OperationSessionStatus::Failed,
                 JobState::Cancelled => OperationSessionStatus::Cancelled,
             };
@@ -1857,12 +2011,15 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
     let known_conflict = destination_baseline.is_some()
         && request.conflict_policy == ConflictPolicy::Fail
         && !already_up_to_date;
+    let skipped = destination_baseline.is_some()
+        && request.conflict_policy == ConflictPolicy::Skip
+        && !already_up_to_date;
     let mut planned_artifacts = Vec::new();
     let mut stage_directory_name = None;
     let mut stage_file_name = None;
     let mut backup_name = None;
     let mut published_recovery_name = None;
-    if !known_conflict {
+    if !known_conflict && !skipped {
         effects.push(PlannedEffect::CoordinateDestination);
         if !already_up_to_date {
             if workspace.identity.is_none() {
@@ -1968,6 +2125,7 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
         destination,
         destination_baseline,
         already_up_to_date,
+        skipped,
         stage_directory_name,
         stage_file_name,
         backup_name,
@@ -3372,6 +3530,15 @@ where
     {
         return Err(OperationFailureCode::DestinationConflict);
     }
+    if plan.skipped {
+        verify_source_entry(plan, &source_directory)?;
+        validate_plan_routes(
+            plan,
+            workspace_runtime_identity,
+            Some(destination_parent_identity),
+        )?;
+        return Ok(OperationOutcome::Skipped);
+    }
     let lock_name = plan
         .snapshot
         .destination_lock_path
@@ -3733,6 +3900,19 @@ fn verify_directory_identity(
     } else {
         Err(OperationFailureCode::StalePlan)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn validate_batch_destination_anchor(
+    plan: &OperationPlan,
+    expected: FileIdentity,
+) -> Result<(), OperationFailureCode> {
+    validate_file_route(&plan.destination, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    let directory = open_directory(&plan.destination.parent)
+        .map_err(|_| OperationFailureCode::DestinationUnavailable)?;
+    verify_directory_identity(&directory, expected)
+        .map_err(|_| OperationFailureCode::DestinationChanged)?;
+    require_directory_writable(&directory).map_err(|_| OperationFailureCode::DestinationUnavailable)
 }
 
 #[cfg(target_os = "macos")]
@@ -6058,6 +6238,2069 @@ fn validate_published_file(
 fn mark_artifact_retained(artifacts: &mut [OwnedArtifact], name: &OsStr) {
     if let Some(artifact) = artifacts.iter_mut().find(|artifact| artifact.name == name) {
         artifact.keep = true;
+    }
+}
+
+/// One independent source and exact destination in a copy batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyBatchItemRequest {
+    item_key: Option<String>,
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    forced_failure: Option<OperationFailureCode>,
+    qualified_split: Option<SplitQualification>,
+    resolver_confirmed_empty_selection: bool,
+}
+
+impl CopyBatchItemRequest {
+    /// Creates an item whose stable key is assigned from its request order.
+    pub fn new(source: impl Into<PathBuf>, destination: impl Into<PathBuf>) -> Self {
+        Self {
+            item_key: None,
+            source: source.into(),
+            destination: Some(destination.into()),
+            forced_failure: None,
+            qualified_split: None,
+            resolver_confirmed_empty_selection: false,
+        }
+    }
+
+    /// Preserves an exact key from a prior failed-item retry.
+    pub fn with_key(
+        item_key: impl Into<String>,
+        source: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            item_key: Some(item_key.into()),
+            source: source.into(),
+            destination: Some(destination.into()),
+            forced_failure: None,
+            qualified_split: None,
+            resolver_confirmed_empty_selection: false,
+        }
+    }
+}
+
+/// Requests sequential copy-through of independent regular files.
+///
+/// Planning is read-only. The destination directory must already exist and
+/// every assigned destination must be its direct child. The returned plan
+/// records item-local preflight failures only when another item is viable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyBatchRequest {
+    destination_directory: PathBuf,
+    workspace: PathBuf,
+    workspace_selection: WorkspaceSelection,
+    conflict_policy: ConflictPolicy,
+    items: Vec<CopyBatchItemRequest>,
+}
+
+impl CopyBatchRequest {
+    /// Creates an explicit-workspace batch request with no items.
+    pub fn new(destination_directory: impl Into<PathBuf>, workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            destination_directory: destination_directory.into(),
+            workspace: workspace.into(),
+            workspace_selection: WorkspaceSelection::Explicit,
+            conflict_policy: ConflictPolicy::Fail,
+            items: Vec::new(),
+        }
+    }
+
+    /// Creates a request using the host-default staging workspace.
+    pub fn with_host_default_workspace(
+        destination_directory: impl Into<PathBuf>,
+        workspace: impl Into<PathBuf>,
+    ) -> Self {
+        let mut request = Self::new(destination_directory, workspace);
+        request.workspace_selection = WorkspaceSelection::HostDefault;
+        request
+    }
+
+    /// Adds a source whose destination is its basename in the output directory.
+    #[must_use]
+    pub fn with_source(mut self, source: impl Into<PathBuf>) -> Self {
+        let source = source.into();
+        let destination = source
+            .file_name()
+            .map(|name| self.destination_directory.join(name))
+            .unwrap_or_else(|| self.destination_directory.clone());
+        self.items
+            .push(CopyBatchItemRequest::new(source, destination));
+        self
+    }
+
+    /// Adds an item with an exact destination.
+    #[must_use]
+    pub fn with_item(
+        mut self,
+        source: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+    ) -> Self {
+        self.items
+            .push(CopyBatchItemRequest::new(source, destination));
+        self
+    }
+
+    /// Adds an item while preserving its key from a prior failed-item retry.
+    #[must_use]
+    pub fn with_keyed_item(
+        mut self,
+        item_key: impl Into<String>,
+        source: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+    ) -> Self {
+        self.items.push(CopyBatchItemRequest::with_key(
+            item_key,
+            source,
+            destination,
+        ));
+        self
+    }
+
+    /// Adds an exact keyed item whose qualified Split copy-through failure was
+    /// restored from durable batch provenance.
+    ///
+    /// The caller must validate the persisted qualification before calling
+    /// this method. The Engine treats the evidence as one logical item and does
+    /// not inspect its physical Split members.
+    #[must_use]
+    pub fn with_keyed_qualified_split_input_unsupported(
+        mut self,
+        item_key: impl Into<String>,
+        source: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+        qualification: SplitQualification,
+    ) -> Self {
+        self.items.push(CopyBatchItemRequest {
+            item_key: Some(item_key.into()),
+            source: source.into(),
+            destination: Some(destination.into()),
+            forced_failure: Some(OperationFailureCode::SplitInputUnsupported),
+            qualified_split: Some(qualification),
+            resolver_confirmed_empty_selection: false,
+        });
+        self
+    }
+
+    /// Adds an item with a typed item-local preflight failure already established.
+    ///
+    /// `SplitInputUnsupported` is a qualification result, not a general
+    /// item-local planning failure. Callers must use
+    /// [`Self::with_qualified_split_input_unsupported`] with the resolved
+    /// qualification evidence so an untrusted or unsafe Split still rejects
+    /// the whole batch before admission.
+    #[must_use]
+    pub fn with_preflight_failure(
+        mut self,
+        source: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+        failure: OperationFailureCode,
+    ) -> Self {
+        let mut item = CopyBatchItemRequest::new(source, destination);
+        item.forced_failure = Some(failure);
+        self.items.push(item);
+        self
+    }
+
+    /// Adds a resolver-confirmed empty selection without assigning a destination.
+    ///
+    /// Only an `EmptySelection` result from batch input resolution is accepted.
+    /// The item keeps its request-order key and can appear in a mixed batch result,
+    /// but it has no output path to validate or publish.
+    pub fn with_resolved_empty_selection_failure(
+        mut self,
+        failure: crate::InputResolutionFailure,
+    ) -> Result<Self, Box<crate::InputResolutionFailure>> {
+        if failure.code() != crate::InputResolutionErrorCode::EmptySelection {
+            return Err(Box::new(failure));
+        }
+        self.items.push(CopyBatchItemRequest {
+            item_key: None,
+            source: failure.requested_path().to_path_buf(),
+            destination: None,
+            forced_failure: Some(OperationFailureCode::EmptySelection),
+            qualified_split: None,
+            resolver_confirmed_empty_selection: true,
+        });
+        Ok(self)
+    }
+
+    /// Adds an item whose Split qualification succeeded before batch planning.
+    ///
+    /// Copy-through does not accept Split inputs, so a qualified Split remains
+    /// an item-local `SplitInputUnsupported` failure. Planning rejects this
+    /// method's evidence if the resolved input no longer carries qualification.
+    #[must_use]
+    pub fn with_qualified_split_input_unsupported(
+        mut self,
+        input: ResolvedInput,
+        destination: impl Into<PathBuf>,
+    ) -> Self {
+        let source = input.logical_selection_path();
+        let qualification = input.qualification;
+        self.items.push(CopyBatchItemRequest {
+            item_key: None,
+            source,
+            destination: Some(destination.into()),
+            forced_failure: Some(OperationFailureCode::SplitInputUnsupported),
+            qualified_split: qualification,
+            resolver_confirmed_empty_selection: false,
+        });
+        self
+    }
+
+    /// Selects explicit destination conflict handling for every item.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
+    }
+}
+
+/// Planning disposition for one stable independent item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CopyBatchItemPlanState {
+    /// Item has an executable copy-through plan.
+    Viable,
+    /// Item-local planning failed and will be reported without aborting others.
+    PreflightFailed,
+}
+
+/// Read-only planning snapshot for one independent item.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CopyBatchItemPlanSnapshot {
+    item_key: String,
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    state: CopyBatchItemPlanState,
+    failure_code: Option<OperationFailureCode>,
+}
+
+impl CopyBatchItemPlanSnapshot {
+    /// Returns the stable item key.
+    pub fn item_key(&self) -> &str {
+        &self.item_key
+    }
+
+    /// Returns the canonical source path used by this item.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    /// Returns the reserved destination, when the item has one.
+    pub fn destination(&self) -> Option<&Path> {
+        self.destination.as_deref()
+    }
+
+    /// Returns whether the item is viable or failed preflight.
+    pub const fn state(&self) -> CopyBatchItemPlanState {
+        self.state
+    }
+
+    /// Returns the sanitized item-local failure, when one exists.
+    pub const fn failure_code(&self) -> Option<OperationFailureCode> {
+        self.failure_code
+    }
+}
+
+/// Read-only view of one immutable independent copy batch plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CopyBatchPlanSnapshot {
+    kind: &'static str,
+    nscb_version: &'static str,
+    destination_directory: PathBuf,
+    workspace: PathBuf,
+    conflict_policy: ConflictPolicy,
+    items: Vec<CopyBatchItemPlanSnapshot>,
+}
+
+impl CopyBatchPlanSnapshot {
+    /// Returns the stable serialized document kind.
+    pub const fn kind(&self) -> &'static str {
+        self.kind
+    }
+
+    /// Returns the NSCB package version that produced this plan.
+    pub const fn nscb_version(&self) -> &'static str {
+        self.nscb_version
+    }
+
+    /// Returns the existing output directory shared by all items.
+    pub fn destination_directory(&self) -> &Path {
+        &self.destination_directory
+    }
+
+    /// Returns the selected staging workspace.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+
+    /// Returns the conflict policy frozen for every item.
+    pub const fn conflict_policy(&self) -> ConflictPolicy {
+        self.conflict_policy
+    }
+
+    /// Returns item snapshots in execution order.
+    pub fn items(&self) -> &[CopyBatchItemPlanSnapshot] {
+        &self.items
+    }
+}
+
+struct CopyBatchItemPlan {
+    item_key: String,
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    operation: Result<OperationPlan, OperationError>,
+}
+
+/// An immutable, non-replayable capability for sequential independent copy.
+pub struct CopyBatchPlan {
+    snapshot: CopyBatchPlanSnapshot,
+    items: Vec<CopyBatchItemPlan>,
+    destination_directory_identity: FileIdentity,
+}
+
+impl CopyBatchPlan {
+    /// Returns the inspection-only view of this plan.
+    pub const fn snapshot(&self) -> &CopyBatchPlanSnapshot {
+        &self.snapshot
+    }
+}
+
+/// Terminal state of one independent batch item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CopyBatchItemState {
+    /// Item was retained as a typed preflight failure.
+    PreflightFailed,
+    /// Item completed with validated success or no destination change required.
+    Succeeded,
+    /// Existing destination was deliberately left unchanged.
+    Skipped,
+    /// Item did not reach validated success.
+    Failed,
+    /// Publication state could not be established safely.
+    Uncertain,
+    /// Item was cancelled before validated completion.
+    Cancelled,
+    /// Execution stopped before this item could start.
+    NotStarted,
+}
+
+/// Authoritative result for one independent batch item.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CopyBatchItemResult {
+    item_key: String,
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    state: CopyBatchItemState,
+    outcome: Option<OperationOutcome>,
+    failure: Option<OperationFailure>,
+    cleanup_warning: Option<OperationFailure>,
+    milestones: Vec<OperationMilestone>,
+    cleanup_artifact_retained: bool,
+    artifacts: Vec<OperationArtifact>,
+}
+
+impl CopyBatchItemResult {
+    /// Returns the stable item key.
+    pub fn item_key(&self) -> &str {
+        &self.item_key
+    }
+
+    /// Returns the exact source path observed for this item.
+    pub fn source(&self) -> &Path {
+        &self.source
+    }
+
+    /// Returns the reserved destination, when the item has one.
+    pub fn destination(&self) -> Option<&Path> {
+        self.destination.as_deref()
+    }
+
+    /// Returns the item terminal state.
+    pub const fn state(&self) -> CopyBatchItemState {
+        self.state
+    }
+
+    /// Returns the publication outcome reached by a successful item.
+    pub const fn outcome(&self) -> Option<OperationOutcome> {
+        self.outcome
+    }
+
+    /// Returns the authoritative item failure, when one exists.
+    pub const fn failure(&self) -> Option<&OperationFailure> {
+        self.failure.as_ref()
+    }
+
+    /// Returns a cleanup warning that does not erase successful publication.
+    pub const fn cleanup_warning(&self) -> Option<&OperationFailure> {
+        self.cleanup_warning.as_ref()
+    }
+
+    /// Returns item milestones in execution order.
+    pub fn milestones(&self) -> &[OperationMilestone] {
+        &self.milestones
+    }
+
+    /// Reports whether an operation-owned artifact was retained.
+    pub const fn cleanup_artifact_retained(&self) -> bool {
+        self.cleanup_artifact_retained
+    }
+
+    /// Returns item artifact evidence for reconciliation and history.
+    pub fn artifacts(&self) -> &[OperationArtifact] {
+        &self.artifacts
+    }
+
+    fn from_operation(
+        item_key: String,
+        source: PathBuf,
+        destination: PathBuf,
+        result: OperationResult,
+    ) -> Self {
+        let state = match (
+            result.state(),
+            result.failure().map(|failure| failure.code()),
+        ) {
+            (JobState::Succeeded, _) if result.outcome() == Some(OperationOutcome::Skipped) => {
+                CopyBatchItemState::Skipped
+            }
+            (JobState::Succeeded, _) => CopyBatchItemState::Succeeded,
+            (JobState::Cancelled, _) => CopyBatchItemState::Cancelled,
+            (_, Some(OperationFailureCode::PublicationUncertain)) => CopyBatchItemState::Uncertain,
+            _ => CopyBatchItemState::Failed,
+        };
+        Self {
+            item_key,
+            source,
+            destination: Some(destination),
+            state,
+            outcome: result.outcome(),
+            failure: result.failure().copied(),
+            cleanup_warning: result.cleanup_warning().copied(),
+            milestones: result.milestones().to_vec(),
+            cleanup_artifact_retained: result.cleanup_artifact_retained(),
+            artifacts: result.artifacts().to_vec(),
+        }
+    }
+
+    fn preflight_failed(
+        item_key: String,
+        source: PathBuf,
+        destination: Option<PathBuf>,
+        code: OperationFailureCode,
+    ) -> Self {
+        Self {
+            item_key,
+            source,
+            destination,
+            state: CopyBatchItemState::PreflightFailed,
+            outcome: None,
+            failure: Some(OperationFailure::new(code)),
+            cleanup_warning: None,
+            milestones: vec![OperationMilestone::Planned, OperationMilestone::Failed],
+            cleanup_artifact_retained: false,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn cancelled(item_key: String, source: PathBuf, destination: Option<PathBuf>) -> Self {
+        Self {
+            item_key,
+            source,
+            destination,
+            state: CopyBatchItemState::Cancelled,
+            outcome: None,
+            failure: Some(OperationFailure::new(OperationFailureCode::Cancelled)),
+            cleanup_warning: None,
+            milestones: vec![OperationMilestone::Planned, OperationMilestone::Cancelled],
+            cleanup_artifact_retained: false,
+            artifacts: Vec::new(),
+        }
+    }
+
+    fn not_started(item_key: String, source: PathBuf, destination: Option<PathBuf>) -> Self {
+        Self {
+            item_key,
+            source,
+            destination,
+            state: CopyBatchItemState::NotStarted,
+            outcome: None,
+            failure: None,
+            cleanup_warning: None,
+            milestones: vec![OperationMilestone::Planned],
+            cleanup_artifact_retained: false,
+            artifacts: Vec::new(),
+        }
+    }
+}
+
+/// One authoritative aggregate result for an admitted independent batch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CopyBatchResult {
+    state: JobState,
+    failure: Option<OperationFailure>,
+    items: Vec<CopyBatchItemResult>,
+}
+
+impl CopyBatchResult {
+    /// Returns the aggregate terminal state.
+    pub const fn state(&self) -> JobState {
+        self.state
+    }
+
+    /// Returns a batch-level failure that affects continuation of the whole Job.
+    pub const fn failure(&self) -> Option<&OperationFailure> {
+        self.failure.as_ref()
+    }
+
+    /// Returns complete item results in original request order.
+    pub fn items(&self) -> &[CopyBatchItemResult] {
+        &self.items
+    }
+
+    /// Returns all item artifact evidence for reconciliation.
+    pub fn artifacts(&self) -> impl Iterator<Item = &OperationArtifact> {
+        self.items.iter().flat_map(|item| item.artifacts.iter())
+    }
+}
+
+/// Result of an execution that attempted durable item checkpoints.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyBatchExecution {
+    result: CopyBatchResult,
+    checkpoint_failed: bool,
+    failed_checkpoint: Option<CopyBatchItemCheckpoint>,
+}
+
+impl CopyBatchExecution {
+    /// Returns the authoritative aggregate result.
+    pub const fn result(&self) -> &CopyBatchResult {
+        &self.result
+    }
+
+    /// Reports whether continuation stopped because a checkpoint was uncertain.
+    pub const fn checkpoint_failed(&self) -> bool {
+        self.checkpoint_failed
+    }
+
+    /// Returns the item checkpoint the host rejected, when checkpointing stopped.
+    pub const fn failed_checkpoint(&self) -> Option<&CopyBatchItemCheckpoint> {
+        self.failed_checkpoint.as_ref()
+    }
+
+    /// Consumes the execution wrapper and returns the aggregate result.
+    pub fn into_result(self) -> CopyBatchResult {
+        self.result
+    }
+}
+
+/// Durable item checkpoint supplied to a host before the next item starts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyBatchItemCheckpoint {
+    sequence: u64,
+    item: CopyBatchItemResult,
+}
+
+impl CopyBatchItemCheckpoint {
+    /// Returns the item's one-based order among checkpoint callbacks in this execution.
+    ///
+    /// This sequence is independent of the job-event journal sequence.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns authoritative item result and publication evidence.
+    pub const fn item(&self) -> &CopyBatchItemResult {
+        &self.item
+    }
+}
+
+/// Host-side checkpoint failure. Callers keep their own diagnostic detail.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CopyBatchCheckpointError;
+
+pub(crate) fn plan_copy_batch(request: CopyBatchRequest) -> Result<CopyBatchPlan, OperationError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        plan_copy_batch_unix(request)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn plan_copy_batch_unix(request: CopyBatchRequest) -> Result<CopyBatchPlan, OperationError> {
+    if request.items.is_empty() {
+        return Err(OperationError::new(OperationFailureCode::EmptyBatch));
+    }
+    if !request.destination_directory.is_absolute() {
+        return Err(OperationError::new(
+            OperationFailureCode::DestinationUnavailable,
+        ));
+    }
+    let destination_directory_metadata = fs::symlink_metadata(&request.destination_directory)
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationUnavailable))?;
+    if destination_directory_metadata.file_type().is_symlink()
+        || !destination_directory_metadata.is_dir()
+    {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let destination_directory = fs::canonicalize(&request.destination_directory)
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationUnavailable))?;
+    let destination_directory_file = open_directory(&destination_directory)
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationUnavailable))?;
+    let destination_directory_identity = required_identity(&destination_directory_file)
+        .map_err(|_| OperationError::new(OperationFailureCode::UnsupportedCapability))?;
+
+    let mut source_paths = std::collections::HashSet::new();
+    let mut source_identities = std::collections::HashSet::new();
+    let mut destination_keys = std::collections::HashSet::new();
+    let mut item_keys = std::collections::HashSet::new();
+    let mut prepared = Vec::with_capacity(request.items.len());
+
+    for (ordinal, item) in request.items.into_iter().enumerate() {
+        let item_key = item
+            .item_key
+            .unwrap_or_else(|| format!("batch-item-{:04}", ordinal + 1));
+        if item_key.is_empty() || !item_keys.insert(item_key.clone()) {
+            return Err(OperationError::new(OperationFailureCode::DuplicateInput));
+        }
+        if item.forced_failure == Some(OperationFailureCode::EmptySelection)
+            && !item.resolver_confirmed_empty_selection
+        {
+            return Err(OperationError::new(OperationFailureCode::EmptySelection));
+        }
+        if item.resolver_confirmed_empty_selection
+            && item.forced_failure != Some(OperationFailureCode::EmptySelection)
+        {
+            return Err(OperationError::new(OperationFailureCode::EmptySelection));
+        }
+        let source = absolute_path(&item.source)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        if !source_paths.insert(normalized_batch_path_key(&source)) {
+            return Err(OperationError::new(OperationFailureCode::DuplicateInput));
+        }
+        if let Some(identity) = path_identity(&source)
+            && !source_identities.insert(identity)
+        {
+            return Err(OperationError::new(OperationFailureCode::DuplicateInput));
+        }
+
+        let destination = match item.destination {
+            Some(destination) => {
+                let destination = absolute_path(&destination).map_err(|_| {
+                    OperationError::new(OperationFailureCode::DestinationUnavailable)
+                })?;
+                let name = destination
+                    .file_name()
+                    .filter(|name| *name != OsStr::new(".") && *name != OsStr::new(".."))
+                    .ok_or_else(|| {
+                        OperationError::new(OperationFailureCode::DestinationUnavailable)
+                    })?;
+                let parent = destination.parent().ok_or_else(|| {
+                    OperationError::new(OperationFailureCode::DestinationUnavailable)
+                })?;
+                let canonical_parent = fs::canonicalize(parent).map_err(|_| {
+                    OperationError::new(OperationFailureCode::DestinationUnavailable)
+                })?;
+                if canonical_parent != destination_directory {
+                    return Err(OperationError::new(
+                        OperationFailureCode::DestinationUnavailable,
+                    ));
+                }
+                if !destination_keys.insert(normalized_batch_component_key(name)) {
+                    return Err(OperationError::new(
+                        OperationFailureCode::DestinationCollision,
+                    ));
+                }
+                Some(destination_directory.join(name))
+            }
+            None if item.resolver_confirmed_empty_selection => None,
+            None => {
+                return Err(OperationError::new(
+                    OperationFailureCode::DestinationUnavailable,
+                ));
+            }
+        };
+        prepared.push((
+            item_key,
+            source,
+            destination,
+            item.forced_failure,
+            item.qualified_split,
+        ));
+    }
+
+    let all_source_paths = prepared
+        .iter()
+        .map(|(_, source, _, _, _)| normalized_batch_path_key(source))
+        .collect::<std::collections::HashSet<_>>();
+    let all_source_identities = prepared
+        .iter()
+        .filter_map(|(_, source, _, _, _)| path_identity(source))
+        .collect::<std::collections::HashSet<_>>();
+    for (_, _, destination, _, _) in &prepared {
+        let Some(destination) = destination.as_ref() else {
+            continue;
+        };
+        if all_source_paths.contains(&normalized_batch_path_key(destination)) {
+            return Err(OperationError::new(OperationFailureCode::UnsafePath));
+        }
+        if path_identity(destination)
+            .is_some_and(|identity| all_source_identities.contains(&identity))
+        {
+            return Err(OperationError::new(OperationFailureCode::UnsafePath));
+        }
+    }
+
+    let mut items = Vec::with_capacity(prepared.len());
+    let mut snapshots = Vec::with_capacity(prepared.len());
+    let mut first_local_failure = None;
+    let mut viable_count = 0_usize;
+    for (item_key, source, destination, forced_failure, qualified_split) in prepared {
+        let qualified_split_failure = forced_failure
+            == Some(OperationFailureCode::SplitInputUnsupported)
+            && qualified_split.is_some();
+        if forced_failure == Some(OperationFailureCode::SplitInputUnsupported)
+            && qualified_split.is_none()
+        {
+            return Err(OperationError::new(
+                OperationFailureCode::SplitInputUnsupported,
+            ));
+        }
+        let operation = if let Some(failure) = forced_failure {
+            Err(OperationError::new(failure))
+        } else {
+            let Some(destination) = destination.as_ref() else {
+                return Err(OperationError::new(
+                    OperationFailureCode::DestinationUnavailable,
+                ));
+            };
+            let mut copy_request =
+                CopyThroughRequest::new(&source, destination, &request.workspace)
+                    .with_conflict_policy(request.conflict_policy);
+            if request.workspace_selection == WorkspaceSelection::HostDefault {
+                copy_request = CopyThroughRequest::with_host_default_workspace(
+                    &source,
+                    destination,
+                    &request.workspace,
+                )
+                .with_conflict_policy(request.conflict_policy);
+            }
+            plan_copy_through(copy_request)
+        };
+        let (canonical_source, state, failure_code) = match &operation {
+            Ok(operation) => {
+                viable_count += 1;
+                (
+                    operation.snapshot().source().path().to_path_buf(),
+                    CopyBatchItemPlanState::Viable,
+                    None,
+                )
+            }
+            Err(error) => {
+                if !is_item_local_preflight_failure(error.code()) && !qualified_split_failure {
+                    return Err(*error);
+                }
+                first_local_failure.get_or_insert(error.code());
+                (
+                    source,
+                    CopyBatchItemPlanState::PreflightFailed,
+                    Some(error.code()),
+                )
+            }
+        };
+        snapshots.push(CopyBatchItemPlanSnapshot {
+            item_key: item_key.clone(),
+            source: canonical_source.clone(),
+            destination: destination.clone(),
+            state,
+            failure_code,
+        });
+        items.push(CopyBatchItemPlan {
+            item_key,
+            source: canonical_source,
+            destination,
+            operation,
+        });
+    }
+    if viable_count == 0 {
+        return Err(OperationError::new(
+            first_local_failure.unwrap_or(OperationFailureCode::SourceUnavailable),
+        ));
+    }
+
+    Ok(CopyBatchPlan {
+        snapshot: CopyBatchPlanSnapshot {
+            kind: "copy_batch_plan",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            destination_directory,
+            workspace: request.workspace,
+            conflict_policy: request.conflict_policy,
+            items: snapshots,
+        },
+        items,
+        destination_directory_identity,
+    })
+}
+
+fn is_item_local_preflight_failure(code: OperationFailureCode) -> bool {
+    matches!(
+        code,
+        OperationFailureCode::EmptySelection
+            | OperationFailureCode::SourceUnavailable
+            | OperationFailureCode::SourceChanged
+            | OperationFailureCode::DestinationUnavailable
+            | OperationFailureCode::DestinationConflict
+            | OperationFailureCode::DestinationChanged
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_batch_component_key(name: &OsStr) -> Vec<u8> {
+    let mut key = Vec::new();
+    if let Some(text) = name.to_str() {
+        key.push(0);
+        key.extend(
+            text.nfkc()
+                .flat_map(char::to_lowercase)
+                .collect::<String>()
+                .as_bytes(),
+        );
+    } else {
+        key.push(1);
+        key.extend_from_slice(name.as_bytes());
+    }
+    key
+}
+
+#[cfg(target_os = "macos")]
+fn normalized_batch_path_key(path: &Path) -> Vec<u8> {
+    let mut key = Vec::new();
+    for component in path.components() {
+        key.push(b'/');
+        key.extend_from_slice(&normalized_batch_component_key(component.as_os_str()));
+    }
+    key
+}
+
+/// Execution phase for one host-owned independent batch session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CopyBatchSessionPhase {
+    /// No batch is currently admitted.
+    #[default]
+    Idle,
+    /// Independent items are executing sequentially.
+    Running,
+    /// Execution is finalizing the aggregate result.
+    Completing,
+}
+
+/// Current or most recent status of one independent batch session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CopyBatchSessionStatus {
+    /// No batch has run since creation or the most recent admission.
+    #[default]
+    Idle,
+    /// At least one item may execute.
+    Running,
+    /// Cancellation was accepted and unfinished items are being finalized.
+    CancellationRequested,
+    /// Every viable item and skipped item completed successfully.
+    Succeeded,
+    /// At least one item succeeded and at least one failed.
+    CompletedWithIssues,
+    /// No viable item completed successfully, or a batch-level failure occurred.
+    Failed,
+    /// The batch stopped under an accepted cancellation decision.
+    Cancelled,
+}
+
+/// Latest-value progress for one independent batch execution.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct CopyBatchProgress {
+    total_items: u64,
+    completed_items: u64,
+    succeeded_items: u64,
+    failed_items: u64,
+    skipped_items: u64,
+    cancelled_items: u64,
+    completed_bytes: u64,
+    total_bytes: u64,
+    current_item_key: Option<String>,
+    current_item_completed_bytes: u64,
+    current_item_total_bytes: u64,
+}
+
+impl CopyBatchProgress {
+    /// Returns the number of planned items, including preflight failures.
+    pub const fn total_items(&self) -> u64 {
+        self.total_items
+    }
+
+    /// Returns the number of items with terminal item results.
+    pub const fn completed_items(&self) -> u64 {
+        self.completed_items
+    }
+
+    /// Returns independently successful or skipped items.
+    pub const fn succeeded_items(&self) -> u64 {
+        self.succeeded_items
+    }
+
+    /// Returns failed, uncertain, or preflight-failed items.
+    pub const fn failed_items(&self) -> u64 {
+        self.failed_items
+    }
+
+    /// Returns deliberately skipped items.
+    pub const fn skipped_items(&self) -> u64 {
+        self.skipped_items
+    }
+
+    /// Returns items cancelled under the accepted batch cancellation.
+    pub const fn cancelled_items(&self) -> u64 {
+        self.cancelled_items
+    }
+
+    /// Returns source bytes accounted through successful or partial execution.
+    pub const fn completed_bytes(&self) -> u64 {
+        self.completed_bytes
+    }
+
+    /// Returns viable source bytes admitted for this batch.
+    pub const fn total_bytes(&self) -> u64 {
+        self.total_bytes
+    }
+
+    /// Returns the currently executing stable item key, if any.
+    pub fn current_item_key(&self) -> Option<&str> {
+        self.current_item_key.as_deref()
+    }
+
+    /// Returns bytes copied by the active item so far.
+    pub const fn current_item_completed_bytes(&self) -> u64 {
+        self.current_item_completed_bytes
+    }
+
+    /// Returns the active item's planned source length.
+    pub const fn current_item_total_bytes(&self) -> u64 {
+        self.current_item_total_bytes
+    }
+}
+
+/// Ephemeral authoritative snapshot for one independent batch session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CopyBatchSessionSnapshot {
+    phase: CopyBatchSessionPhase,
+    status: CopyBatchSessionStatus,
+    #[serde(flatten)]
+    progress: CopyBatchProgress,
+}
+
+impl CopyBatchSessionSnapshot {
+    /// Returns the current execution phase.
+    pub const fn phase(&self) -> CopyBatchSessionPhase {
+        self.phase
+    }
+
+    /// Returns the current or terminal status.
+    pub const fn status(&self) -> CopyBatchSessionStatus {
+        self.status
+    }
+
+    /// Returns authoritative latest-value progress.
+    pub const fn progress(&self) -> &CopyBatchProgress {
+        &self.progress
+    }
+}
+
+/// One ordered semantic event from an admitted independent batch.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CopyBatchEvent {
+    sequence: u64,
+    snapshot: CopyBatchSessionSnapshot,
+    #[serde(flatten)]
+    event: CopyBatchEventKind,
+}
+
+impl CopyBatchEvent {
+    /// Returns the execution-local monotonically increasing sequence number.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the snapshot captured with this transition.
+    pub fn snapshot(&self) -> CopyBatchSessionSnapshot {
+        self.snapshot.clone()
+    }
+
+    /// Returns the typed semantic payload.
+    pub const fn event(&self) -> &CopyBatchEventKind {
+        &self.event
+    }
+}
+
+/// Bounded semantic transitions emitted by independent batch execution.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CopyBatchEventKind {
+    /// Admission succeeded and aggregate work was frozen.
+    Started {
+        /// Number of plan items, including preflight failures.
+        total_items: u64,
+        /// Sum of viable source bytes.
+        total_bytes: u64,
+    },
+    /// A viable item is beginning execution.
+    ItemStarted {
+        /// Stable item key without a filesystem path.
+        item_key: String,
+        /// Planned source bytes for this item.
+        total_bytes: u64,
+    },
+    /// One item reached its authoritative terminal result.
+    ItemCompleted {
+        /// Stable item key without a filesystem path.
+        item_key: String,
+        /// Terminal item state.
+        state: CopyBatchItemState,
+        /// Publication outcome, if any.
+        outcome: Option<OperationOutcome>,
+        /// Sanitized failure code, if any.
+        failure_code: Option<OperationFailureCode>,
+    },
+    /// Cancellation was accepted or refused for the batch.
+    CancellationRequested {
+        /// Whether cancellation will stop unfinished items.
+        accepted: bool,
+    },
+    /// A host checkpoint failed, so execution stopped before the next item.
+    CheckpointFailed {
+        /// Last successfully executed item key, when one exists.
+        item_key: Option<String>,
+    },
+    /// The aggregate batch result is authoritative and complete.
+    Completed {
+        /// Complete aggregate result, including item paths and artifact evidence.
+        result: CopyBatchResult,
+    },
+}
+
+/// Single logical semantic-event consumer for one batch session.
+#[derive(Debug)]
+pub struct CopyBatchEventConsumer {
+    state: Arc<Mutex<CopyBatchSessionState>>,
+    event_ready: Arc<std::sync::Condvar>,
+    subscription: u64,
+}
+
+impl CopyBatchEventConsumer {
+    /// Blocks until the next event arrives or the batch reaches its terminal state.
+    pub fn recv(&self) -> Result<CopyBatchEvent, std::sync::mpsc::RecvError> {
+        let state = self.state.lock().map_err(|_| std::sync::mpsc::RecvError)?;
+        let mut state = self
+            .event_ready
+            .wait_while(state, |state| {
+                state.event_queue.is_empty() && !self.is_finished(state)
+            })
+            .map_err(|_| std::sync::mpsc::RecvError)?;
+        state
+            .event_queue
+            .pop_front()
+            .ok_or(std::sync::mpsc::RecvError)
+    }
+
+    /// Waits up to `timeout` for the next event.
+    pub fn recv_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<CopyBatchEvent, std::sync::mpsc::RecvTimeoutError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)?;
+        let (mut state, _) = self
+            .event_ready
+            .wait_timeout_while(state, timeout, |state| {
+                state.event_queue.is_empty() && !self.is_finished(state)
+            })
+            .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected)?;
+        if let Some(event) = state.event_queue.pop_front() {
+            Ok(event)
+        } else if self.is_finished(&state) {
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+        } else {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        }
+    }
+
+    /// Returns the next queued event without blocking.
+    pub fn try_recv(&self) -> Result<CopyBatchEvent, std::sync::mpsc::TryRecvError> {
+        let Ok(mut state) = self.state.lock() else {
+            return Err(std::sync::mpsc::TryRecvError::Disconnected);
+        };
+        if let Some(event) = state.event_queue.pop_front() {
+            Ok(event)
+        } else if self.is_finished(&state) {
+            Err(std::sync::mpsc::TryRecvError::Disconnected)
+        } else {
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        }
+    }
+
+    fn is_finished(&self, state: &CopyBatchSessionState) -> bool {
+        state.event_subscription != Some(self.subscription)
+            || (state.phase == CopyBatchSessionPhase::Idle && state.terminal_completion.is_some())
+    }
+}
+
+impl Drop for CopyBatchEventConsumer {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.event_subscription == Some(self.subscription)
+        {
+            state.event_consumer_connected = false;
+            state.event_queue.clear();
+            if state.phase == CopyBatchSessionPhase::Idle {
+                state.event_subscription = None;
+                state.event_queue_limit = 0;
+            }
+            self.event_ready.notify_all();
+        }
+    }
+}
+
+/// Latest authoritative completion retained by an independent batch session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CopyBatchCompletion {
+    sequence: u64,
+    snapshot: CopyBatchSessionSnapshot,
+    result: CopyBatchResult,
+}
+
+impl CopyBatchCompletion {
+    /// Returns the terminal semantic sequence number.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the terminal session snapshot.
+    pub fn snapshot(&self) -> CopyBatchSessionSnapshot {
+        self.snapshot.clone()
+    }
+
+    /// Returns the authoritative aggregate result.
+    pub const fn result(&self) -> &CopyBatchResult {
+        &self.result
+    }
+}
+
+/// Explicit host-owned admission and cancellation state for copy batches.
+#[derive(Clone, Debug)]
+pub struct CopyBatchSession {
+    state: Arc<Mutex<CopyBatchSessionState>>,
+    event_ready: Arc<std::sync::Condvar>,
+}
+
+impl Default for CopyBatchSession {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CopyBatchSessionState::default())),
+            event_ready: Arc::new(std::sync::Condvar::new()),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct CopyBatchSessionState {
+    phase: CopyBatchSessionPhase,
+    status: CopyBatchSessionStatus,
+    cancel_requested: bool,
+    cancellation: Option<CancellationHandle>,
+    progress: CopyBatchProgress,
+    current_item_base_bytes: u64,
+    event_queue: std::collections::VecDeque<CopyBatchEvent>,
+    event_queue_initial_capacity: usize,
+    event_queue_limit: usize,
+    event_consumer_connected: bool,
+    event_subscription: Option<u64>,
+    next_subscription: u64,
+    event_sequence: u64,
+    cancellation_event_emitted: bool,
+    completing_refusal_event_emitted: bool,
+    terminal_result: Option<CopyBatchResult>,
+    terminal_completion: Option<CopyBatchCompletion>,
+}
+
+impl CopyBatchSessionState {
+    fn snapshot(&self) -> CopyBatchSessionSnapshot {
+        CopyBatchSessionSnapshot {
+            phase: self.phase,
+            status: self.status,
+            progress: self.progress.clone(),
+        }
+    }
+
+    fn cancellation_flag(&self) -> bool {
+        self.cancel_requested
+            || self
+                .cancellation
+                .as_ref()
+                .is_some_and(CancellationHandle::is_cancelled)
+    }
+}
+
+fn emit_batch_event(
+    state: &mut CopyBatchSessionState,
+    event: CopyBatchEventKind,
+    event_ready: &std::sync::Condvar,
+) -> CopyBatchEvent {
+    let sequence = state.event_sequence;
+    state.event_sequence = state.event_sequence.saturating_add(1);
+    let event = CopyBatchEvent {
+        sequence,
+        snapshot: state.snapshot(),
+        event,
+    };
+    if state.event_consumer_connected {
+        assert!(
+            state.event_queue.len() < state.event_queue_limit,
+            "batch semantic events exceeded their per-plan bound"
+        );
+        state.event_queue.push_back(event.clone());
+        event_ready.notify_one();
+    }
+    event
+}
+
+fn observe_batch_cancellation(
+    state: &mut CopyBatchSessionState,
+    accepted: bool,
+    event_ready: &std::sync::Condvar,
+) {
+    if accepted {
+        state.cancel_requested = true;
+        if let Some(cancellation) = state.cancellation.as_ref() {
+            cancellation.cancel();
+        }
+        state.status = CopyBatchSessionStatus::CancellationRequested;
+        if !state.cancellation_event_emitted {
+            state.cancellation_event_emitted = true;
+            emit_batch_event(
+                state,
+                CopyBatchEventKind::CancellationRequested { accepted },
+                event_ready,
+            );
+        }
+    } else if !state.completing_refusal_event_emitted {
+        state.completing_refusal_event_emitted = true;
+        emit_batch_event(
+            state,
+            CopyBatchEventKind::CancellationRequested { accepted },
+            event_ready,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CopyBatchCompletionDecision {
+    Complete,
+    Cancel,
+}
+
+impl CopyBatchSession {
+    /// Creates an idle independent batch session.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns latest-value session state without blocking execution.
+    pub fn current_operation(&self) -> Result<CopyBatchSessionSnapshot, OperationFailureCode> {
+        self.state
+            .lock()
+            .map(|state| state.snapshot())
+            .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    /// Requests cancellation of the active batch and all unfinished items.
+    ///
+    /// Returns `true` while the session is running. Once the session enters
+    /// `Completing`, cancellation returns `false`. The first refusal in that
+    /// phase records one semantic event; repeated requests remain idempotent.
+    pub fn cancel(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if state.phase == CopyBatchSessionPhase::Running {
+            observe_batch_cancellation(&mut state, true, &self.event_ready);
+            true
+        } else {
+            if state.phase == CopyBatchSessionPhase::Completing {
+                observe_batch_cancellation(&mut state, false, &self.event_ready);
+            }
+            false
+        }
+    }
+
+    /// Reports whether this shared session owns an active batch.
+    pub fn is_busy(&self) -> bool {
+        self.state
+            .lock()
+            .map(|state| state.phase != CopyBatchSessionPhase::Idle)
+            .unwrap_or(true)
+    }
+
+    /// Claims the single semantic-event consumer for the next admission.
+    pub fn subscribe_events(&self) -> Result<CopyBatchEventConsumer, OperationFailureCode> {
+        self.subscribe_events_with_capacity(16)
+    }
+
+    /// Claims the single semantic-event consumer and sets its initial buffer size.
+    ///
+    /// Semantic transitions are retained in order up to a bound derived from
+    /// the admitted item count, so a slow consumer never blocks execution.
+    /// High-frequency progress stays in the latest session snapshot. A consumer
+    /// dropped during execution cannot be replaced until the terminal result.
+    pub fn subscribe_events_with_capacity(
+        &self,
+        capacity: usize,
+    ) -> Result<CopyBatchEventConsumer, OperationFailureCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?;
+        if state.phase != CopyBatchSessionPhase::Idle || state.event_subscription.is_some() {
+            return Err(OperationFailureCode::EventConsumerUnavailable);
+        }
+        state.next_subscription = state
+            .next_subscription
+            .checked_add(1)
+            .ok_or(OperationFailureCode::SessionUnavailable)?;
+        let subscription = state.next_subscription;
+        state.event_queue.clear();
+        state.event_queue_initial_capacity = capacity.max(1);
+        state.event_queue_limit = 0;
+        state.event_consumer_connected = true;
+        state.event_subscription = Some(subscription);
+        state.event_sequence = 0;
+        Ok(CopyBatchEventConsumer {
+            state: Arc::clone(&self.state),
+            event_ready: Arc::clone(&self.event_ready),
+            subscription,
+        })
+    }
+
+    /// Returns the most recent authoritative aggregate result.
+    pub fn last_result(&self) -> Result<Option<CopyBatchResult>, OperationFailureCode> {
+        self.state
+            .lock()
+            .map(|state| state.terminal_result.clone())
+            .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    /// Returns the most recent terminal completion, independent of consumer delivery.
+    pub fn last_completion(&self) -> Result<Option<CopyBatchCompletion>, OperationFailureCode> {
+        self.state
+            .lock()
+            .map(|state| state.terminal_completion.clone())
+            .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    fn admit(
+        &self,
+        cancellation: &CancellationHandle,
+        total_items: u64,
+        total_bytes: u64,
+    ) -> Result<(), OperationFailureCode> {
+        let event_limit = max_copy_batch_event_count(total_items)
+            .ok_or(OperationFailureCode::SessionUnavailable)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?;
+        if state.phase != CopyBatchSessionPhase::Idle {
+            return Err(OperationFailureCode::Busy);
+        }
+        let initial_capacity = state.event_queue_initial_capacity.min(event_limit);
+        state.event_queue = std::collections::VecDeque::with_capacity(initial_capacity);
+        state.event_queue_limit = event_limit;
+        let pre_cancelled = cancellation.is_cancelled();
+        state.phase = CopyBatchSessionPhase::Running;
+        state.status = CopyBatchSessionStatus::Running;
+        state.cancel_requested = false;
+        state.cancellation = Some(cancellation.clone());
+        state.progress = CopyBatchProgress {
+            total_items,
+            total_bytes,
+            ..CopyBatchProgress::default()
+        };
+        state.event_sequence = 0;
+        state.cancellation_event_emitted = false;
+        state.completing_refusal_event_emitted = false;
+        state.terminal_result = None;
+        state.terminal_completion = None;
+        emit_batch_event(
+            &mut state,
+            CopyBatchEventKind::Started {
+                total_items,
+                total_bytes,
+            },
+            &self.event_ready,
+        );
+        if pre_cancelled {
+            observe_batch_cancellation(&mut state, true, &self.event_ready);
+        }
+        Ok(())
+    }
+
+    fn cancellation_requested(&self) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return true;
+        };
+        if state.cancellation_flag() {
+            if state.phase == CopyBatchSessionPhase::Running {
+                observe_batch_cancellation(&mut state, true, &self.event_ready);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn begin_completing(&self) -> Result<CopyBatchCompletionDecision, OperationFailureCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?;
+        if state.phase != CopyBatchSessionPhase::Running {
+            return Err(OperationFailureCode::SessionUnavailable);
+        }
+        let decision = if state.cancellation_flag() {
+            observe_batch_cancellation(&mut state, true, &self.event_ready);
+            CopyBatchCompletionDecision::Cancel
+        } else {
+            CopyBatchCompletionDecision::Complete
+        };
+        state.completing_refusal_event_emitted = false;
+        state.phase = CopyBatchSessionPhase::Completing;
+        Ok(decision)
+    }
+
+    fn start_item(&self, item_key: &str, total_bytes: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.current_item_base_bytes = state.progress.completed_bytes;
+            state.progress.current_item_key = Some(item_key.to_owned());
+            state.progress.current_item_completed_bytes = 0;
+            state.progress.current_item_total_bytes = total_bytes;
+            emit_batch_event(
+                &mut state,
+                CopyBatchEventKind::ItemStarted {
+                    item_key: item_key.to_owned(),
+                    total_bytes,
+                },
+                &self.event_ready,
+            );
+        }
+    }
+
+    fn record_item_progress(&self, item_key: &str, completed_bytes: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if state.progress.current_item_key.as_deref() != Some(item_key) {
+            return;
+        }
+        let completed_bytes = completed_bytes.min(state.progress.current_item_total_bytes);
+        state.progress.current_item_completed_bytes = completed_bytes;
+        state.progress.completed_bytes = state
+            .current_item_base_bytes
+            .saturating_add(completed_bytes);
+    }
+
+    fn complete_item(&self, item: &CopyBatchItemResult, completed_bytes: u64) -> Option<()> {
+        let mut state = self.state.lock().ok()?;
+        state.progress.completed_items = state.progress.completed_items.saturating_add(1);
+        if state.progress.current_item_key.as_deref() == Some(item.item_key.as_str()) {
+            state.progress.completed_bytes = state
+                .current_item_base_bytes
+                .saturating_add(completed_bytes.min(state.progress.current_item_total_bytes));
+        }
+        match item.state {
+            CopyBatchItemState::Succeeded => {
+                state.progress.succeeded_items = state.progress.succeeded_items.saturating_add(1);
+            }
+            CopyBatchItemState::Skipped => {
+                state.progress.succeeded_items = state.progress.succeeded_items.saturating_add(1);
+                state.progress.skipped_items = state.progress.skipped_items.saturating_add(1);
+            }
+            CopyBatchItemState::Cancelled => {
+                state.progress.cancelled_items = state.progress.cancelled_items.saturating_add(1);
+            }
+            CopyBatchItemState::Failed
+            | CopyBatchItemState::Uncertain
+            | CopyBatchItemState::PreflightFailed => {
+                state.progress.failed_items = state.progress.failed_items.saturating_add(1);
+            }
+            CopyBatchItemState::NotStarted => {}
+        }
+        state.progress.current_item_key = None;
+        state.progress.current_item_completed_bytes = 0;
+        state.progress.current_item_total_bytes = 0;
+        emit_batch_event(
+            &mut state,
+            CopyBatchEventKind::ItemCompleted {
+                item_key: item.item_key.clone(),
+                state: item.state,
+                outcome: item.outcome,
+                failure_code: item.failure.map(|failure| failure.code()),
+            },
+            &self.event_ready,
+        );
+        Some(())
+    }
+
+    fn checkpoint_failed(&self, item_key: Option<String>) {
+        if let Ok(mut state) = self.state.lock() {
+            emit_batch_event(
+                &mut state,
+                CopyBatchEventKind::CheckpointFailed { item_key },
+                &self.event_ready,
+            );
+        }
+    }
+
+    fn finish(&self, result: CopyBatchResult) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.phase = CopyBatchSessionPhase::Idle;
+        state.status = batch_session_status(result.state());
+        state.progress.current_item_key = None;
+        let event = emit_batch_event(
+            &mut state,
+            CopyBatchEventKind::Completed {
+                result: result.clone(),
+            },
+            &self.event_ready,
+        );
+        if !state.event_consumer_connected {
+            state.event_subscription = None;
+            state.event_queue.clear();
+            state.event_queue_limit = 0;
+        }
+        state.terminal_result = Some(result.clone());
+        state.terminal_completion = Some(CopyBatchCompletion {
+            sequence: event.sequence,
+            snapshot: event.snapshot,
+            result,
+        });
+        self.event_ready.notify_all();
+    }
+}
+
+/// Returns the fixed journal bound for one admitted batch.
+///
+/// The bound covers one start transition, up to two item transitions per
+/// planned item, the accepted and refused cancellation transitions, one
+/// checkpoint-failure transition, and one aggregate completion transition.
+fn max_copy_batch_event_count(total_items: u64) -> Option<usize> {
+    usize::try_from(total_items)
+        .ok()?
+        .checked_mul(2)?
+        .checked_add(5)
+}
+
+fn batch_session_status(state: JobState) -> CopyBatchSessionStatus {
+    match state {
+        JobState::Succeeded => CopyBatchSessionStatus::Succeeded,
+        JobState::CompletedWithIssues => CopyBatchSessionStatus::CompletedWithIssues,
+        JobState::Cancelled => CopyBatchSessionStatus::Cancelled,
+        _ => CopyBatchSessionStatus::Failed,
+    }
+}
+
+fn batch_contains_publication_uncertainty(items: &[CopyBatchItemResult]) -> bool {
+    items.iter().any(|item| {
+        item.state == CopyBatchItemState::Uncertain
+            || item
+                .failure
+                .as_ref()
+                .is_some_and(|failure| failure.code() == OperationFailureCode::PublicationUncertain)
+    })
+}
+
+fn aggregate_batch_result(items: Vec<CopyBatchItemResult>) -> CopyBatchResult {
+    let successes = items
+        .iter()
+        .filter(|item| item.state == CopyBatchItemState::Succeeded)
+        .count();
+    let failures = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.state,
+                CopyBatchItemState::Failed
+                    | CopyBatchItemState::Uncertain
+                    | CopyBatchItemState::PreflightFailed
+            )
+        })
+        .count();
+    let cancelled = items
+        .iter()
+        .any(|item| item.state == CopyBatchItemState::Cancelled);
+    let not_started = items
+        .iter()
+        .any(|item| item.state == CopyBatchItemState::NotStarted);
+    let publication_uncertain = batch_contains_publication_uncertainty(&items);
+    let state = if publication_uncertain {
+        JobState::Failed
+    } else if cancelled {
+        JobState::Cancelled
+    } else if not_started {
+        JobState::Failed
+    } else if failures == 0 {
+        JobState::Succeeded
+    } else if successes > 0 {
+        JobState::CompletedWithIssues
+    } else {
+        JobState::Failed
+    };
+    CopyBatchResult {
+        state,
+        failure: publication_uncertain.then_some(OperationFailure::new(
+            OperationFailureCode::PublicationUncertain,
+        )),
+        items,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn operation_session_for_batch_item(
+    session: &CopyBatchSession,
+    item_key: &str,
+    total_bytes: u64,
+) -> OperationSession {
+    let session = session.clone();
+    let item_key = item_key.to_owned();
+    let _ = total_bytes;
+    OperationSession::with_progress_observer(move |completed_bytes| {
+        session.record_item_progress(&item_key, completed_bytes);
+    })
+}
+
+/// Applies the terminal decision after aggregate item outcomes are known.
+///
+/// Durable checkpoint failure takes precedence because execution cannot continue
+/// safely without the host's acknowledgement. Otherwise, uncertain publication
+/// outranks an accepted cancellation so the aggregate never understates it.
+fn finalize_batch_result(
+    mut result: CopyBatchResult,
+    completion: Result<CopyBatchCompletionDecision, OperationFailureCode>,
+    checkpoint_failed: bool,
+) -> CopyBatchResult {
+    if checkpoint_failed {
+        result.state = JobState::Failed;
+        result.failure = Some(OperationFailure::new(
+            OperationFailureCode::CheckpointFailed,
+        ));
+        return result;
+    }
+
+    match completion {
+        Ok(CopyBatchCompletionDecision::Cancel) => {
+            if batch_contains_publication_uncertainty(&result.items) {
+                result.state = JobState::Failed;
+                result.failure = Some(OperationFailure::new(
+                    OperationFailureCode::PublicationUncertain,
+                ));
+            } else {
+                result.state = JobState::Cancelled;
+            }
+        }
+        Ok(CopyBatchCompletionDecision::Complete) => {}
+        Err(code) => {
+            result.state = JobState::Failed;
+            result.failure = Some(OperationFailure::new(
+                if batch_contains_publication_uncertainty(&result.items) {
+                    OperationFailureCode::PublicationUncertain
+                } else {
+                    code
+                },
+            ));
+        }
+    }
+    result
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn execute_copy_batch_with_checkpoint_and_cancellation(
+    plan: CopyBatchPlan,
+    session: &CopyBatchSession,
+    cancellation: CancellationHandle,
+    mut checkpoint: impl FnMut(CopyBatchItemCheckpoint) -> Result<(), CopyBatchCheckpointError>,
+) -> CopyBatchExecution {
+    let total_bytes = plan
+        .items
+        .iter()
+        .filter_map(|item| item.operation.as_ref().ok())
+        .fold(0_u64, |total, operation| {
+            total.saturating_add(operation.snapshot().source().size())
+        });
+    let destination_directory_identity = plan.destination_directory_identity;
+    if let Err(code) = session.admit(&cancellation, plan.items.len() as u64, total_bytes) {
+        let result = CopyBatchResult {
+            state: JobState::Failed,
+            failure: Some(OperationFailure::new(code)),
+            items: Vec::new(),
+        };
+        return CopyBatchExecution {
+            result,
+            checkpoint_failed: false,
+            failed_checkpoint: None,
+        };
+    }
+
+    let mut results = Vec::with_capacity(plan.items.len());
+    let mut checkpoint_failed = false;
+    let mut failed_checkpoint = None;
+    let mut checkpoint_sequence = 0_u64;
+    for item in plan.items {
+        if checkpoint_failed {
+            results.push(CopyBatchItemResult::not_started(
+                item.item_key,
+                item.source,
+                item.destination,
+            ));
+            continue;
+        }
+        if session.cancellation_requested() {
+            let result =
+                CopyBatchItemResult::cancelled(item.item_key, item.source, item.destination);
+            checkpoint_sequence = checkpoint_sequence.saturating_add(1);
+            let pending_checkpoint = CopyBatchItemCheckpoint {
+                sequence: checkpoint_sequence,
+                item: result.clone(),
+            };
+            if checkpoint(pending_checkpoint.clone()).is_err() {
+                checkpoint_failed = true;
+                failed_checkpoint = Some(pending_checkpoint);
+                session.checkpoint_failed(Some(result.item_key.clone()));
+            } else if session.complete_item(&result, 0).is_none() {
+                checkpoint_failed = true;
+            }
+            results.push(result);
+            continue;
+        }
+
+        let operation = match item.operation {
+            Ok(operation) => operation,
+            Err(error) => {
+                let result = CopyBatchItemResult::preflight_failed(
+                    item.item_key,
+                    item.source,
+                    item.destination,
+                    error.code(),
+                );
+                checkpoint_sequence = checkpoint_sequence.saturating_add(1);
+                let pending_checkpoint = CopyBatchItemCheckpoint {
+                    sequence: checkpoint_sequence,
+                    item: result.clone(),
+                };
+                if checkpoint(pending_checkpoint.clone()).is_err() {
+                    checkpoint_failed = true;
+                    failed_checkpoint = Some(pending_checkpoint);
+                    session.checkpoint_failed(Some(result.item_key.clone()));
+                } else if session.complete_item(&result, 0).is_none() {
+                    checkpoint_failed = true;
+                }
+                results.push(result);
+                continue;
+            }
+        };
+        let source = operation.snapshot().source().path().to_path_buf();
+        let destination = operation.snapshot().destination().to_path_buf();
+        let item_bytes = operation.snapshot().source().size();
+        session.start_item(&item.item_key, item_bytes);
+        let operation_session =
+            operation_session_for_batch_item(session, &item.item_key, item_bytes);
+        let operation_result =
+            match validate_batch_destination_anchor(&operation, destination_directory_identity) {
+                Ok(()) => execute_operation_with_cancellation(
+                    operation,
+                    &operation_session,
+                    &cancellation,
+                ),
+                Err(code) => failed_result(Vec::new(), code, false),
+            };
+        let completed_bytes = operation_session
+            .current_operation()
+            .map(|snapshot| snapshot.completed_bytes())
+            .unwrap_or(0);
+        let result = CopyBatchItemResult::from_operation(
+            item.item_key,
+            source,
+            destination,
+            operation_result,
+        );
+        if result.state() == CopyBatchItemState::Cancelled {
+            let _ = session.cancellation_requested();
+        }
+        checkpoint_sequence = checkpoint_sequence.saturating_add(1);
+        let pending_checkpoint = CopyBatchItemCheckpoint {
+            sequence: checkpoint_sequence,
+            item: result.clone(),
+        };
+        if checkpoint(pending_checkpoint.clone()).is_err() {
+            checkpoint_failed = true;
+            failed_checkpoint = Some(pending_checkpoint);
+            session.checkpoint_failed(Some(result.item_key.clone()));
+        } else if session.complete_item(&result, completed_bytes).is_none() {
+            checkpoint_failed = true;
+        }
+        results.push(result);
+    }
+
+    let completion = session.begin_completing();
+    let result = finalize_batch_result(
+        aggregate_batch_result(results),
+        completion,
+        checkpoint_failed,
+    );
+    session.finish(result.clone());
+    CopyBatchExecution {
+        result,
+        checkpoint_failed,
+        failed_checkpoint,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn execute_copy_batch_with_checkpoint_and_cancellation(
+    _plan: CopyBatchPlan,
+    _session: &CopyBatchSession,
+    _cancellation: CancellationHandle,
+    _checkpoint: impl FnMut(CopyBatchItemCheckpoint) -> Result<(), CopyBatchCheckpointError>,
+) -> CopyBatchExecution {
+    CopyBatchExecution {
+        result: CopyBatchResult {
+            state: JobState::Failed,
+            failure: Some(OperationFailure::new(
+                OperationFailureCode::UnsupportedCapability,
+            )),
+            items: Vec::new(),
+        },
+        checkpoint_failed: false,
+        failed_checkpoint: None,
+    }
+}
+
+#[cfg(test)]
+mod copy_batch_aggregation_tests {
+    use super::*;
+
+    fn item(state: CopyBatchItemState) -> CopyBatchItemResult {
+        let failure = match state {
+            CopyBatchItemState::PreflightFailed
+            | CopyBatchItemState::Failed
+            | CopyBatchItemState::Uncertain
+            | CopyBatchItemState::Cancelled => Some(OperationFailure::new(
+                if state == CopyBatchItemState::Uncertain {
+                    OperationFailureCode::PublicationUncertain
+                } else {
+                    OperationFailureCode::DestinationUnavailable
+                },
+            )),
+            CopyBatchItemState::Succeeded
+            | CopyBatchItemState::Skipped
+            | CopyBatchItemState::NotStarted => None,
+        };
+        CopyBatchItemResult {
+            item_key: format!("item-{state:?}"),
+            source: PathBuf::from("/source"),
+            destination: Some(PathBuf::from("/destination")),
+            state,
+            outcome: (state == CopyBatchItemState::Succeeded).then_some(OperationOutcome::Copied),
+            failure,
+            cleanup_warning: None,
+            milestones: Vec::new(),
+            cleanup_artifact_retained: false,
+            artifacts: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn skipped_items_do_not_count_as_successes_when_classifying_a_batch() {
+        let all_skipped = aggregate_batch_result(vec![item(CopyBatchItemState::Skipped)]);
+        assert_eq!(all_skipped.state, JobState::Succeeded);
+
+        let succeeded_and_skipped = aggregate_batch_result(vec![
+            item(CopyBatchItemState::Succeeded),
+            item(CopyBatchItemState::Skipped),
+        ]);
+        assert_eq!(succeeded_and_skipped.state, JobState::Succeeded);
+
+        let skipped_and_failed = aggregate_batch_result(vec![
+            item(CopyBatchItemState::Skipped),
+            item(CopyBatchItemState::PreflightFailed),
+        ]);
+        assert_eq!(skipped_and_failed.state, JobState::Failed);
+
+        let success_skip_and_failure = aggregate_batch_result(vec![
+            item(CopyBatchItemState::Succeeded),
+            item(CopyBatchItemState::Skipped),
+            item(CopyBatchItemState::PreflightFailed),
+        ]);
+        assert_eq!(
+            success_skip_and_failure.state,
+            JobState::CompletedWithIssues
+        );
+    }
+
+    #[test]
+    fn completion_error_does_not_replace_publication_uncertainty() {
+        let result = finalize_batch_result(
+            aggregate_batch_result(vec![item(CopyBatchItemState::Uncertain)]),
+            Err(OperationFailureCode::DestinationUnavailable),
+            false,
+        );
+
+        assert_eq!(result.state, JobState::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+    }
+
+    #[test]
+    fn completed_batch_with_uncertain_item_promotes_publication_uncertainty() {
+        let result = finalize_batch_result(
+            aggregate_batch_result(vec![item(CopyBatchItemState::Uncertain)]),
+            Ok(CopyBatchCompletionDecision::Complete),
+            false,
+        );
+
+        assert_eq!(result.state, JobState::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+    }
+
+    #[test]
+    fn completed_mixed_batch_with_uncertain_item_is_failed() {
+        let result = finalize_batch_result(
+            aggregate_batch_result(vec![
+                item(CopyBatchItemState::Succeeded),
+                item(CopyBatchItemState::Uncertain),
+            ]),
+            Ok(CopyBatchCompletionDecision::Complete),
+            false,
+        );
+
+        assert_eq!(result.state, JobState::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+    }
+
+    #[test]
+    fn all_failed_batch_with_uncertain_item_uses_publication_uncertainty() {
+        for items in [
+            vec![
+                item(CopyBatchItemState::Uncertain),
+                item(CopyBatchItemState::Uncertain),
+            ],
+            vec![
+                item(CopyBatchItemState::Failed),
+                item(CopyBatchItemState::Uncertain),
+            ],
+        ] {
+            let result = finalize_batch_result(
+                aggregate_batch_result(items),
+                Ok(CopyBatchCompletionDecision::Complete),
+                false,
+            );
+
+            assert_eq!(result.state, JobState::Failed);
+            assert_eq!(
+                result.failure.as_ref().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+        }
+    }
+
+    #[test]
+    fn accepted_cancellation_does_not_hide_publication_uncertainty() {
+        let result = finalize_batch_result(
+            aggregate_batch_result(vec![
+                item(CopyBatchItemState::Succeeded),
+                item(CopyBatchItemState::Uncertain),
+            ]),
+            Ok(CopyBatchCompletionDecision::Cancel),
+            false,
+        );
+
+        assert_eq!(result.state, JobState::Failed);
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+    }
+
+    #[test]
+    fn checkpoint_failure_takes_precedence_over_publication_uncertainty() {
+        for completion in [
+            Ok(CopyBatchCompletionDecision::Complete),
+            Ok(CopyBatchCompletionDecision::Cancel),
+        ] {
+            let result = finalize_batch_result(
+                aggregate_batch_result(vec![item(CopyBatchItemState::Uncertain)]),
+                completion,
+                true,
+            );
+
+            assert_eq!(result.state, JobState::Failed);
+            assert_eq!(
+                result.failure.as_ref().map(|failure| failure.code()),
+                Some(OperationFailureCode::CheckpointFailed)
+            );
+        }
+    }
+}
+
+#[cfg(all(test, not(target_os = "macos")))]
+pub(crate) fn unsupported_copy_batch_plan_for_test() -> CopyBatchPlan {
+    CopyBatchPlan {
+        snapshot: CopyBatchPlanSnapshot {
+            kind: "copy_batch_plan",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            destination_directory: PathBuf::from("/missing-output"),
+            workspace: PathBuf::from("/missing-workspace"),
+            conflict_policy: ConflictPolicy::Fail,
+            items: Vec::new(),
+        },
+        items: Vec::new(),
+        destination_directory_identity: path_identity(Path::new("."))
+            .expect("test working directory has a filesystem identity"),
     }
 }
 
@@ -11246,6 +13489,7 @@ mod tests {
             terminal.snapshot().status(),
             match result.state() {
                 JobState::Succeeded => OperationSessionStatus::Succeeded,
+                JobState::CompletedWithIssues => OperationSessionStatus::Failed,
                 JobState::Failed => OperationSessionStatus::Failed,
                 JobState::Cancelled => OperationSessionStatus::Cancelled,
             }
@@ -11695,5 +13939,432 @@ mod copy_planning_signal_tests {
             );
             assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod copy_batch_session_tests {
+    use super::{
+        CancellationHandle, CopyBatchEventKind, CopyBatchItemResult, CopyBatchRequest,
+        CopyBatchResult, CopyBatchSession, CopyBatchSessionPhase, CopyBatchSessionStatus,
+        CopyThroughRequest, IO_BUFFER_SIZE, JobState,
+        copy_source_to_stage_with_length_and_checkpoint,
+        execute_copy_batch_with_checkpoint_and_cancellation, execute_with_producer,
+        max_copy_batch_event_count, operation_session_for_batch_item, plan_copy_batch,
+        plan_copy_through,
+    };
+    use fs2::FileExt;
+    use std::fs;
+    use std::sync::mpsc;
+
+    #[test]
+    fn semantic_event_journal_bound_covers_every_transition() {
+        assert_eq!(max_copy_batch_event_count(0), Some(5));
+        assert_eq!(max_copy_batch_event_count(1), Some(7));
+        assert_eq!(max_copy_batch_event_count(2), Some(9));
+        assert_eq!(max_copy_batch_event_count(u64::MAX), None);
+    }
+
+    #[test]
+    fn completing_records_one_late_cancel_refusal_for_repeated_requests() {
+        let session = CopyBatchSession::new();
+        let consumer = session.subscribe_events_with_capacity(1).unwrap();
+        session.admit(&CancellationHandle::new(), 0, 0).unwrap();
+        assert!(session.cancel());
+        session.begin_completing().unwrap();
+
+        for _ in 0..128 {
+            assert!(!session.cancel());
+        }
+        session.finish(CopyBatchResult {
+            state: JobState::Succeeded,
+            failure: None,
+            items: Vec::new(),
+        });
+
+        let mut events = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            events.push(event);
+        }
+        let cancellation_events = events
+            .iter()
+            .filter_map(|event| match event.event() {
+                CopyBatchEventKind::CancellationRequested { accepted } => Some((
+                    event.sequence(),
+                    *accepted,
+                    event.snapshot().phase(),
+                    event.snapshot().status(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            cancellation_events,
+            vec![
+                (
+                    1,
+                    true,
+                    CopyBatchSessionPhase::Running,
+                    CopyBatchSessionStatus::CancellationRequested
+                ),
+                (
+                    2,
+                    false,
+                    CopyBatchSessionPhase::Completing,
+                    CopyBatchSessionStatus::CancellationRequested
+                )
+            ]
+        );
+        assert!(events.len() <= max_copy_batch_event_count(0).unwrap());
+        assert_eq!(
+            events.last().map(|event| event.sequence()),
+            Some(3),
+            "the refusal precedes the one terminal event"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), CopyBatchEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last().map(|event| event.event()),
+            Some(CopyBatchEventKind::Completed { result })
+                if result.state() == JobState::Succeeded
+        ));
+    }
+
+    #[test]
+    fn stalled_capacity_one_consumer_does_not_block_progress_or_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("output");
+        let workspace = root.path().join("workspace");
+        let first = root.path().join("first.bin");
+        let second = root.path().join("second.bin");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::write(&first, b"first copy batch item").unwrap();
+        fs::write(&second, b"second copy batch item").unwrap();
+
+        let plan = plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first.bin"))
+                .with_item(&second, output.join("second.bin")),
+        )
+        .unwrap();
+        let session = CopyBatchSession::new();
+        let consumer = session.subscribe_events_with_capacity(1).unwrap();
+        let worker_session = session.clone();
+        let (progress_sender, progress_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let cancellation = CancellationHandle::new();
+        let worker_cancellation = cancellation.clone();
+        let worker = std::thread::spawn(move || {
+            let mut paused = false;
+            execute_copy_batch_with_checkpoint_and_cancellation(
+                plan,
+                &worker_session,
+                worker_cancellation,
+                |_| {
+                    if !paused {
+                        paused = true;
+                        progress_sender
+                            .send(worker_session.current_operation().unwrap())
+                            .unwrap();
+                        resume_receiver.recv().unwrap();
+                    }
+                    Ok(())
+                },
+            )
+        });
+
+        let live = progress_receiver.recv().unwrap();
+        assert_eq!(live.progress().completed_items(), 0);
+        assert_eq!(
+            live.progress().completed_bytes(),
+            b"first copy batch item".len() as u64
+        );
+        assert!(session.cancel());
+        resume_sender.send(()).unwrap();
+
+        let execution = worker.join().unwrap();
+        assert_eq!(execution.result.state(), JobState::Cancelled);
+        assert_eq!(
+            fs::read(output.join("first.bin")).unwrap(),
+            b"first copy batch item"
+        );
+        assert!(!output.join("second.bin").exists());
+        assert_eq!(
+            session
+                .current_operation()
+                .unwrap()
+                .progress()
+                .cancelled_items(),
+            1
+        );
+
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(
+            events.len(),
+            6,
+            "the journal retains every semantic transition beyond its capacity hint"
+        );
+        assert!(events.len() <= max_copy_batch_event_count(2).unwrap());
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence())
+                .collect::<Vec<_>>(),
+            (0..events.len() as u64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), CopyBatchEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event(),
+                    CopyBatchEventKind::CancellationRequested { accepted: true }
+                ))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last().map(|event| event.event()),
+            Some(CopyBatchEventKind::Completed { result })
+                if result.state() == JobState::Cancelled
+        ));
+    }
+
+    #[test]
+    fn cancelled_item_event_follows_checkpoint_ack_and_cancellation_precedes_item_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("output");
+        let workspace = root.path().join("workspace");
+        let source = root.path().join("source.bin");
+        let destination = output.join("source.bin");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::write(&source, b"cancel while waiting for the destination lock").unwrap();
+
+        let plan = plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace).with_item(&source, &destination),
+        )
+        .unwrap();
+        let lock_path = plan.items[0]
+            .operation
+            .as_ref()
+            .unwrap()
+            .snapshot()
+            .destination_lock_path()
+            .to_path_buf();
+        let held_lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        held_lock.lock_exclusive().unwrap();
+
+        let session = CopyBatchSession::new();
+        let consumer = session.subscribe_events_with_capacity(8).unwrap();
+        let cancellation = CancellationHandle::new();
+        let worker_session = session.clone();
+        let worker_cancellation = cancellation.clone();
+        let (checkpoint_sender, checkpoint_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            execute_copy_batch_with_checkpoint_and_cancellation(
+                plan,
+                &worker_session,
+                worker_cancellation,
+                |checkpoint| {
+                    checkpoint_sender.send(checkpoint.item.state()).unwrap();
+                    resume_receiver.recv().unwrap();
+                    Ok(())
+                },
+            )
+        });
+
+        let mut events = Vec::new();
+        loop {
+            let event = consumer.recv().expect("batch starts the locked child");
+            let item_started = matches!(event.event(), CopyBatchEventKind::ItemStarted { .. });
+            events.push(event);
+            if item_started {
+                break;
+            }
+        }
+        cancellation.cancel();
+        let checkpoint_state = checkpoint_receiver
+            .recv()
+            .expect("cancelled child reaches its durable checkpoint");
+        let events_before_ack = events
+            .into_iter()
+            .chain(std::iter::from_fn(|| consumer.try_recv().ok()))
+            .collect::<Vec<_>>();
+        let cancellation_before_ack = events_before_ack.iter().any(|event| {
+            matches!(
+                event.event(),
+                CopyBatchEventKind::CancellationRequested { accepted: true }
+            )
+        });
+        let item_completion_before_ack = events_before_ack
+            .iter()
+            .any(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }));
+        resume_sender.send(()).unwrap();
+        let execution = worker.join().unwrap();
+        assert_eq!(checkpoint_state, super::CopyBatchItemState::Cancelled);
+        assert!(cancellation_before_ack);
+        assert!(!item_completion_before_ack);
+        assert_eq!(execution.result.state(), JobState::Cancelled);
+        let mut events = events_before_ack;
+        events.extend(std::iter::from_fn(|| consumer.try_recv().ok()));
+
+        let cancellation_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.event(),
+                    CopyBatchEventKind::CancellationRequested { accepted: true }
+                )
+            })
+            .unwrap();
+        let item_completion_index = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event.event(),
+                    CopyBatchEventKind::ItemCompleted {
+                        state: super::CopyBatchItemState::Cancelled,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(cancellation_index < item_completion_index);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event(),
+                    CopyBatchEventKind::CancellationRequested { accepted: true }
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence())
+                .collect::<Vec<_>>(),
+            (0..events.len() as u64).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.event(), CopyBatchEventKind::Completed { .. }))
+                .count(),
+            1
+        );
+        drop(held_lock);
+    }
+
+    #[test]
+    fn progress_updates_remain_latest_value_without_semantic_events() {
+        let session = CopyBatchSession::new();
+        let consumer = session.subscribe_events_with_capacity(1).unwrap();
+        session.admit(&CancellationHandle::new(), 1, 100).unwrap();
+        session.start_item("progress-item", 100);
+
+        for completed_bytes in [10, 40, 90, 75] {
+            session.record_item_progress("progress-item", completed_bytes);
+        }
+
+        let snapshot = session.current_operation().unwrap();
+        assert_eq!(snapshot.progress().completed_bytes(), 75);
+        let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+        assert_eq!(events.len(), 2, "progress must not create semantic events");
+        assert!(matches!(
+            events[0].event(),
+            CopyBatchEventKind::Started { total_items: 1, .. }
+        ));
+        assert!(matches!(
+            events[1].event(),
+            CopyBatchEventKind::ItemStarted { item_key, .. } if item_key == "progress-item"
+        ));
+    }
+
+    #[test]
+    fn active_copy_progress_mirrors_inner_operation_bytes_before_item_completion() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.bin");
+        let destination = root.path().join("destination.bin");
+        let workspace = root.path().join("workspace");
+        let body = vec![0x5a_u8; IO_BUFFER_SIZE * 2 + 37];
+        fs::write(&source, &body).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        let planned_bytes = u64::try_from(body.len()).unwrap();
+        let plan =
+            plan_copy_through(CopyThroughRequest::new(&source, &destination, &workspace)).unwrap();
+        let session = CopyBatchSession::new();
+        session
+            .admit(&CancellationHandle::new(), 1, planned_bytes)
+            .unwrap();
+        session.start_item("item-1", planned_bytes);
+        let operation_session = operation_session_for_batch_item(&session, "item-1", planned_bytes);
+        let observer_session = session.clone();
+        let (progress_sender, progress_receiver) = mpsc::channel();
+
+        let result =
+            execute_with_producer(plan, &operation_session, move |source, stage, session| {
+                let mut observed = false;
+                copy_source_to_stage_with_length_and_checkpoint(
+                    source,
+                    stage,
+                    planned_bytes,
+                    session,
+                    || {
+                        if !observed {
+                            observed = true;
+                            progress_sender
+                                .send(observer_session.current_operation().unwrap())
+                                .unwrap();
+                        }
+                    },
+                )
+            });
+
+        let live = progress_receiver
+            .recv()
+            .expect("copy must publish live batch progress");
+        assert_eq!(live.progress().current_item_key(), Some("item-1"));
+        assert!(live.progress().completed_bytes() > 0);
+        assert!(live.progress().completed_bytes() < planned_bytes);
+        assert_eq!(
+            live.progress().current_item_completed_bytes(),
+            live.progress().completed_bytes()
+        );
+        assert_eq!(live.progress().current_item_total_bytes(), planned_bytes);
+
+        let item = CopyBatchItemResult::from_operation(
+            "item-1".to_owned(),
+            source.clone(),
+            destination.clone(),
+            result,
+        );
+        session.complete_item(&item, planned_bytes).unwrap();
+        let completed = session.current_operation().unwrap();
+        assert_eq!(completed.progress().completed_bytes(), planned_bytes);
+        assert_eq!(completed.progress().current_item_key(), None);
+        assert_eq!(completed.progress().current_item_completed_bytes(), 0);
+        assert_eq!(fs::read(destination).unwrap(), body);
     }
 }

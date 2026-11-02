@@ -37,11 +37,17 @@ modules from the Engine dependency graph.
 
 ```
 nscb copy <source> [<destination>] [--workspace <path>] [--replace] [--json | --jsonl]
+nscb copy-batch <source>... [--input-list <path>]... --output-dir <existing-directory> [--workspace <path>] [--conflict fail|replace|skip | --replace | --skip] [--recursive] [--follow-symlinks] [--json | --jsonl]
 nscb jobs list [--json]
 nscb jobs show <id> [--json]
-nscb jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]
+nscb jobs retry <id> [--failed-items] [--replace | --skip] [--json | --jsonl]
 nscb jobs clear [--json]
 ```
+
+`copy-batch` stops option parsing at `--`. Later arguments are positional
+source names even when they begin with `--`. If parsing fails, the diagnostic
+pre-scan also stops at that delimiter; a name such as `--json` cannot select
+machine output after it.
 
 The command requires one source and accepts zero or one destination. An
 explicit destination overrides standalone configuration. When the destination
@@ -109,11 +115,15 @@ Exit classes are stable:
 | 5 | Reserved for provider or device failures; copy-through produces none |
 | 6 | Cancelled or interrupted execution |
 | 7 | Internal, session, write, staged-validation, publication, or reporting failure, including `PublicationUncertain` |
-| 8 | Reserved for future completed-with-issues batch results; never fabricated |
+| 8 | At least one `Copied` or `AlreadyUpToDate` item and at least one failed item (`CompletedWithIssues`) |
 
 `PublicationUncertain` is reported as a failed job with exit 7. The destination
 may exist; the result and artifact inventory carry the evidence and the
 operation does not roll back over uncertain data.
+Exit class 8 requires an actual copy success (`Copied` or `AlreadyUpToDate`) and
+a failed item. A batch with failures and no actual copy success returns
+`Failed` with the most severe item exit class. Skipped items do not count as
+successes.
 
 ## Planning, admission, and host-owned execution
 
@@ -153,22 +163,87 @@ never opens configuration or Job history.
 `subscribe_events()` claims exactly one logical consumer for the next
 execution. A second live consumer, or a claim attempted while an execution is
 active, returns `EventConsumerUnavailable`. Dropping a consumer before
-execution releases the claim; dropping it during or after execution never
-blocks or fails the execution.
+execution releases the claim. During execution, dropping the consumer
+disconnects its queue. Delivery is best-effort after that point; execution
+does not wait for a disconnected consumer, and the claim remains until the
+terminal result.
 
 Admission remains exclusive per session. A second execution admitted while
 one is active returns a `Busy` failure result without emitting an execution
 event and without replacing the active or previous authoritative terminal
 result.
 
+## Independent copy batches
+
+`CopyBatchRequest` accepts an existing output directory, a workspace, a
+conflict policy, and ordered items. `CopyBatchRequest::with_item` derives a
+stable item key and destination basename. `with_keyed_item` preserves a retry's
+recorded identity and destination. `with_preflight_failure` represents a
+general item-local failure that the resolver has already established.
+`SplitInputUnsupported` is different: it is item-local only after Split
+qualification succeeds. Callers pass the resolved qualification evidence to
+`with_qualified_split_input_unsupported`. An untrusted, unsafe, or unqualified
+raw Split preflight claim rejects the whole request before admission. Planning
+rejects duplicate source identities, duplicate keys, normalized destination
+collisions, unsafe or unrepresentable paths, and a request with no viable
+item. The output directory must exist. Planning does not create or write-probe
+it.
+
+`Engine::execute_copy_batch` and `Engine::execute_copy_batch_with_cancellation`
+execute viable items sequentially through the same copy core as a single Copy.
+Each item revalidates its destination directory identity, writability, source,
+workspace, locks, and publication preconditions after planning. An item-local
+preflight failure does not stop later items. A batch-level session, resolver,
+or checkpoint failure does.
+
+`Engine::execute_copy_batch_with_checkpoint` accepts a host callback with a
+one-based sequence for item checkpoint order. This sequence is separate from
+the job-event sequence. The callback receives the complete typed item result,
+including its publication outcome and recovered artifact evidence. The Engine
+publishes `ItemCompleted` and advances completed progress only after the
+callback confirms the durable checkpoint. If the callback fails, execution
+stops, later items remain `not_started`, and the journal records
+`CheckpointFailed` without an `ItemCompleted` event. The aggregate result
+reports `checkpoint_failed`. `CopyBatchExecution::failed_checkpoint` retains
+the result whose durable write failed so the standalone adapter can persist the
+available publication evidence during finalization. A host that cannot commit
+a checkpoint must treat the Job as uncertain and must not continue it.
+
+The aggregate state is `Cancelled` when an item result was cancelled or when
+cancellation is accepted before the atomic completion decision, even if the
+last item checkpoint already succeeded. A checkpoint persistence failure takes
+precedence and produces `Failed` with `checkpoint_failed`, even when the same
+run also received an accepted cancellation. If any item reports
+`PublicationUncertain`, the aggregate remains `Failed` with that batch-level
+failure. Otherwise it is `Failed` when an item remains not started, `Succeeded`
+when no item failed, `CompletedWithIssues` when at least one item succeeded
+and another failed, and `Failed` when failures occurred without an actual
+success. Skipped items do not count as successes for this decision. A batch
+with only skipped items still produces `Succeeded`. The result retains every
+item in plan order and one aggregate terminal decision.
+
+Conflict policy is `Fail` by default. `Replace` and `Skip` require explicit
+selection. Byte identity is checked before conflict policy: an existing
+destination with the same bytes reports `already_up_to_date`. `Skip` applies
+only to a differing existing destination. That item has item state and outcome
+`skipped`, its destination remains unchanged, and it does not count as a
+copied or already-up-to-date success for aggregate classification. `Fail` and
+`Replace` keep their existing conflict behavior.
+The CLI exits 0 for an all-skipped batch. Mixed success and failure exits 8
+unless a failure maps to a higher internal exit class. A failed batch uses the
+most severe item exit class, so a publication or session failure cannot be
+hidden by an earlier conflict or input failure.
+
 ## Standalone Job lifecycle
 
 The standalone executable places durable history around the plan-first Engine
-contract. It plans first and begins an admission transaction only after a
-viable immutable plan and JSON-representable machine paths exist. The
+contract for both single Copy and independent copy batches. It plans first and
+keeps planning read-only. Admission begins only after a viable immutable plan
+and JSON-representable machine paths exist. The
 transaction records the source intent, destination and workspace selection
 provenance, conflict policy and its provenance, retry linkage, required
-providers and keys, and planned item evidence. Planning and configuration
+providers and keys, planned item evidence, and a tagged batch intent when
+applicable. Planning and configuration
 failures therefore create no Job.
 
 For JSONL Copy, the event consumer and execution worker are started before the
@@ -189,6 +264,15 @@ claim, or running transition
 prevents filesystem mutation. Synchronous JSON and human Copy commit admission
 and complete the lease/running transition before calling the Engine.
 
+Copy-batch does not use the single-Copy execution worker. It sizes a bounded
+event queue from the plan, commits admission, records the running transition,
+then executes on the host thread with the same invocation-scoped cancellation
+handle. The caller's capacity is an initial allocation hint; the session
+retains every bounded semantic transition in order for the connected consumer
+and never waits for it to make room. The session's latest progress and
+retained terminal completion remain authoritative. A second consumer is
+refused for that batch.
+
 SQLite transactions are limited to schema initialization, admission, durable
 state transitions, completion, retention pruning, recovery, and explicit clear
 operations. The Engine never runs while an admission or completion transaction
@@ -206,6 +290,21 @@ running record remains available for interruption and reconciliation.
 The same output-failure exit class applies to retry in JSON, JSONL, and human
 mode even when the retry's filesystem result and history row completed.
 
+For an independent batch, the CLI supplies a checkpoint callback that commits
+each item result and its publication evidence before the next item begins. The
+v4 checkpoint row records the stable item key, monotonic sequence, item state,
+outcome, failure code, publication classification, and complete typed item
+evidence. The aggregate completion transaction then records the terminal
+result and artifact ownership, releases or retains the lease claim, and applies
+retention. If aggregate completion fails, the transaction rolls back its
+aggregate writes while completed item checkpoints remain available for
+recovery.
+The v3 migration marks independent batch rows that lack source-intent evidence
+with `nscb.legacy_unqualified_batch_sources`. It preserves their job and item
+history for inspection without inventing resolver provenance. Failed-item
+retry rejects these records because the marker is not a qualified source
+intent.
+
 On startup and before history queries, NSCB scans nonterminal records and tries
 to acquire each record's slot lock without waiting. Recovery checks the slot
 file's stable ID against the SQLite slot mapping and verifies the Job ID and
@@ -218,26 +317,42 @@ previous owner exited; it does not by itself prove safe slot reuse or
 publication reconciliation. An unresolved claim therefore keeps the slot
 unavailable until a separately justified reconciliation transition exists.
 There is no daemon, automatic resumption, or fabricated terminal publication.
+For a batch, recovery keeps committed item results and their artifact evidence.
+It marks only items without a terminal checkpoint as `interrupted`; it does not
+replay the remaining items or convert completed work into a fresh success.
 
 `jobs retry` does not deserialize a stored plan or inherit authorization. It
-loads the source intent and selection provenance, reconstructs a typed
-`CopyThroughRequest`, and plans against current configuration and
-prerequisites. Explicit destination and workspace paths stay explicit;
-configured and native destination choices are resolved again; a host-default
-workspace is selected again. The new Job links to the parent Job ID and records
-the parent's conflict policy and original policy provenance, but starts with
-the refuse policy unless the operator supplies `--replace` again. The parent
-record and outputs are not changed.
+loads the source intent and selection provenance, reconstructs a typed request,
+and plans current filesystem and configuration state. Explicit destination and
+workspace paths stay explicit; configured and native destination choices are
+resolved again; a host-default workspace is selected again. The new Job links
+to the parent Job ID and records the parent's conflict policy and original
+policy provenance, but starts with the fail policy unless the operator supplies
+fresh `--replace` or `--skip` authorization. The parent record and outputs are
+unchanged.
 
 Each Job stores its absolute invocation directory. A retry anchors relative
 explicit source, destination, and workspace strings to the original Job's
 invocation directory. The newly admitted Job records the retry invocation's own
 directory while storing the anchored paths, so later retries cannot silently
-change targets because the operator changed working directories. Only terminal
-`copy_through` records with a `single` submission and `all` retry scope are
-eligible; unknown kinds, batch submissions, failed-item scopes, malformed
-enumeration values, or a missing absolute invocation directory are rejected
-before planning.
+change targets because the operator changed working directories. Single-Copy
+retry accepts only terminal `copy_through` records with a `single` submission
+and `all` scope. Independent batches use `--failed-items`; that path accepts
+only stored item rows in state `failed`, after validating the tagged intent and
+exact plan-item order. It reconstructs the saved source, destination, item key,
+and path bases without expanding a directory or input list again. Prior
+successes and skipped items are excluded and remain unchanged. Unknown kinds,
+malformed intent, invalid successor states, an empty failed set, or missing
+absolute context is rejected before planning.
+
+Before planning the retry, each saved Split failure is resolved at its exact
+logical path under the stored base and current local trust store. The source
+qualification and manifest digest must match the saved evidence; resolution
+checks the current receipt, declared membership, and member contents. A mismatch
+rejects the whole retry before admission. Resolver-wide state or configuration
+failures retain their stable input-resolution code and exit class, including
+`split_state_unavailable` and `split_trust_store_configuration_invalid`. The
+input list is never read again.
 
 Retention keeps the newest 1,000 ordinary pruneable terminal records.
 Nonterminal and `Interrupted` records, plus terminal records carrying unresolved
@@ -287,6 +402,28 @@ sequence and snapshot together with the complete result, independently of
 subscription and event delivery. This is one latest completion, not replay or
 history. `last_result()` and synchronous Engine execution remain available.
 
+`CopyBatchSession` exposes its own execution-local sequence. Its event kinds are
+`Started`, `ItemStarted`, `ItemCompleted`, `CancellationRequested`,
+`CheckpointFailed`, and one terminal `Completed`. Per-item transitions carry a
+stable key, state, outcome, and sanitized failure code. Nonterminal events
+contain no item paths. Delivery uses the caller-sized bounded queue from
+`subscribe_events_with_capacity`; the requested size is an initial allocation
+hint. The journal can hold no more than the fixed bound derived from the plan:
+one `Started`, up to two transitions for each item, one accepted and one refused
+cancellation, an optional `CheckpointFailed`, and one `Completed`. Queue
+capacity never makes execution wait for a slow or disconnected consumer.
+Progress remains a latest-value snapshot and is not added to the semantic
+queue. `current_operation()` is the latest-value progress source, and
+`last_completion()` retains the terminal sequence, snapshot, and aggregate
+result independently of delivery. The session accepts one live event consumer
+and one admission at a time. A cancellation request made while the session is
+`Completing` returns false. The first such request records one
+`CancellationRequested { accepted: false }` transition before `Completed`;
+later requests return false without adding another event.
+Dropping the consumer during active execution stops event delivery without
+blocking execution, but keeps the claim until completion. The completed session
+then accepts a new consumer.
+
 ## Progress
 
 Progress is an authoritative latest-value snapshot, not an event stream.
@@ -298,6 +435,17 @@ publication fails or cancellation is accepted. Therefore, copied bytes never
 by themselves imply validation or publication. `total_bytes` is the planned
 source length.
 
+For a batch, progress also reports total, completed, succeeded, failed, skipped,
+and cancelled item counts plus the current stable item key. A skipped item
+increments both succeeded and skipped counts. A preflight failure increments
+the failed count. `completed_bytes` counts source bytes actually transferred
+during successful copies, plus confirmed staging bytes for failed or cancelled
+copies. An `AlreadyUpToDate` result or conflict `Skip` contributes zero copied
+bytes. Progress mirrors the active inner operation while a copy is running,
+then records the item's final byte count and status. The byte count does not
+claim publication by itself. These counters advance under the session lock
+with the corresponding event sequence.
+
 ## Cancellation and signals
 
 `OperationSession::cancel()` keeps its existing behavior: it targets the active
@@ -305,12 +453,26 @@ execution and refuses cancellation after the publication cutoff. `Promoting`
 and `Completing` remain noninterruptible. A cancellation request does not
 become sticky state for a future operation.
 
-The copy CLI creates a fresh invocation-local cancellation handle and installs
-SIGINT/SIGTERM actions before planning. A pending signal is passed to admission
-and honored before staging if planning succeeds. A planning failure remains a
-pre-admission error and cannot affect a later invocation. Synchronous planning
-I/O is not promised to be interruptible. Inspection and Verification retain
-their existing signal behavior. Signal tests run in isolated subprocesses;
+`CopyBatchSession::cancel()` is accepted only while that batch is running. It
+cancels unfinished items and leaves completed item checkpoints intact. The
+first request refused during each aggregate-completion phase records one
+ordered `CancellationRequested { accepted: false }` event. Later refusals from
+the same `Completing` phase return `false` without another event, so repeated
+requests are idempotent and the journal remains within its fixed bound. A
+cancellation handle already set before batch admission
+causes every item to be attempted as cancelled without publishing it. Each
+later admission binds the handle supplied to that execution, and a caller-owned
+cancelled handle remains cancelled if the host deliberately reuses it.
+
+The CLI creates a fresh invocation-local cancellation handle and installs
+SIGINT/SIGTERM actions before planning or batch input resolution. `copy-batch`
+binds that handle to `InputResolutionControl`. A pending signal rejects batch
+resolution with `split_resolution_cancelled` before planning or admission. The
+resolver checks before filesystem work and between directory entries; Split
+validation also checks while hashing. An I/O call already in progress may finish
+before the next check. A planning failure remains a pre-admission error and
+cannot affect a later invocation. Inspection and Verification retain their
+existing signal behavior. Signal tests run in isolated subprocesses;
 signal-hook 0.3 unregistering its final action does not restore the prior
 default signal disposition.
 
@@ -327,6 +489,13 @@ refused busy admission does not clear the previous completion.
 
 The CLI's output workers are a reporting adapter around that host-owned seam.
 They do not own, detach, or time out filesystem execution.
+
+Batch execution makes one aggregate terminal decision from ordered item
+results. `CopyBatchExecution::result()` is authoritative whether or not a
+consumer receives the `Completed` event. For standalone history, the CLI waits
+for aggregate persistence before writing the terminal JSON, JSONL, or human
+record. A completion failure adds `history_error`, returns exit 7, and leaves
+the prior checkpoints available for recovery.
 
 ## Artifact reconciliation
 
@@ -348,7 +517,8 @@ clean success.
 
 ## Machine record shapes
 
-A base terminal `job.result` has exactly six top-level fields: `schema_version`,
+Single-copy `job.event` and `job.result` envelopes remain at schema version 1.
+A single-copy `job.result` has exactly six top-level fields: `schema_version`,
 `kind`, `nscb_version`, `sequence`, `snapshot`, and `result`. The sequence and
 snapshot are those of the logical `Completed` event. Standalone Copy `--json`
 and the final JSONL record add top-level `job_id`. If durable completion failed
@@ -366,6 +536,18 @@ The `result` object serializes the complete `OperationResult`: `state`,
 `artifact_id`, `parent_artifact_id`, `relative_name`, parent and artifact
 identity fields, `role`, `path`, `length`, hashes, and `retained`; unavailable
 evidence is null. Only terminal results intentionally contain artifact paths.
+
+Copy-batch `job.result` records use schema version 2 in JSON and JSONL. Batch
+`job.event` records use version 2 in JSONL. Both include top-level
+`submission_kind: "independent_batch"`. Their snapshots use the flattened
+batch progress shape, and the result contains the aggregate `state`, optional
+batch failure, and an ordered `items` array. Each item carries its stable key,
+resolved source and destination, state, outcome, failure, milestones, cleanup
+fields, and artifact inventory. `--json` emits one terminal document.
+`--jsonl` may emit `job.event` records first, each with the same
+`submission_kind`, but only the final record contains the aggregate result. A
+skipped item serializes state and outcome as `skipped` in both the event and
+terminal item record.
 
 Each nonterminal JSONL record is a `job.event` with `schema_version`, `kind`,
 `nscb_version`, `sequence`, immutable `snapshot`, and its typed event payload.
@@ -418,8 +600,8 @@ claim for other sink drivers.
 
 ## Platform and qualification limits
 
-Copy-through remains macOS-only and observed-only: it does not claim continuous
-source snapshots against noncooperating writers, crash durability,
+Single Copy and independent copy batches remain macOS-only and observed-only.
+They do not claim continuous source snapshots against noncooperating writers, crash durability,
 network-filesystem support, or Linux and Windows publication. The bounded
 reporting behavior is likewise qualified for the macOS executable pipe path;
 other operating systems and sink drivers require separate qualification. Replacement

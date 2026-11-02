@@ -143,7 +143,7 @@ result includes the limitations applicable to its profile and checks.
 
 Exit classes are 0 for a passed result, 2 for usage errors, 3 for a failed
 verification or prerequisite error, 4 for a conflict or input mutation, 6 for
-cancellation, and 7 for internal failures. Exit 8 remains reserved for
+cancellation, and 7 for internal failures. Exit 8 is used for
 independent batch `CompletedWithIssues` reporting and is never emitted by
 `verify`. See [Verification architecture](docs/architecture/verification.md)
 and [Verification qualification evidence](docs/testing/verification-qualification.md).
@@ -163,6 +163,8 @@ A canonical Split set is a directory of contiguous two-digit members with a sibl
 The standalone CLI reads Split receipts from the state directory selected by the absolute NSCB_STATE_DIR environment variable, or from the platform state directory when it is unset. Relative or empty explicit state paths are configuration errors for Split inputs. A resolved store path that does not yet exist is treated as an empty store; if no native state-root environment exists, Split evidence is unavailable. Ordinary single-file resolution does not read the trust store.
 
 See [Input selection and resolution](docs/input-selection.md) for the Rust API, the additive resolve_inputs_with capability, JSON v1 qualification fields, relative-path bases, traversal and Split budgets, cancellation, state-directory rules, duplicate identity behavior, and the test-only issuance seam.
+
+Embedding hosts that need item-local resolver failures for an independent copy batch call `Engine::resolve_inputs_batch` or `Engine::resolve_inputs_batch_with`. The batch resolver keeps selection order and shares duplicate detection, traversal, input-list, segment, and Split-byte budgets across the request. An unavailable direct selection, an unavailable input-list file, or an empty selected directory becomes a failed batch entry. Malformed input-list content, duplicate identity, unsafe filesystem layout, resource limits, cancellation, and unsafe Split qualification failures reject the whole request.
 
 Split receipts are host-local. Preserve the store root and its sibling continuity file as a unit: a copied root without local continuity evidence, a rolled-back authority index, or a receipt from another store fails closed. Recover a lost store root with `LocalSplitTrustStore::restore_from_snapshot`, which runs under the store lock and preserves later local revocations. Issuance and revocation are lock-serialized and journaled before state files are replaced. Newly created directories are synchronized on Unix; Windows uses write-through file replacement, but ordering of newly created directories is not qualified there.
 
@@ -277,11 +279,11 @@ cleanup retains or cannot safely remove operation-owned entries. Each
 manual reconciliation. The warning sentence and semantic events remain free
 of raw paths.
 
-Exit classes are 0 for validated success, 2 for usage or configuration, 3 for
-input or prerequisite failure, 4 for a destination conflict or change, and 6
-for cancellation. Exit 7 covers internal, write, validation, publication, and
+Exit class 0 is validated success, 2 is a usage or configuration error, 3 is
+an input or prerequisite failure, 4 is a destination conflict or change, and 6
+is cancellation. Exit 7 covers internal, write, validation, publication, and
 reporting failures. Exit 5 is reserved for provider or device failures, which
-copy-through does not produce. Exit 8 is reserved for future batch results
+copy-through does not produce. Exit 8 reports an independent batch that
 completed with issues. A cleanup warning preserves the successful operation
 exit class when reporting succeeds.
 
@@ -300,6 +302,64 @@ binds a cancellation handle to one invocation. The synchronous
 [job execution and machine output](docs/architecture/job-execution.md) for the
 event, progress, cancellation, and reconciliation contract.
 
+## Independent copy batches
+
+`nscb copy-batch` plans and executes independent regular files as one Job. It
+requires an existing output directory and never creates that directory during
+planning:
+
+```text
+nscb copy-batch <source>... [--input-list <path>]... --output-dir <existing-directory> [--conflict fail|replace|skip | --replace | --skip] [--recursive] [--follow-symlinks] [--json | --jsonl]
+```
+
+Positional selections and repeated input-list selections retain command-line
+order. A `--` delimiter ends option parsing, so later names such as `--json`
+remain source selections. Each item uses its source basename in the output directory. The plan
+rejects duplicate inputs, case or normalization aliases, hard links to the same
+ordinary file, and destination basename collisions before creating a Job.
+Items execute sequentially through the same validated copy and publication
+core as `nscb copy`. A batch whose items all fail preflight also fails before
+admission. Unsafe, incomplete, or ambiguous Split qualification rejects the
+request. A qualified Split selection remains one item-local failure with
+`split_input_unsupported` because copy-through does not accept Split members.
+The embedded host passes that resolver evidence through
+`CopyBatchRequest::with_qualified_split_input_unsupported`; a forced Split
+failure without qualification evidence is rejected during admission.
+
+Rust hosts receive semantic batch events in order through a nonblocking journal.
+Its fixed limit covers the start, two transitions for each admitted item, one
+accepted and one refused cancellation, an optional checkpoint failure, and one
+Completed event. `subscribe_events_with_capacity` uses the requested value as
+initial storage; a full queue never makes execution wait. Progress remains a
+latest-value snapshot rather than an event in the journal. Repeated cancellation
+requests during `Completing` return `false` and add only one refusal event.
+
+The conflict policy defaults to `fail`. `--replace` and `--skip` are
+equivalent to their `--conflict` values, and contradictory options are usage
+errors. Under `skip`, an existing destination with identical bytes produces
+an authoritative `already_up_to_date` result. Only a differing existing
+destination produces `skipped`. Both results leave the destination unchanged.
+A batch in which every item is skipped or already current succeeds with exit
+0. When a batch has failures, at least one copied or already-current item
+produces `completed_with_issues` and exit 8; skipped items do not count as
+successes. Failures without an actual success produce `failed` and the most
+severe item exit. Cancellation reports its own aggregate state.
+Internal execution or persistence failures take precedence over an ordinary
+per-item exit class.
+
+`--json` emits one aggregate `job.result`. `--jsonl` emits bounded, ordered
+`job.event` records followed by exactly one aggregate `job.result`. Events
+carry a stable item key and progress counters, while the terminal record keeps
+the complete item paths, outcomes, failures, and artifact evidence needed for
+reconciliation. Batch event and result records use schema version 2 in both
+output modes. Single-copy records remain at schema version 1. The Engine
+publishes `ItemCompleted` only after the host confirms its durable checkpoint;
+a failed checkpoint stops later items without publishing that completion.
+A host Rust program uses `CopyBatchRequest`,
+`CopyBatchSession`, and `Engine::execute_copy_batch_with_checkpoint` to supply
+its own runtime, storage, cancellation, and typed durable checkpoints. The
+Engine remains independent of SQLite and the standalone configuration.
+
 ## Standalone Job history
 
 `nscb` records plan-admitted Job history in a versioned per-user SQLite
@@ -309,7 +369,7 @@ copied content or key material.
 ```text
 nscb jobs list [--json]
 nscb jobs show <id> [--json]
-nscb jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]
+nscb jobs retry <id> [--failed-items] [--replace | --skip] [--json | --jsonl]
 nscb jobs clear [--json]
 ```
 
@@ -320,7 +380,18 @@ reconciliation. A retry creates a new linked Job from a fresh typed plan and
 current configuration; the earlier Job and published output remain untouched.
 Relative explicit paths remain tied to the original invocation directory,
 while implicit destination and workspace choices are resolved again.
-Replacement authority is never inherited and requires `--replace` again.
+Conflict authority is never inherited. A retry starts with `fail` and requires
+fresh `--replace` or `--skip` authorization. `--failed-items` selects only the
+exact persisted failed item identities, in their recorded order, and preserves
+their keys, path bases, destination, and prior successful outputs. A retry
+plans those identities again against current filesystem and configuration
+state without re-expanding the original selections.
+Resolver failures while rechecking saved Split evidence keep their stable
+input-resolution code and exit class. A changed selection or evidence record
+is rejected as unsupported failed-item retry before a new Job is admitted.
+Legacy v3 batch Jobs remain visible after migration with an incomplete source
+provenance marker. Their resolver qualification cannot be recovered, so retries
+that select only failed items are disabled for those records.
 Clearing history removes terminal database records but never deletes outputs,
 keys, configuration, caches, workspaces, or other filesystem artifacts. Active
 Jobs and unknown future states remain visible. Opening history for `jobs clear`

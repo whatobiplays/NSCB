@@ -16,7 +16,7 @@ pub(crate) use lease::JobLease;
 pub(crate) use model::*;
 pub(crate) use store::{HistoryStore, PendingAdmission};
 
-pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub(crate) const CURRENT_SCHEMA_VERSION: i64 = 4;
 pub(crate) const RETENTION_LIMIT: usize = 1_000;
 const APPLICATION_ID: i64 = 0x4e53_4342;
 const BUSY_TIMEOUT_MILLIS: u64 = 5_000;

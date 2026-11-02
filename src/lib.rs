@@ -45,7 +45,12 @@ pub use engine::{
 };
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
 pub use operation::{
-    ConflictPolicy, CopyThroughRequest, DestinationBaseline, JobState, OperationArtifact,
+    ConflictPolicy, CopyBatchCheckpointError, CopyBatchCompletion, CopyBatchEvent,
+    CopyBatchEventConsumer, CopyBatchEventKind, CopyBatchExecution, CopyBatchItemCheckpoint,
+    CopyBatchItemPlanSnapshot, CopyBatchItemPlanState, CopyBatchItemRequest, CopyBatchItemResult,
+    CopyBatchItemState, CopyBatchPlan, CopyBatchPlanSnapshot, CopyBatchProgress, CopyBatchRequest,
+    CopyBatchResult, CopyBatchSession, CopyBatchSessionPhase, CopyBatchSessionSnapshot,
+    CopyBatchSessionStatus, CopyThroughRequest, DestinationBaseline, JobState, OperationArtifact,
     OperationArtifactRole, OperationCompletion, OperationError, OperationEvent,
     OperationEventConsumer, OperationEventKind, OperationFailure, OperationFailureCode,
     OperationMilestone, OperationOutcome, OperationPlan, OperationPlanSnapshot, OperationResult,
@@ -54,8 +59,9 @@ pub use operation::{
 };
 
 pub use input_resolution::{
-    DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputProvenance, InputResolutionCapabilities,
-    InputResolutionControl, InputResolutionError, InputResolutionErrorCode,
+    DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputProvenance, InputResolutionBatchEntry,
+    InputResolutionBatchRequest, InputResolutionBatchResult, InputResolutionCapabilities,
+    InputResolutionControl, InputResolutionError, InputResolutionErrorCode, InputResolutionFailure,
     InputResolutionProgress, InputResolutionRequest, InputResolutionResult, InputSegment,
     InputSelection, InputSelectionSource, ResolvedInput, SplitQualification,
     SplitQualificationKind,

@@ -503,9 +503,11 @@ fn recognition_ambiguous_polyglot_is_a_result_with_exit_three() {
 mod copy_subprocess {
     use super::*;
     use fs2::FileExt;
-    use std::io::{BufRead, BufReader, Read};
+    use rusqlite::{Connection, OpenFlags};
+    use std::io::{BufRead, BufReader, Read, Write};
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
     use tempfile::tempdir;
 
@@ -608,29 +610,63 @@ mod copy_subprocess {
         unsafe { Stdio::from_raw_fd(duplicate) }
     }
 
-    #[cfg(unix)]
-    struct StalledPipeProbe {
-        child: std::process::Child,
-        _stdout_reader: OwnedFd,
-        _stderr_reader: OwnedFd,
-        stdout_writer: OwnedFd,
-        stderr_writer: OwnedFd,
-        stdout_flags: libc::c_int,
-        stderr_flags: libc::c_int,
-        source: std::path::PathBuf,
-        destination: std::path::PathBuf,
-        source_bytes: Vec<u8>,
-        destination_before: Option<Vec<u8>>,
-        published_at: Option<Instant>,
-        status: Option<std::process::ExitStatus>,
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[repr(u8)]
+    enum ChildControlSignal {
+        Terminalized = b'T',
     }
 
-    #[cfg(unix)]
-    fn stop_children(probes: &mut [StalledPipeProbe]) {
-        for probe in probes {
-            if probe.status.is_none() {
-                let _ = probe.child.kill();
-                probe.status = probe.child.wait().ok();
+    struct ChildGuard(std::process::Child);
+
+    impl ChildGuard {
+        fn new(child: std::process::Child) -> Self {
+            Self(child)
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            self.0.wait()
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => {}
+                _ => {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+        }
+    }
+
+    fn history_database(home: &std::path::Path) -> std::path::PathBuf {
+        home.join("Library")
+            .join("Application Support")
+            .join("NSCB")
+            .join("jobs.sqlite3")
+    }
+
+    fn wait_for_committed_terminal_outcome(database: &std::path::Path) {
+        let connection = loop {
+            match Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                Ok(connection) => break connection,
+                Err(_) => thread::yield_now(),
+            }
+        };
+
+        loop {
+            match connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE terminal_at IS NOT NULL)",
+                [],
+                |row| row.get::<_, bool>(0),
+            ) {
+                Ok(true) => return,
+                Ok(false) => thread::yield_now(),
+                Err(error) if error.to_string().contains("no such table: jobs") => {
+                    thread::yield_now();
+                }
+                Err(error) => panic!("read copy terminalization from history: {error}"),
             }
         }
     }
@@ -914,7 +950,6 @@ mod copy_subprocess {
     #[test]
     fn blocked_stdout_and_stderr_do_not_hold_copy_process_open_after_terminalization() {
         let root = tempdir().expect("copy fixture");
-        let mut probes = Vec::new();
         for (index, mode) in ["--json", "--jsonl", "human", "human-failure"]
             .into_iter()
             .enumerate()
@@ -922,6 +957,7 @@ mod copy_subprocess {
             let source = root.path().join(format!("source-{index}.bin"));
             let destination = root.path().join(format!("destination-{index}.bin"));
             let workspace = root.path().join(format!("workspace-{index}"));
+            let home = root.path().join(format!("home-{index}"));
             let source_bytes = vec![0x30 + index as u8; 32 * 1024];
             fs::write(&source, &source_bytes).expect("write source");
             let destination_before = if mode == "human-failure" {
@@ -931,13 +967,12 @@ mod copy_subprocess {
             } else {
                 None
             };
-            let (stdout_reader, stdout_writer) = full_pipe();
-            let (stderr_reader, stderr_writer) = full_pipe();
+            let (_stdout_reader, stdout_writer) = full_pipe();
+            let (_stderr_reader, stderr_writer) = full_pipe();
             let stdout_flags = unsafe { libc::fcntl(stdout_writer.as_raw_fd(), libc::F_GETFL) };
             let stderr_flags = unsafe { libc::fcntl(stderr_writer.as_raw_fd(), libc::F_GETFL) };
             assert!(stdout_flags >= 0 && stderr_flags >= 0);
-            let mut command =
-                isolated_command_with_home(&root.path().join(format!("home-{index}")));
+            let mut command = isolated_command_with_home(&home);
             command
                 .args(["copy"])
                 .arg(&source)
@@ -949,93 +984,40 @@ mod copy_subprocess {
             if mode == "--json" || mode == "--jsonl" {
                 command.arg(mode);
             }
-            let child = command.spawn().expect("launch copy with full pipes");
-            probes.push(StalledPipeProbe {
-                child,
-                _stdout_reader: stdout_reader,
-                _stderr_reader: stderr_reader,
-                stdout_writer,
-                stderr_writer,
-                stdout_flags,
-                stderr_flags,
-                source,
-                destination,
-                source_bytes,
-                destination_before,
-                published_at: None,
-                status: None,
+            let mut child = ChildGuard::new(command.spawn().expect("launch copy with full pipes"));
+            let (mut control_reader, mut control_writer) =
+                UnixStream::pair().expect("create terminalization control pipe");
+            let database = history_database(&home);
+            let terminalization_observer = thread::spawn(move || {
+                wait_for_committed_terminal_outcome(&database);
+                control_writer
+                    .write_all(&[ChildControlSignal::Terminalized as u8])
+                    .expect("signal committed copy terminalization");
             });
-        }
-
-        let launch_deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            for probe in &mut probes {
-                if probe.published_at.is_none() && probe.destination.exists() {
-                    probe.published_at = Some(Instant::now());
-                }
-                match probe.child.try_wait() {
-                    Ok(Some(status)) => probe.status = Some(status),
-                    Ok(None) => {}
-                    Err(error) => {
-                        stop_children(&mut probes);
-                        panic!("observe copy process: {error}");
-                    }
-                }
-            }
-            if probes.iter().all(|probe| probe.published_at.is_some()) {
-                break;
-            }
-            if Instant::now() >= launch_deadline {
-                stop_children(&mut probes);
-                panic!("copy Jobs did not reach their expected filesystem terminal state");
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        loop {
-            for probe in &mut probes {
-                if probe.status.is_none() {
-                    match probe.child.try_wait() {
-                        Ok(Some(status)) => probe.status = Some(status),
-                        Ok(None) => {
-                            let terminalized = probe.published_at.expect("observed publication");
-                            if terminalized.elapsed() > Duration::from_secs(7) {
-                                stop_children(&mut probes);
-                                panic!(
-                                    "copy stayed open for over seven seconds with open, unread pipes"
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            stop_children(&mut probes);
-                            panic!("observe copy process: {error}");
-                        }
-                    }
-                }
-            }
-            if probes.iter().all(|probe| probe.status.is_some()) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        for probe in probes {
-            assert_eq!(probe.status.unwrap().code(), Some(7));
+            let mut signal = [0];
+            control_reader
+                .read_exact(&mut signal)
+                .expect("wait for committed copy terminalization");
+            assert_eq!(signal[0], ChildControlSignal::Terminalized as u8);
+            let status = child.wait().expect("wait for terminalized copy process");
+            terminalization_observer
+                .join()
+                .expect("join terminalization observer");
+            assert_eq!(status.code(), Some(7));
             assert_eq!(
-                unsafe { libc::fcntl(probe.stdout_writer.as_raw_fd(), libc::F_GETFL) },
-                probe.stdout_flags,
+                unsafe { libc::fcntl(stdout_writer.as_raw_fd(), libc::F_GETFL) },
+                stdout_flags,
                 "copy must preserve inherited stdout descriptor flags"
             );
             assert_eq!(
-                unsafe { libc::fcntl(probe.stderr_writer.as_raw_fd(), libc::F_GETFL) },
-                probe.stderr_flags,
+                unsafe { libc::fcntl(stderr_writer.as_raw_fd(), libc::F_GETFL) },
+                stderr_flags,
                 "copy must preserve inherited stderr descriptor flags"
             );
-            assert_eq!(fs::read(&probe.source).unwrap(), probe.source_bytes);
-            assert!(probe.published_at.is_some());
-            match probe.destination_before {
-                Some(bytes) => assert_eq!(fs::read(&probe.destination).unwrap(), bytes),
-                None => assert_eq!(fs::read(&probe.destination).unwrap(), probe.source_bytes),
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            match destination_before {
+                Some(bytes) => assert_eq!(fs::read(&destination).unwrap(), bytes),
+                None => assert_eq!(fs::read(&destination).unwrap(), source_bytes),
             }
         }
     }

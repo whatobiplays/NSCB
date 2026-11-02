@@ -1,7 +1,14 @@
-use nscb::{Engine, InputResolutionErrorCode, InputResolutionRequest, InputSelectionSource};
+mod support;
+
+use nscb::{
+    CopyBatchRequest, Engine, InputResolutionBatchRequest, InputResolutionCapabilities,
+    InputResolutionControl, InputResolutionErrorCode, InputResolutionRequest, InputSelectionSource,
+    LocalSplitTrustStore,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use support::split_fixture::SplitFixture;
 
 static NEXT_TREE: AtomicU64 = AtomicU64::new(1);
 
@@ -42,6 +49,102 @@ fn resolve(request: InputResolutionRequest) -> nscb::InputResolutionResult {
     Engine::new()
         .resolve_inputs(request)
         .expect("resolve input selection")
+}
+
+#[test]
+fn batch_resolution_retains_an_unavailable_path_failure_beside_a_viable_item() {
+    let tree = TempTree::new();
+    tree.write("present.bin", b"present");
+
+    let result = Engine::new()
+        .resolve_inputs_batch(
+            request(&tree)
+                .with_path("missing.bin")
+                .with_path("present.bin"),
+        )
+        .expect("an unavailable path with stable identity is retained beside viable work");
+
+    assert_eq!(result.entries.len(), 2);
+    assert!(matches!(
+        &result.entries[0],
+        nscb::InputResolutionBatchEntry::Failed(failure)
+            if failure.code() == InputResolutionErrorCode::InputUnavailable
+    ));
+    assert!(matches!(
+        &result.entries[1],
+        nscb::InputResolutionBatchEntry::Resolved(_)
+    ));
+}
+
+#[test]
+fn pre_cancelled_batch_resolution_rejects_before_returning_partial_entries() {
+    let tree = TempTree::new();
+    tree.write("batch/present.nsp", b"present");
+    let control = InputResolutionControl::new();
+    control.cancel();
+
+    let error = Engine::new()
+        .resolve_inputs_batch_with(
+            request(&tree).with_path("batch"),
+            InputResolutionCapabilities::new().with_control(&control),
+        )
+        .expect_err("cancelled batch resolution must not return partial success");
+
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::SplitResolutionCancelled
+    );
+}
+
+#[test]
+fn batch_resolution_rejects_an_unavailable_input_list_globally() {
+    let tree = TempTree::new();
+    tree.write("present.bin", b"present");
+
+    let error = Engine::new()
+        .resolve_inputs_batch(
+            request(&tree)
+                .with_input_list("missing.json")
+                .with_path("present.bin"),
+        )
+        .expect_err("a missing input list rejects the batch before admission");
+
+    assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+}
+
+#[test]
+fn batch_resolution_isolates_an_empty_input_list() {
+    let tree = TempTree::new();
+    tree.write("present.bin", b"present");
+    tree.write(
+        "empty.json",
+        br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[]}"#,
+    );
+
+    let result = Engine::new()
+        .resolve_inputs_batch(
+            request(&tree)
+                .with_input_list("empty.json")
+                .with_path("present.bin"),
+        )
+        .expect("an empty input list must remain item-local in a batch");
+
+    assert_eq!(result.entries.len(), 2);
+    let nscb::InputResolutionBatchEntry::Failed(failure) = &result.entries[0] else {
+        panic!("empty input list must retain a typed failure");
+    };
+    assert_eq!(failure.code(), InputResolutionErrorCode::EmptySelection);
+    assert_eq!(failure.source(), InputSelectionSource::InputList);
+    assert_eq!(failure.selection_index(), 0);
+    assert_eq!(failure.input_list_entry_index(), None);
+    assert_eq!(
+        failure.requested_path(),
+        tree.path().canonicalize().unwrap().join("empty.json")
+    );
+    assert!(matches!(
+        &result.entries[1],
+        nscb::InputResolutionBatchEntry::Resolved(_)
+    ));
 }
 
 #[test]
@@ -658,4 +761,294 @@ fn non_unicode_split_suffix_fails_for_explicit_and_directory_discovery() {
         error.code(),
         InputResolutionErrorCode::UnsupportedSplitLayout
     );
+}
+
+#[test]
+fn batch_resolution_keeps_duplicate_and_unsafe_split_failures_global() {
+    let duplicate = TempTree::new();
+    duplicate.write("item.bin", b"same");
+    fs::create_dir(duplicate.path().join("sub")).unwrap();
+    let error = Engine::new()
+        .resolve_inputs_batch(
+            request(&duplicate)
+                .with_path("item.bin")
+                .with_path("sub/../item.bin"),
+        )
+        .expect_err("duplicate logical identities must reject the batch");
+    assert_eq!(error.code(), InputResolutionErrorCode::DuplicateSelection);
+
+    let split = TempTree::new();
+    split.write("present.bin", b"present");
+    split.write("game.xc0", b"segment");
+    let error = Engine::new()
+        .resolve_inputs_batch(
+            request(&split)
+                .with_path("present.bin")
+                .with_path("game.xc0"),
+        )
+        .expect_err("unsafe Split qualification must reject the batch");
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::UnsupportedSplitLayout
+    );
+}
+
+#[test]
+fn batch_resolution_does_not_retain_a_missing_split_member_as_item_local() {
+    let tree = TempTree::new();
+    tree.write("ordinary.bin", b"ordinary");
+
+    let error = Engine::new()
+        .resolve_inputs_batch(
+            request(&tree)
+                .with_path("ordinary.bin")
+                .with_path("game.xc0"),
+        )
+        .expect_err("a missing Split member must reject the batch before admission");
+
+    assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+}
+
+#[test]
+fn batch_resolution_only_retains_successfully_qualified_split_as_an_item() {
+    let tree = TempTree::new();
+    tree.write("ordinary.bin", b"ordinary");
+    let fixture = SplitFixture::new(b"qualified split source", 8);
+    let directory = fixture.write(tree.path(), "qualified");
+    let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+    fixture.issue(&store);
+
+    let result = Engine::new()
+        .resolve_inputs_batch_with(
+            request(&tree)
+                .with_path("ordinary.bin")
+                .with_path("qualified"),
+            InputResolutionCapabilities::new().with_split_trust_store(&store),
+        )
+        .expect("a successfully qualified Split remains one item");
+
+    assert_eq!(result.entries.len(), 2);
+    let nscb::InputResolutionBatchEntry::Resolved(split) = &result.entries[1] else {
+        panic!("qualified Split should be passed to copy planning as one item");
+    };
+    assert!(split.qualification.is_some());
+    assert_eq!(split.segments.len(), fixture.parts.len());
+    assert_eq!(split.provenance.selection_path, PathBuf::from("qualified"));
+    assert!(directory.is_dir());
+}
+
+#[test]
+fn embedded_engine_anchors_input_list_split_identity_to_request_base() {
+    let tree = TempTree::new();
+    let fixture = SplitFixture::new(b"input-list split source", 8);
+    let directory = fixture.write(tree.path(), "splits/qualified.nsp");
+    let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+    fixture.issue(&store);
+    tree.write(
+        "lists/selection.json",
+        br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[{"path":"../splits/qualified.nsp"}]}"#,
+    );
+    let ordinary = tree.write("ordinary.bin", b"ordinary");
+    let output = tree.path().join("output");
+    let workspace = tree.path().join("workspace");
+    fs::create_dir(&output).unwrap();
+    fs::create_dir(&workspace).unwrap();
+    let current_directory = fs::canonicalize(std::env::current_dir().unwrap()).unwrap();
+    assert_ne!(current_directory, fs::canonicalize(tree.path()).unwrap());
+
+    let resolved = Engine::new()
+        .resolve_inputs_batch_with(
+            request(&tree).with_input_list("lists/selection.json"),
+            InputResolutionCapabilities::new().with_split_trust_store(&store),
+        )
+        .unwrap();
+    let nscb::InputResolutionBatchEntry::Resolved(split) = &resolved.entries[0] else {
+        panic!("the trusted list entry must resolve to one logical Split");
+    };
+    assert_eq!(
+        split.logical_selection_path(),
+        fs::canonicalize(&directory).unwrap()
+    );
+    assert_eq!(
+        split.provenance.base_directory,
+        fs::canonicalize(tree.path()).unwrap()
+    );
+
+    let plan = Engine::new()
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_source(ordinary)
+                .with_qualified_split_input_unsupported(
+                    split.clone(),
+                    output.join("qualified.nsp"),
+                ),
+        )
+        .unwrap();
+    assert_eq!(
+        plan.snapshot().items()[1].source(),
+        fs::canonicalize(directory).unwrap()
+    );
+}
+
+#[test]
+fn batch_resolution_keeps_untrusted_split_qualification_global() {
+    let tree = TempTree::new();
+    tree.write("ordinary.bin", b"ordinary");
+    SplitFixture::new(b"untrusted Split source", 8).write(tree.path(), "untrusted");
+
+    let error = Engine::new()
+        .resolve_inputs_batch(
+            request(&tree)
+                .with_path("ordinary.bin")
+                .with_path("untrusted"),
+        )
+        .expect_err("untrusted Split evidence must reject the entire batch");
+
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::SplitEvidenceUntrusted
+    );
+}
+
+#[test]
+fn batch_resolution_keeps_ambiguous_split_qualification_global() {
+    let tree = TempTree::new();
+    tree.write("ordinary.bin", b"ordinary");
+    let fixture = SplitFixture::new(b"ambiguous Split source", 8);
+    let directory = fixture.write(tree.path(), "ambiguous");
+    let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+    fixture.issue(&store);
+    fs::write(directory.join("03"), b"competing member").unwrap();
+
+    let error = Engine::new()
+        .resolve_inputs_batch_with(
+            request(&tree)
+                .with_path("ordinary.bin")
+                .with_path("ambiguous"),
+            InputResolutionCapabilities::new().with_split_trust_store(&store),
+        )
+        .expect_err("ambiguous Split qualification must reject the entire batch");
+
+    assert_eq!(error.code(), InputResolutionErrorCode::SplitSetIncomplete);
+}
+
+#[test]
+fn batch_resolution_shares_input_list_budget_across_all_entries() {
+    let tree = TempTree::new();
+    tree.write("present.bin", b"present");
+    let mut request = request(&tree).with_path("present.bin");
+    for index in 0..5 {
+        let name = format!("item-{index}.bin");
+        tree.write(&name, b"x");
+        let json = format!(
+            "{{\"schema_version\":1,\"kind\":\"nscb.input_list\",\"required_features\":[],\"entries\":[{{\"path\":\"../{name}\"}}]}}"
+        );
+        let mut bytes = json.into_bytes();
+        bytes.resize(900_000, b' ');
+        tree.write(&format!("lists/list-{index}.json"), &bytes);
+        request = request.with_input_list(format!("lists/list-{index}.json"));
+    }
+    let error = Engine::new()
+        .resolve_inputs_batch(request)
+        .expect_err("independent items must share the aggregate input-list budget");
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::ResourceLimitExceeded
+    );
+}
+
+#[test]
+fn batch_split_budget_is_global_and_includes_prior_item_failures() {
+    let tree = TempTree::new();
+    tree.write("present.bin", b"present");
+    for (name, length) in [("first.nsp", 10), ("second.nsp", 11)] {
+        let fixture = SplitFixture::new(&split_source(length), 5);
+        fixture.write(tree.path(), name);
+        let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+        fixture.issue(&store);
+    }
+    let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+    let error = Engine::new()
+        .resolve_inputs_batch_with(
+            request(&tree)
+                .with_path("missing.bin")
+                .with_path("first.nsp")
+                .with_path("second.nsp"),
+            InputResolutionCapabilities::new()
+                .with_split_trust_store(&store)
+                .with_max_split_validation_bytes(15),
+        )
+        .expect_err("Split bytes are cumulative even when an earlier item failed");
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::ResourceLimitExceeded
+    );
+}
+
+#[test]
+fn batch_request_split_budget_is_cumulative_across_saved_entry_bases() {
+    let tree = TempTree::new();
+    let first_base = tree.path().join("first-base");
+    let second_base = tree.path().join("second-base");
+    fs::create_dir_all(&first_base).unwrap();
+    fs::create_dir_all(&second_base).unwrap();
+
+    let first_fixture = SplitFixture::new(&split_source(10), 5);
+    first_fixture.write(&first_base, "first.nsp");
+    let second_fixture = SplitFixture::new(&split_source(11), 5);
+    second_fixture.write(&second_base, "second.nsp");
+    let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+    first_fixture.issue(&store);
+    second_fixture.issue(&store);
+
+    let error = Engine::new()
+        .resolve_inputs_batch_request_with(
+            InputResolutionBatchRequest::new()
+                .with_path(first_base.clone(), "missing.bin")
+                .with_path(first_base, "first.nsp")
+                .with_path(second_base, "second.nsp"),
+            InputResolutionCapabilities::new()
+                .with_split_trust_store(&store)
+                .with_max_split_validation_bytes(15),
+        )
+        .expect_err("saved entries share one cumulative Split validation budget");
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::ResourceLimitExceeded
+    );
+}
+
+#[test]
+fn failed_input_list_attempts_consume_the_shared_request_budget() {
+    let tree = TempTree::new();
+    tree.write("present.bin", b"present");
+    let mut request = request(&tree);
+    for index in 0..4 {
+        let json = format!(
+            "{{\"schema_version\":1,\"kind\":\"nscb.input_list\",\"required_features\":[],\"entries\":[{{\"path\":\"../missing-{index}.bin\"}}]}}"
+        );
+        let mut bytes = json.into_bytes();
+        bytes.resize(900_000, b' ');
+        tree.write(&format!("lists/failed-{index}.json"), &bytes);
+        request = request.with_input_list(format!("lists/failed-{index}.json"));
+    }
+    let valid = br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[{"path":"../present.bin"}]}"#.to_vec();
+    let mut valid = valid;
+    valid.resize(600_000, b' ');
+    tree.write("lists/valid.json", &valid);
+    request = request.with_input_list("lists/valid.json");
+
+    let error = Engine::new()
+        .resolve_inputs_batch(request)
+        .expect_err("failed list attempts must consume cumulative input-list budget");
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::ResourceLimitExceeded
+    );
+}
+
+fn split_source(length: usize) -> Vec<u8> {
+    (0..length)
+        .map(|index| ((index * 31 + 7) % 251) as u8)
+        .collect()
 }

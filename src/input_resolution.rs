@@ -8,6 +8,7 @@
 //! it never issues or repairs trust itself.
 
 use crate::file_identity::{FileIdentity, path_identity};
+use crate::inspection::CancellationHandle;
 use crate::sha256::Sha256Digest;
 use crate::split_resolution::{
     SplitResolutionContext, canonical_member_index, directory_has_canonical_member,
@@ -102,6 +103,98 @@ impl InputResolutionRequest {
     }
 }
 
+/// Ordered selections with a separate resolution base for each batch entry.
+///
+/// All entries share one resolver, so duplicate detection and aggregate resource
+/// limits apply across the complete batch. The traversal settings apply to every
+/// entry. Each base must be an absolute directory.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct InputResolutionBatchRequest {
+    selections: Vec<InputResolutionBatchSelection>,
+    recursive: bool,
+    follow_symlinks: bool,
+}
+
+#[derive(Clone, Debug)]
+struct InputResolutionBatchSelection {
+    base_directory: PathBuf,
+    selection: InputSelection,
+}
+
+impl InputResolutionBatchRequest {
+    /// Creates an empty batch request.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends one typed selection and its path base in request order.
+    #[must_use]
+    pub fn with_selection(
+        mut self,
+        base_directory: impl Into<PathBuf>,
+        selection: InputSelection,
+    ) -> Self {
+        self.selections.push(InputResolutionBatchSelection {
+            base_directory: base_directory.into(),
+            selection,
+        });
+        self
+    }
+
+    /// Appends a direct path selection and its path base.
+    #[must_use]
+    pub fn with_path(self, base_directory: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+        self.with_selection(base_directory, InputSelection::Path(path.into()))
+    }
+
+    /// Appends a versioned JSON input-list selection and its path base.
+    #[must_use]
+    pub fn with_input_list(
+        self,
+        base_directory: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        self.with_selection(base_directory, InputSelection::InputList(path.into()))
+    }
+
+    /// Enables bounded recursive directory discovery for every entry.
+    #[must_use]
+    pub fn with_recursive(mut self, recursive: bool) -> Self {
+        self.recursive = recursive;
+        self
+    }
+
+    /// Enables traversal through symbolic links for every entry.
+    #[must_use]
+    pub fn with_follow_symlinks(mut self, follow_symlinks: bool) -> Self {
+        self.follow_symlinks = follow_symlinks;
+        self
+    }
+}
+
+impl From<InputResolutionRequest> for InputResolutionBatchRequest {
+    fn from(request: InputResolutionRequest) -> Self {
+        let InputResolutionRequest {
+            base_directory,
+            selections,
+            recursive,
+            follow_symlinks,
+        } = request;
+        Self {
+            selections: selections
+                .into_iter()
+                .map(|selection| InputResolutionBatchSelection {
+                    base_directory: base_directory.clone(),
+                    selection,
+                })
+                .collect(),
+            recursive,
+            follow_symlinks,
+        }
+    }
+}
+
 /// A caller selection in the order it was supplied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -118,6 +211,86 @@ pub enum InputSelection {
 pub struct InputResolutionResult {
     /// Resolved logical inputs in stable selection order.
     pub inputs: Vec<ResolvedInput>,
+}
+
+/// One request-order entry from independent batch resolution.
+///
+/// A resolved entry is ready for planning. A failed entry records an empty
+/// selection; unavailable paths, duplicate inputs, unsafe filesystem layouts,
+/// input-list contract failures, Split qualification failures, cancellation,
+/// and resource limits reject the whole batch. External callers must include
+/// a wildcard match arm to handle entries added in future releases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum InputResolutionBatchEntry {
+    /// A logical input that resolved successfully.
+    Resolved(ResolvedInput),
+    /// A selection-local failure retained for its batch item.
+    Failed(InputResolutionFailure),
+}
+
+/// Sanitized failure for one independently selectable batch item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct InputResolutionFailure {
+    selection_index: usize,
+    source: InputSelectionSource,
+    selection_path: PathBuf,
+    base_directory: PathBuf,
+    input_list_entry_index: Option<usize>,
+    input_list_entry_path: Option<PathBuf>,
+    requested_path: PathBuf,
+    code: InputResolutionErrorCode,
+}
+
+impl InputResolutionFailure {
+    /// Returns the caller selection index that produced this item.
+    pub const fn selection_index(&self) -> usize {
+        self.selection_index
+    }
+
+    /// Returns whether the caller supplied a direct path or an input list.
+    pub const fn source(&self) -> InputSelectionSource {
+        self.source
+    }
+
+    /// Returns the original caller-side selection path.
+    pub fn selection_path(&self) -> &Path {
+        &self.selection_path
+    }
+
+    /// Returns the absolute request base used for relative path resolution.
+    pub fn base_directory(&self) -> &Path {
+        &self.base_directory
+    }
+
+    /// Returns the input-list entry index, when the item came from a list.
+    pub const fn input_list_entry_index(&self) -> Option<usize> {
+        self.input_list_entry_index
+    }
+
+    /// Returns the input-list entry path, when the item came from a list.
+    pub fn input_list_entry_path(&self) -> Option<&Path> {
+        self.input_list_entry_path.as_deref()
+    }
+
+    /// Returns the exact path selected for this item before failure.
+    pub fn requested_path(&self) -> &Path {
+        &self.requested_path
+    }
+
+    /// Returns the stable failure category.
+    pub const fn code(&self) -> InputResolutionErrorCode {
+        self.code
+    }
+}
+
+/// Ordered partial resolution result for an independent copy batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct InputResolutionBatchResult {
+    /// Resolved inputs and item-local failures in request order.
+    pub entries: Vec<InputResolutionBatchEntry>,
 }
 
 /// Additive host capabilities used for one read-only resolution request.
@@ -198,6 +371,7 @@ pub struct InputResolutionControl {
     completed_bytes: AtomicU64,
     total_bytes: AtomicU64,
     cancelled: AtomicBool,
+    external_cancellation: Option<CancellationHandle>,
 }
 
 impl Default for InputResolutionControl {
@@ -207,6 +381,7 @@ impl Default for InputResolutionControl {
             completed_bytes: AtomicU64::new(0),
             total_bytes: AtomicU64::new(PROGRESS_TOTAL_UNSET),
             cancelled: AtomicBool::new(false),
+            external_cancellation: None,
         }
     }
 }
@@ -222,9 +397,24 @@ impl InputResolutionControl {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    /// Binds an existing invocation cancellation handle to this control.
+    ///
+    /// Resolution checks the control and the bound handle before filesystem
+    /// work and between directory entries. Split validation also checks while
+    /// hashing. The caller retains ownership of the handle.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: CancellationHandle) -> Self {
+        self.external_cancellation = Some(cancellation);
+        self
+    }
+
     /// Reports whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .external_cancellation
+                .as_ref()
+                .is_some_and(CancellationHandle::is_cancelled)
     }
 
     /// Returns the latest progress snapshot without blocking.
@@ -285,6 +475,22 @@ pub struct SplitQualification {
     pub original_sha256: Sha256Digest,
 }
 
+impl SplitQualification {
+    /// Creates qualification evidence from a validated local Split receipt.
+    pub const fn local_receipt(
+        manifest_schema_version: u16,
+        original_size_bytes: u64,
+        original_sha256: Sha256Digest,
+    ) -> Self {
+        Self {
+            kind: SplitQualificationKind::LocalSplitReceipt,
+            manifest_schema_version,
+            original_size_bytes,
+            original_sha256,
+        }
+    }
+}
+
 /// Kind of completeness evidence attached to a resolved Split input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -308,6 +514,25 @@ pub struct ResolvedInput {
     pub provenance: InputProvenance,
     /// Split completeness evidence, present only for qualified Split inputs.
     pub qualification: Option<SplitQualification>,
+    /// Hash of the exact manifest bytes used to qualify a Split input.
+    pub(crate) split_manifest_sha256: Option<Sha256Digest>,
+}
+
+impl ResolvedInput {
+    /// Returns the logical caller-selected path represented by this input.
+    ///
+    /// For a Split directory this is the directory itself, rather than any
+    /// physical member file.
+    pub fn logical_selection_path(&self) -> PathBuf {
+        self.provenance.logical_selection_path()
+    }
+
+    /// Returns the digest of the exact manifest bytes used to qualify a Split.
+    ///
+    /// Ordinary inputs do not have a Split manifest.
+    pub fn split_manifest_sha256(&self) -> Option<&Sha256Digest> {
+        self.split_manifest_sha256.as_ref()
+    }
 }
 
 /// One physical file segment and its observed byte length.
@@ -330,6 +555,8 @@ pub struct InputProvenance {
     pub source: InputSelectionSource,
     /// Path supplied for the top-level selection, kept as supplied.
     pub selection_path: PathBuf,
+    /// Absolute request base used to resolve relative selections.
+    pub base_directory: PathBuf,
     /// Zero-based entry position when the input came from a JSON input list.
     pub input_list_entry_index: Option<usize>,
     /// Path string supplied by that JSON entry, when applicable.
@@ -338,6 +565,35 @@ pub struct InputProvenance {
     pub discovered_directory: Option<PathBuf>,
     /// Relative path within the selected directory, when discovery produced the input.
     pub discovered_relative_path: Option<PathBuf>,
+}
+
+impl InputProvenance {
+    /// Returns the logical selected path represented by this provenance.
+    ///
+    /// Directory discovery uses its recorded root and relative path. Input-list
+    /// entries are resolved against the directory containing the list, anchored
+    /// to the request's stored base. Direct selections retain the caller-supplied path.
+    pub fn logical_selection_path(&self) -> PathBuf {
+        if let (Some(directory), Some(relative)) = (
+            self.discovered_directory.as_deref(),
+            self.discovered_relative_path.as_deref(),
+        ) {
+            return directory.join(relative);
+        }
+        if let Some(entry) = self.input_list_entry_path.as_deref() {
+            let selected = if entry.is_absolute() {
+                entry.to_path_buf()
+            } else {
+                let list_path = absolute_path(&self.base_directory, &self.selection_path);
+                match list_path.parent() {
+                    Some(parent) => parent.join(entry),
+                    None => return self.selection_path.clone(),
+                }
+            };
+            return fs::canonicalize(&selected).unwrap_or(selected);
+        }
+        self.selection_path.clone()
+    }
 }
 
 /// Kind of top-level selection that produced a resolved input.
@@ -539,6 +795,52 @@ impl crate::Engine {
     ) -> Result<InputResolutionResult, InputResolutionError> {
         resolve_inputs_impl(request, capabilities)
     }
+
+    /// Resolves independent batch selections while retaining item-local failures.
+    ///
+    /// The resolver keeps one shared duplicate set, traversal counter, input-list
+    /// budget, segment budget, Split byte budget, and cancellation state across
+    /// the whole request. A contract, duplicate, resource, Split, or safety
+    /// failure still rejects the request globally. An unavailable ordinary
+    /// path, empty input list, or empty selected directory remains a failed
+    /// entry when its identity is known, so viable siblings can proceed. An
+    /// unavailable input-list file rejects the request because its selections
+    /// cannot be known. Split qualification failures always reject globally.
+    pub fn resolve_inputs_batch(
+        &self,
+        request: InputResolutionRequest,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        self.resolve_inputs_batch_request(request.into())
+    }
+
+    /// Resolves independent batch selections with explicit host capabilities.
+    pub fn resolve_inputs_batch_with(
+        &self,
+        request: InputResolutionRequest,
+        capabilities: InputResolutionCapabilities<'_>,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        self.resolve_inputs_batch_request_with(request.into(), capabilities)
+    }
+
+    /// Resolves ordered batch entries with a separate path base for each entry.
+    ///
+    /// One resolver tracks duplicate identities and aggregate resource use across
+    /// all entries. Item-local ordinary selection failures remain in the result.
+    pub fn resolve_inputs_batch_request(
+        &self,
+        request: InputResolutionBatchRequest,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        resolve_inputs_batch_impl(request, InputResolutionCapabilities::default())
+    }
+
+    /// Resolves batch entries with per-entry path bases and explicit capabilities.
+    pub fn resolve_inputs_batch_request_with(
+        &self,
+        request: InputResolutionBatchRequest,
+        capabilities: InputResolutionCapabilities<'_>,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        resolve_inputs_batch_impl(request, capabilities)
+    }
 }
 
 fn resolve_inputs_impl(
@@ -571,6 +873,9 @@ fn resolve_inputs_impl(
             InputResolutionErrorCode::ResourceLimitExceeded,
         ));
     }
+    if let Some(control) = capabilities.control {
+        control.check_cancelled()?;
+    }
 
     let mut resolver = Resolver::new(
         request.recursive,
@@ -580,6 +885,7 @@ fn resolve_inputs_impl(
         capabilities.max_split_validation_bytes,
     );
     for (selection_index, selection) in request.selections.iter().enumerate() {
+        resolver.check_cancelled()?;
         match selection {
             InputSelection::Path(path) => {
                 let before = resolver.inputs.len();
@@ -587,6 +893,7 @@ fn resolve_inputs_impl(
                     selection_index,
                     source: InputSelectionSource::Path,
                     selection_path: path.clone(),
+                    base_directory: base_directory.clone(),
                     input_list_entry_index: None,
                     input_list_entry_path: None,
                 };
@@ -608,6 +915,7 @@ fn resolve_inputs_impl(
                 let bytes = read_bounded_regular_file(&selected_list_path)?;
                 let entries = parse_input_list(&bytes)?;
                 resolver.record_input_list(bytes.len(), entries.len())?;
+                resolver.check_cancelled()?;
                 if entries.is_empty() {
                     return Err(InputResolutionError::new(
                         InputResolutionErrorCode::EmptySelection,
@@ -615,11 +923,13 @@ fn resolve_inputs_impl(
                 }
                 let before_list = resolver.inputs.len();
                 for (entry_index, entry_path) in entries.into_iter().enumerate() {
+                    resolver.check_cancelled()?;
                     let before_entry = resolver.inputs.len();
                     let selection = SelectionContext {
                         selection_index,
                         source: InputSelectionSource::InputList,
                         selection_path: path.clone(),
+                        base_directory: base_directory.clone(),
                         input_list_entry_index: Some(entry_index),
                         input_list_entry_path: Some(entry_path.clone()),
                     };
@@ -649,6 +959,201 @@ fn resolve_inputs_impl(
     })
 }
 
+fn resolve_inputs_batch_impl(
+    request: InputResolutionBatchRequest,
+    capabilities: InputResolutionCapabilities<'_>,
+) -> Result<InputResolutionBatchResult, InputResolutionError> {
+    if request.selections.is_empty() {
+        return Err(InputResolutionError::new(
+            InputResolutionErrorCode::EmptySelection,
+        ));
+    }
+    if request.selections.len() > MAX_INPUT_LIST_ENTRIES {
+        return Err(InputResolutionError::new(
+            InputResolutionErrorCode::ResourceLimitExceeded,
+        ));
+    }
+    let base_directories = request
+        .selections
+        .iter()
+        .map(|selection| {
+            if !selection.base_directory.is_absolute() {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InvalidBaseDirectory,
+                ));
+            }
+            let base_directory = fs::canonicalize(&selection.base_directory).map_err(|_| {
+                InputResolutionError::new(InputResolutionErrorCode::InvalidBaseDirectory)
+            })?;
+            if !fs::metadata(&base_directory)
+                .map_err(|_| {
+                    InputResolutionError::new(InputResolutionErrorCode::InvalidBaseDirectory)
+                })?
+                .is_dir()
+            {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InvalidBaseDirectory,
+                ));
+            }
+            Ok(base_directory)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(control) = capabilities.control {
+        control.check_cancelled()?;
+    }
+    let mut resolver = Resolver::new(
+        request.recursive,
+        request.follow_symlinks,
+        capabilities.split_trust_store,
+        capabilities.control,
+        capabilities.max_split_validation_bytes,
+    );
+    let mut entries = Vec::new();
+    for (selection_index, selection) in request.selections.iter().enumerate() {
+        resolver.check_cancelled()?;
+        let base_directory = &base_directories[selection_index];
+        match &selection.selection {
+            InputSelection::Path(path) => {
+                let context = SelectionContext {
+                    selection_index,
+                    source: InputSelectionSource::Path,
+                    selection_path: path.clone(),
+                    base_directory: base_directory.clone(),
+                    input_list_entry_index: None,
+                    input_list_entry_path: None,
+                };
+                let before = resolver.inputs.len();
+                match resolver.expand_path(path, base_directory, &context) {
+                    Ok(()) if resolver.inputs.len() == before => {
+                        entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                            &context,
+                            absolute_path(base_directory, path),
+                            InputResolutionErrorCode::EmptySelection,
+                        )))
+                    }
+                    Ok(()) => {
+                        append_resolved_batch_entries(&resolver.inputs[before..], &mut entries)
+                    }
+                    Err(error)
+                        if resolver.inputs.len() == before
+                            && is_item_local_resolution_failure(error.code(), path) =>
+                    {
+                        entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                            &context,
+                            absolute_path(base_directory, path),
+                            error.code(),
+                        )))
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            InputSelection::InputList(path) => {
+                let selected_list_path = absolute_path(base_directory, path);
+                let context = SelectionContext {
+                    selection_index,
+                    source: InputSelectionSource::InputList,
+                    selection_path: path.clone(),
+                    base_directory: base_directory.clone(),
+                    input_list_entry_index: None,
+                    input_list_entry_path: None,
+                };
+                let list_parent = selected_list_path
+                    .parent()
+                    .ok_or_else(|| {
+                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
+                    })?
+                    .to_path_buf();
+                let bytes = read_bounded_regular_file(&selected_list_path)?;
+                let listed_entries = parse_input_list(&bytes)?;
+                resolver.record_input_list(bytes.len(), listed_entries.len())?;
+                resolver.check_cancelled()?;
+                if listed_entries.is_empty() {
+                    entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                        &context,
+                        selected_list_path,
+                        InputResolutionErrorCode::EmptySelection,
+                    )));
+                    continue;
+                }
+                for (entry_index, entry_path) in listed_entries.into_iter().enumerate() {
+                    resolver.check_cancelled()?;
+                    let context = SelectionContext {
+                        selection_index,
+                        source: InputSelectionSource::InputList,
+                        selection_path: path.clone(),
+                        base_directory: base_directory.clone(),
+                        input_list_entry_index: Some(entry_index),
+                        input_list_entry_path: Some(entry_path.clone()),
+                    };
+                    let before = resolver.inputs.len();
+                    match resolver.expand_path(&entry_path, &list_parent, &context) {
+                        Ok(()) if resolver.inputs.len() == before => {
+                            entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                                &context,
+                                absolute_path(&list_parent, &entry_path),
+                                InputResolutionErrorCode::EmptySelection,
+                            )))
+                        }
+                        Ok(()) => {
+                            append_resolved_batch_entries(&resolver.inputs[before..], &mut entries)
+                        }
+                        Err(error)
+                            if resolver.inputs.len() == before
+                                && is_item_local_resolution_failure(error.code(), &entry_path) =>
+                        {
+                            entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                                &context,
+                                absolute_path(&list_parent, &entry_path),
+                                error.code(),
+                            )))
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }
+    }
+    Ok(InputResolutionBatchResult { entries })
+}
+
+fn append_resolved_batch_entries(
+    resolved: &[ResolvedInput],
+    entries: &mut Vec<InputResolutionBatchEntry>,
+) {
+    entries.extend(
+        resolved
+            .iter()
+            .cloned()
+            .map(InputResolutionBatchEntry::Resolved),
+    );
+}
+
+fn batch_failure(
+    context: &SelectionContext,
+    requested_path: PathBuf,
+    code: InputResolutionErrorCode,
+) -> InputResolutionFailure {
+    InputResolutionFailure {
+        selection_index: context.selection_index,
+        source: context.source,
+        selection_path: context.selection_path.clone(),
+        base_directory: context.base_directory.clone(),
+        input_list_entry_index: context.input_list_entry_index,
+        input_list_entry_path: context.input_list_entry_path.clone(),
+        requested_path,
+        code,
+    }
+}
+
+fn is_item_local_resolution_failure(code: InputResolutionErrorCode, path: &Path) -> bool {
+    matches!(
+        code,
+        InputResolutionErrorCode::EmptySelection | InputResolutionErrorCode::InputUnavailable
+    ) && !path
+        .file_name()
+        .is_some_and(|name| looks_like_split_segment(Path::new(name)))
+}
+
 struct Resolver<'a> {
     recursive: bool,
     follow_symlinks: bool,
@@ -669,6 +1174,7 @@ struct SelectionContext {
     selection_index: usize,
     source: InputSelectionSource,
     selection_path: PathBuf,
+    base_directory: PathBuf,
     input_list_entry_index: Option<usize>,
     input_list_entry_path: Option<PathBuf>,
 }
@@ -725,6 +1231,13 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    fn check_cancelled(&self) -> Result<(), InputResolutionError> {
+        if let Some(control) = self.control {
+            control.check_cancelled()?;
+        }
+        Ok(())
+    }
+
     fn record_resolved_segments(&mut self, count: usize) -> Result<(), InputResolutionError> {
         self.resolved_segments = self.resolved_segments.checked_add(count).ok_or_else(|| {
             InputResolutionError::new(InputResolutionErrorCode::ResourceLimitExceeded)
@@ -743,6 +1256,7 @@ impl<'a> Resolver<'a> {
         path_base: &Path,
         selection: &SelectionContext,
     ) -> Result<(), InputResolutionError> {
+        self.check_cancelled()?;
         let selected_path = absolute_path(path_base, path);
         let link_metadata = fs::symlink_metadata(&selected_path)
             .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
@@ -816,6 +1330,7 @@ impl<'a> Resolver<'a> {
         selected_path: &Path,
         selection: &SelectionContext,
     ) -> Result<(), InputResolutionError> {
+        self.check_cancelled()?;
         let canonical_root = fs::canonicalize(selected_path)
             .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
         let root_metadata = fs::metadata(&canonical_root)
@@ -845,6 +1360,7 @@ impl<'a> Resolver<'a> {
                     raw_path_key(left.relative_path()).cmp(&raw_path_key(right.relative_path()))
                 })
         });
+        self.check_cancelled()?;
 
         if found.is_empty() {
             return Err(InputResolutionError::new(
@@ -852,6 +1368,7 @@ impl<'a> Resolver<'a> {
             ));
         }
         for candidate in found {
+            self.check_cancelled()?;
             match candidate {
                 FoundInput::File(candidate) => self.append_known_file(
                     candidate.canonical_path,
@@ -886,6 +1403,7 @@ impl<'a> Resolver<'a> {
         active_directories: &mut HashSet<DirectoryIdentity>,
         found: &mut Vec<FoundInput>,
     ) -> Result<(), InputResolutionError> {
+        self.check_cancelled()?;
         if depth > MAX_TRAVERSAL_DEPTH {
             return Err(InputResolutionError::new(
                 InputResolutionErrorCode::ResourceLimitExceeded,
@@ -914,6 +1432,13 @@ impl<'a> Resolver<'a> {
         });
 
         for entry in entries {
+            #[cfg(test)]
+            SCAN_DIRECTORY_ENTRY_CHECKPOINT.with(|checkpoint| {
+                if let Some(checkpoint) = checkpoint.borrow_mut().take() {
+                    checkpoint();
+                }
+            });
+            self.check_cancelled()?;
             let name = entry.file_name();
             let encountered_path = directory.join(&name);
             let relative_path = relative_directory.join(&name);
@@ -1087,16 +1612,19 @@ impl<'a> Resolver<'a> {
         discovered_relative_path: Option<PathBuf>,
     ) -> Result<(), InputResolutionError> {
         let input_index = self.inputs.len();
-        let mut context = SplitResolutionContext {
-            trust_store: self.trust_store,
-            control: self.control,
-            visited_entries: &mut self.visited_entries,
-            validated_bytes: &mut self.validated_split_bytes,
-            max_validated_bytes: self.max_split_validation_bytes,
-            input_index,
+        let qualified = {
+            let mut context = SplitResolutionContext {
+                trust_store: self.trust_store,
+                control: self.control,
+                visited_entries: &mut self.visited_entries,
+                validated_bytes: &mut self.validated_split_bytes,
+                max_validated_bytes: self.max_split_validation_bytes,
+                input_index,
+            };
+            qualify_directory(directory, &mut context)?
         };
-        let qualified = qualify_directory(directory, &mut context)?;
         self.record_resolved_segments(qualified.segments.len())?;
+        let split_manifest_sha256 = qualified.manifest_sha256;
 
         let mut segments = Vec::with_capacity(qualified.segments.len());
         for segment in qualified.segments {
@@ -1126,12 +1654,14 @@ impl<'a> Resolver<'a> {
                 selection_index: selection.selection_index,
                 source: selection.source,
                 selection_path: selection.selection_path.clone(),
+                base_directory: selection.base_directory.clone(),
                 input_list_entry_index: selection.input_list_entry_index,
                 input_list_entry_path: selection.input_list_entry_path.clone(),
                 discovered_directory,
                 discovered_relative_path,
             },
             qualification: Some(qualified.qualification),
+            split_manifest_sha256: Some(split_manifest_sha256),
         });
         Ok(())
     }
@@ -1212,12 +1742,14 @@ impl<'a> Resolver<'a> {
                 selection_index: selection.selection_index,
                 source: selection.source,
                 selection_path: selection.selection_path.clone(),
+                base_directory: selection.base_directory.clone(),
                 input_list_entry_index: selection.input_list_entry_index,
                 input_list_entry_path: selection.input_list_entry_path.clone(),
                 discovered_directory,
                 discovered_relative_path,
             },
             qualification: None,
+            split_manifest_sha256: None,
         });
         Ok(())
     }
@@ -1611,13 +2143,25 @@ fn hex_key(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+thread_local! {
+    static SCAN_DIRECTORY_ENTRY_CHECKPOINT:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputResolutionCapabilities, InputResolutionControl,
         MAX_INPUT_LIST_BYTES_PER_REQUEST, MAX_INPUT_LIST_ENTRIES, MAX_TRAVERSAL_DEPTH,
         MAX_TRAVERSAL_ENTRIES, Resolver, parse_input_list,
     };
-    use crate::input_resolution::InputResolutionErrorCode;
+    use crate::input_resolution::{InputResolutionErrorCode, SCAN_DIRECTORY_ENTRY_CHECKPOINT};
+    use crate::inspection::CancellationHandle;
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::Arc;
 
     fn resolver() -> Resolver<'static> {
         Resolver::new(
@@ -1678,6 +2222,7 @@ mod tests {
             selection_index: 0,
             source: super::InputSelectionSource::Path,
             selection_path: split_path.clone(),
+            base_directory: std::path::PathBuf::from("/"),
             input_list_entry_index: None,
             input_list_entry_path: None,
         };
@@ -1703,5 +2248,56 @@ mod tests {
         assert_eq!(progress.completed_bytes, 0);
         assert_eq!(progress.total_bytes, None);
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn control_observes_a_bound_invocation_cancellation_handle() {
+        let cancellation = CancellationHandle::new();
+        let control = InputResolutionControl::new().with_cancellation(cancellation.clone());
+
+        assert!(!control.is_cancelled());
+        cancellation.cancel();
+        assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn directory_scan_observes_cancellation_between_entries() {
+        let tree = tempfile::tempdir().expect("create traversal cancellation fixture");
+        std::fs::write(tree.path().join("present.nsp"), b"present")
+            .expect("write traversal candidate");
+        let root = std::fs::canonicalize(tree.path()).expect("canonical traversal root");
+        let control = Arc::new(InputResolutionControl::new());
+        let checkpoint_control = Arc::clone(&control);
+        SCAN_DIRECTORY_ENTRY_CHECKPOINT.with(|checkpoint| {
+            *checkpoint.borrow_mut() = Some(Box::new(move || checkpoint_control.cancel()));
+        });
+        let mut resolver = Resolver::new(
+            false,
+            false,
+            None,
+            Some(control.as_ref()),
+            DEFAULT_MAX_SPLIT_VALIDATION_BYTES,
+        );
+        let mut visited = HashSet::new();
+        let mut active = HashSet::new();
+        let mut found = Vec::new();
+
+        let error = resolver
+            .scan_directory(
+                &root,
+                &root,
+                Path::new(""),
+                0,
+                &mut visited,
+                &mut active,
+                &mut found,
+            )
+            .expect_err("cancellation between traversal entries must stop the scan");
+
+        assert_eq!(
+            error.code(),
+            InputResolutionErrorCode::SplitResolutionCancelled
+        );
+        assert!(found.is_empty());
     }
 }

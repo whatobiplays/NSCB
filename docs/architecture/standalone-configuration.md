@@ -85,6 +85,24 @@ a bounded busy timeout. A cross-process schema-initialization lock serializes
 first use and migration. It prevents two processes from racing while creating
 the database, changing journal mode, or applying a schema migration.
 
+The current schema is version 4. A single Copy keeps its filesystem path in
+`jobs.source`; an independent batch leaves that column `NULL`. A tagged
+`batch_intents` row stores the ordered batch plan. The separate tagged
+`batch_source_intents` row stores each item's source path and selection
+provenance, so the Job source column never exposes serialized intent as a path.
+Ordered `job_items` rows retain each stable key and path.
+
+`batch_item_checkpoints` stores one sequence, terminal item state, outcome,
+failure, publication classification, and evidence document per item. Batch
+`job_artifacts` rows carry their `item_key` and use a composite foreign key to
+the owning Job item; single-Copy artifacts remain Job-owned. Checkpoint evidence
+is authoritative, and the relational artifact rows project the same per-item
+evidence. Checks constrain intent schema and kind, item states, publication
+states, and checkpoint sequence. Composite foreign keys bind checkpoints and
+artifacts to their ordered Job items. Owner triggers reject batch intent or
+source intent on a single-Copy Job and reject artifacts whose owner type does
+not match the submission kind.
+
 After planning succeeds, the process locks one persistent entry in the fixed
 slot registry before opening the admission writer transaction. The admission
 transaction stores the new Job and an opaque claim token in SQLite and links
@@ -119,6 +137,16 @@ history error and keeps the prior running record available for later
 interruption/reconciliation; it never reports an untracked success silently.
 History never stores copied content bytes, keys, credentials, helper output,
 or secret values.
+
+For an independent batch, the host checkpoint is committed after every item
+before the next item starts. The item checkpoint transaction updates its
+`job_items` row and inserts one evidence row with a strictly increasing
+sequence. Aggregate completion verifies every item against its checkpoint,
+writes the terminal result and artifacts in one transaction, and preserves
+prior checkpoints if that aggregate transaction rolls back. A failed checkpoint
+on the current result is persisted during finalization when its evidence is
+complete. An interrupted batch keeps committed item results and marks only
+unfinished items as interrupted; NSCB never resumes the batch automatically.
 
 The `standalone-job-history` Cargo feature is opt-in and required by the
 standalone binary. It alone activates the optional `rusqlite` dependency;
@@ -310,12 +338,12 @@ targets, unsupported failed-item selections, and invalid flags map to stable
 typed errors and do not create or mutate a Job unnecessarily.
 
 `jobs retry` does not deserialize or replay the stored plan snapshot. It reads
-the source intent and selection provenance, reconstructs a typed
-`CopyThroughRequest`, and calls the current planner again. Explicit destination
-and workspace selections retain their stored paths. Configured and native
-destination selections are resolved again from current configuration. A
-host-default workspace is selected under the current host environment. Missing
-source or invalid current prerequisites fail before admission.
+the source intent and selection provenance, reconstructs a typed request, and
+calls the current planner again. Explicit destination and workspace selections
+retain their stored paths. Configured and native destination selections are
+resolved again from current configuration. A host-default workspace is selected
+under the current host environment. Missing source or invalid current
+prerequisites fail before admission.
 
 Every admitted Job stores its invocation directory. Relative explicit paths in
 an older Job are anchored to that stored directory, while implicit destination
@@ -323,21 +351,29 @@ and workspace choices are resolved again. The retry records the directory of
 the retry invocation and stores the anchored paths in its new intent, so
 subsequent working-directory changes cannot retarget them.
 
-The retry boundary accepts only a terminal `copy_through` record with `single`
-submission and `all` scope. Unsupported kinds, batch submissions, failed-item
-scopes, malformed enumeration values, and missing absolute invocation context
-return `job_retry_ineligible` before planning or admission.
+Single Copy retry accepts only a terminal `copy_through` record with `single`
+submission and `all` scope. Independent batch retry uses `--failed-items` and
+validates the tagged intent, exact plan order, and terminal predecessor states.
+It selects only stored item rows in state `failed`, preserving their keys,
+sources, destinations, path bases, and order without re-expansion. Unsupported
+kinds, malformed intent, invalid successor states, empty selections, and
+missing absolute invocation context are rejected before planning or admission.
+For a failed qualified Split item, provenance also stores the exact manifest
+digest. Retry resolves that saved logical path under the current trust store
+and rejects the whole batch if the receipt, manifest, or member set no longer
+matches. It does not reopen the input list or add selections.
 
 Each retry is a fresh request and starts with the refuse policy, recording
 `retry_default` regardless of the parent's policy. It does not inherit
-`--replace`: previous published outputs remain untouched unless the user
-explicitly supplies `--replace` again, which records `retry_explicit_replace`.
+`--replace` or `--skip`. Previous outputs remain untouched unless the user
+supplies one of those options again, which records `retry_explicit_replace` or
+`retry_explicit_skip`. Supplying both is a usage error.
 A newly admitted retry stores its parent Job ID, parent conflict policy, and
 that policy's original provenance. Prior Job records remain immutable.
-Failed-item
-selection filters persisted items whose individual state is actually `failed`;
-because this issue does not implement batch execution, a nonempty selection is
-then rejected as unsupported before creating a retry Job.
+Failed-item selection is limited to independently admitted batches. Successful,
+skipped, cancelled, uncertain, interrupted, and not-started rows are not retried
+by this path; they remain part of the parent record and its prior filesystem
+effects.
 
 ## Machine contract
 
@@ -349,11 +385,20 @@ sanitized code. Job history success kinds are `jobs.list`, `jobs.show`, and
 `jobs.clear`; retry emits the standard `job.result` or `job.event` documents.
 Standalone Copy adds top-level `job_id`; `history_error` appears only when
 completion persistence fails after the authoritative operation result exists.
+Copy-batch adds top-level `submission_kind: "independent_batch"` to its event
+and terminal envelopes. Its terminal result contains the aggregate state and
+the ordered per-item evidence. JSON mode emits one aggregate `job.result`;
+JSONL emits ordered `job.event` records and one aggregate terminal result.
 
 Exit class 0 means success. Exit class 2 covers invalid command usage and
 configuration failures. Exit class 3 covers key validation, input or
-prerequisite failures, and paths that cannot be represented. Exit class 7
-means failure to write the required document. Human success goes to stdout and
+prerequisite failures, and paths that cannot be represented. Exit class 4 is a
+destination conflict or change, 6 is cancellation, and 7 is an internal,
+session, publication, persistence, or reporting failure. Exit class 8 applies
+when a batch has at least one `Copied` or `AlreadyUpToDate` item and at least
+one failed item. Skipped items do not count as actual successes. A batch with
+failures and no actual success returns `Failed` using the most severe item exit
+class. Human success goes to stdout and
 human failure to stderr. Machine stdout contains exactly one document and no
 human diagnostics. Existing Probe records and base Copy event semantics remain
 compatible.

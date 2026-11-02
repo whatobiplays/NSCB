@@ -274,8 +274,8 @@ nscb verify <input> [--profile full|structural] [--keys <path>]
 | 6 | Cancellation |
 | 7 | Internal allocation, filesystem, or signal-registration failure |
 
-Exit `8` is reserved for independent batch `CompletedWithIssues` reporting.
-The single-input `verify` command never emits it. A failed signature or hash
+Exit `8` is used by independent copy batches for `CompletedWithIssues`
+reporting. The single-input `verify` command never emits it. A failed signature or hash
 is a completed verification result and exits `3`; it is not a usage error.
 
 With `--json`, a completed result is one schema-version-1 document with

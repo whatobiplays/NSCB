@@ -9,11 +9,15 @@
   "states": {
     "admitted": "Admitted",
     "running": "Running",
+    "planned": "Planned",
     "succeeded": "Succeeded",
     "completed_with_issues": "Completed with issues",
     "failed": "Failed",
+    "skipped": "Skipped",
+    "uncertain": "Uncertain",
     "cancelled": "Cancelled",
-    "interrupted": "Interrupted"
+    "interrupted": "Interrupted",
+    "not_started": "Not started"
   },
   "failures": {
     "interrupted": "Interrupted before completion; inspect the recorded evidence before retrying."

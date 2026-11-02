@@ -1,7 +1,8 @@
 //! Typed Job-history records and their stable serialized representations.
 
-use nscb::{JobState, OperationOutcome};
-use serde::Serialize;
+use nscb::{JobState, OperationOutcome, Sha256Digest, SplitQualification};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,9 +66,7 @@ impl JobKind {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SubmissionKind {
     Single,
-    /// Reserved for Issue #13 independent-item execution. Stored records may
-    /// use this value even though the current CLI cannot execute a batch.
-    #[allow(dead_code)]
+    /// A batch admitted as one Job with independently reported item results.
     IndependentBatch,
 }
 
@@ -119,6 +118,7 @@ impl WorkspaceSelection {
 pub(crate) enum ConflictPolicyRecord {
     Fail,
     Replace,
+    Skip,
 }
 
 impl ConflictPolicyRecord {
@@ -126,6 +126,7 @@ impl ConflictPolicyRecord {
         match self {
             Self::Fail => "fail",
             Self::Replace => "replace",
+            Self::Skip => "skip",
         }
     }
 }
@@ -135,8 +136,10 @@ impl ConflictPolicyRecord {
 pub(crate) enum ConflictPolicyProvenance {
     Default,
     CliReplace,
+    CliSkip,
     RetryDefault,
     RetryExplicitReplace,
+    RetryExplicitSkip,
 }
 
 impl ConflictPolicyProvenance {
@@ -144,8 +147,10 @@ impl ConflictPolicyProvenance {
         match self {
             Self::Default => "default",
             Self::CliReplace => "cli_replace",
+            Self::CliSkip => "cli_skip",
             Self::RetryDefault => "retry_default",
             Self::RetryExplicitReplace => "retry_explicit_replace",
+            Self::RetryExplicitSkip => "retry_explicit_skip",
         }
     }
 }
@@ -154,9 +159,7 @@ impl ConflictPolicyProvenance {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RetryScope {
     All,
-    /// Reserved for the future batch retry contract. Current copy Jobs reject
-    /// this selection before admission.
-    #[allow(dead_code)]
+    /// A retry containing only eligible failed items from one independent batch.
     FailedItems,
 }
 
@@ -173,7 +176,125 @@ impl RetryScope {
 pub(crate) struct AdmissionItem {
     pub(crate) item_key: String,
     pub(crate) source: PathBuf,
-    pub(crate) destination: PathBuf,
+    pub(crate) destination: Option<PathBuf>,
+    pub(crate) provenance: Option<serde_json::Value>,
+    pub(crate) split_qualification: Option<SplitQualification>,
+    pub(crate) split_manifest_sha256: Option<Sha256Digest>,
+}
+
+/// Source intent for an independently admitted batch.
+///
+/// A batch has no single filesystem source. This tagged representation keeps
+/// each logical item's source and resolver provenance together while leaving
+/// `jobs.source` reserved for the single-copy contract.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BatchSourceIntent {
+    pub(crate) schema_version: u64,
+    pub(crate) kind: String,
+    pub(crate) items: Vec<BatchSourceItemIntent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BatchSourceItemIntent {
+    pub(crate) item_key: String,
+    pub(crate) source: String,
+    pub(crate) provenance: serde_json::Value,
+}
+
+impl BatchSourceIntent {
+    const SCHEMA_VERSION: u64 = 1;
+    const KIND: &'static str = "nscb.copy_batch_sources";
+    const LEGACY_INCOMPLETE_KIND: &'static str = "nscb.legacy_unqualified_batch_sources";
+
+    pub(crate) fn legacy_incomplete() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            kind: Self::LEGACY_INCOMPLETE_KIND.to_owned(),
+            items: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_legacy_incomplete(&self) -> bool {
+        self.schema_version == Self::SCHEMA_VERSION
+            && self.kind == Self::LEGACY_INCOMPLETE_KIND
+            && self.items.is_empty()
+    }
+
+    pub(crate) fn from_items(items: &[AdmissionItem]) -> Result<Self, HistoryError> {
+        let items = items
+            .iter()
+            .map(|item| {
+                if item.item_key.is_empty()
+                    || !item.source.is_absolute()
+                    || !item
+                        .provenance
+                        .as_ref()
+                        .is_some_and(serde_json::Value::is_object)
+                {
+                    return Err(HistoryError::AdmissionFailed);
+                }
+                Ok(BatchSourceItemIntent {
+                    item_key: item.item_key.clone(),
+                    source: item
+                        .source
+                        .to_str()
+                        .ok_or(HistoryError::PathUnrepresentable)?
+                        .to_owned(),
+                    provenance: item
+                        .provenance
+                        .clone()
+                        .ok_or(HistoryError::AdmissionFailed)?,
+                })
+            })
+            .collect::<Result<Vec<_>, HistoryError>>()?;
+        let intent = Self {
+            schema_version: Self::SCHEMA_VERSION,
+            kind: Self::KIND.to_owned(),
+            items,
+        };
+        intent
+            .is_valid()
+            .then_some(intent)
+            .ok_or(HistoryError::AdmissionFailed)
+    }
+
+    /// Checks the tagged source-intent shape without consulting filesystem state.
+    pub(crate) fn is_valid(&self) -> bool {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || self.kind != Self::KIND
+            || self.items.is_empty()
+        {
+            return false;
+        }
+        let mut item_keys = HashSet::with_capacity(self.items.len());
+        self.items.iter().all(|item| {
+            !item.item_key.is_empty()
+                && PathBuf::from(&item.source).is_absolute()
+                && item.provenance.is_object()
+                && item_keys.insert(item.item_key.as_str())
+        })
+    }
+
+    /// Verifies that persisted item rows are the exact items named by this intent.
+    pub(crate) fn matches_items(&self, items: &[JobItem]) -> bool {
+        self.is_valid()
+            && self.items.len() == items.len()
+            && self.items.iter().zip(items).all(|(source_item, item)| {
+                item.item_key == source_item.item_key
+                    && item.source == source_item.source
+                    && item.provenance.as_ref() == Some(&source_item.provenance)
+            })
+    }
+}
+
+/// Compile-time distinction between a single filesystem source and an
+/// independent batch's per-item source intent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionSource {
+    Single(PathBuf),
+    IndependentBatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -181,7 +302,7 @@ pub(crate) struct AdmissionInput {
     pub(crate) kind: JobKind,
     pub(crate) submission_kind: SubmissionKind,
     pub(crate) invocation_cwd: PathBuf,
-    pub(crate) source: PathBuf,
+    pub(crate) source: AdmissionSource,
     pub(crate) destination: PathBuf,
     pub(crate) destination_selection: DestinationSelection,
     pub(crate) workspace: PathBuf,
@@ -195,6 +316,7 @@ pub(crate) struct AdmissionInput {
     pub(crate) required_providers: Vec<String>,
     pub(crate) required_keys: Vec<String>,
     pub(crate) items: Vec<AdmissionItem>,
+    pub(crate) batch_intent: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -215,11 +337,14 @@ pub(crate) struct JobItem {
     pub(crate) item_key: String,
     pub(crate) kind: String,
     pub(crate) source: String,
-    pub(crate) destination: String,
+    pub(crate) destination: Option<String>,
     pub(crate) state: String,
     pub(crate) outcome: Option<String>,
     pub(crate) failure_code: Option<String>,
     pub(crate) evidence: Option<serde_json::Value>,
+    pub(crate) provenance: Option<serde_json::Value>,
+    pub(crate) publication_state: String,
+    pub(crate) checkpoint_sequence: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -230,7 +355,8 @@ pub(crate) struct JobDetail {
     pub(crate) submission_kind: String,
     pub(crate) state: String,
     pub(crate) invocation_cwd: Option<String>,
-    pub(crate) source: String,
+    pub(crate) source: Option<String>,
+    pub(crate) batch_source_intent: Option<BatchSourceIntent>,
     pub(crate) destination: String,
     pub(crate) destination_selection: String,
     pub(crate) workspace: String,
@@ -251,6 +377,7 @@ pub(crate) struct JobDetail {
     pub(crate) required_keys: Vec<String>,
     pub(crate) snapshot: Option<serde_json::Value>,
     pub(crate) result: Option<serde_json::Value>,
+    pub(crate) batch_intent: Option<serde_json::Value>,
     pub(crate) items: Vec<JobItem>,
 }
 
@@ -273,9 +400,25 @@ pub(crate) struct RetryIntent {
     pub(crate) conflict_policy_provenance: ConflictPolicyProvenance,
 }
 
+/// Validated exact failed-item retry intent for an independently admitted batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BatchFailedItemsRetryIntent {
+    pub(crate) job_id: String,
+    pub(crate) invocation_cwd: PathBuf,
+    pub(crate) destination: PathBuf,
+    pub(crate) destination_selection: DestinationSelection,
+    pub(crate) workspace: PathBuf,
+    pub(crate) workspace_selection: WorkspaceSelection,
+    pub(crate) conflict_policy: ConflictPolicyRecord,
+    pub(crate) conflict_policy_provenance: ConflictPolicyProvenance,
+    pub(crate) items: Vec<AdmissionItem>,
+    pub(crate) batch_intent: serde_json::Value,
+}
+
 pub(crate) fn history_state(state: JobState) -> &'static str {
     match state {
         JobState::Succeeded => "succeeded",
+        JobState::CompletedWithIssues => "completed_with_issues",
         JobState::Failed => "failed",
         JobState::Cancelled => "cancelled",
         _ => "failed",
@@ -296,6 +439,7 @@ pub(crate) fn operation_outcome(outcome: OperationOutcome) -> &'static str {
     match outcome {
         OperationOutcome::Copied => "copied",
         OperationOutcome::AlreadyUpToDate => "already_up_to_date",
+        OperationOutcome::Skipped => "skipped",
         _ => "unknown",
     }
 }
