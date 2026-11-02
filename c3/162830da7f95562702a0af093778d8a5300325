@@ -1,0 +1,23 @@
+src/standalone/history/tests.rs
+  s_5f4dc01249fdc8::t_5d6e1c22b23f80 12
+src/operation.rs
+  s_5f4dc01249fdc8::t_d693c1ca27eec4 8139-8152
+  s_5f4dc01249fdc8::t_a88ec0efad9c43 8
+  s_5f4dc01249fdc8::t_150806ee86746d 6553,6564,6566,6664,6697,6718,6734,7066,7447,7471,7533,7638,7686,7701,7721,7739,7754,7797,7808,7843,7851,7861,7872,7937
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c3162830da7f95562702a0af093778d8a5300325",
+  "prompts": {},
+  "sessions": {
+    "s_5f4dc01249fdc8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19384-04b6-70f2-977d-02d03f0005da",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
