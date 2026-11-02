@@ -1,0 +1,76 @@
+docs/testing/job-contracts-qualification.md
+  s_5f4dc01249fdc8::t_df49a9dfe5e487 646-652
+  s_5f4dc01249fdc8::t_e7245bd6b0eb7e 438
+  s_5f4dc01249fdc8::t_d5e2c1973e6c07 429-430
+  s_5f4dc01249fdc8::t_53e833cb88f226 425-428,431-432
+  s_5f4dc01249fdc8::t_5fe4f9c78704a5 412-424,433-436
+  s_5f4dc01249fdc8::t_a101bccd7062c0 474-476
+  s_5f4dc01249fdc8::t_9428307487a63d 591-593
+  s_d969eb75192cea::t_896424760ae6a5 437
+src/standalone/history/tests.rs
+  s_5f4dc01249fdc8::t_8ab74ebcb5cf4c 3328-3377
+  s_5f4dc01249fdc8::t_0c2c84a36107e0 3252
+  s_5f4dc01249fdc8::t_eb86a1c85e1c73 3243,3248
+  s_5f4dc01249fdc8::t_f4181ff813a3e5 3258-3280,3601-3605
+  s_5f4dc01249fdc8::t_389b47b6b28b07 3233,3281-3323,3325-3327
+  s_5f4dc01249fdc8::t_e8e2ae40a5ed89 3324
+  s_5f4dc01249fdc8::t_debf034a510ff3 3234-3242,3244-3247,3249-3251,3253-3257
+docs/configuration.md
+  s_5f4dc01249fdc8::t_66418ab240dad5 424-436
+  s_5f4dc01249fdc8::t_beb2492257a366 367-368
+  s_5f4dc01249fdc8::t_77663dd62544a3 449-454
+docs/architecture/job-execution.md
+  s_5f4dc01249fdc8::t_c353f209f97e19 240-241
+  s_5f4dc01249fdc8::t_3a4f2868dd8067 308-314
+  s_5f4dc01249fdc8::t_beb2492257a366 128-130
+tests/input_resolution.rs
+  s_5f4dc01249fdc8::t_debf034a510ff3 606-673
+docs/input-selection.md
+  s_5f4dc01249fdc8::t_dc57db130055ea 65-74
+docs/architecture/standalone-configuration.md
+  s_5f4dc01249fdc8::t_beb2492257a366 409-412
+src/input_resolution.rs
+  s_5f4dc01249fdc8::t_997d55110a2759 223-225
+  s_5f4dc01249fdc8::t_eb86a1c85e1c73 1789
+  s_5f4dc01249fdc8::t_684e37b238fd48 220-222
+  s_5f4dc01249fdc8::t_38836f6df0711a 1729-1730,1738
+README.md
+  s_5f4dc01249fdc8::t_c353f209f97e19 347-350
+docs/validation.md
+  s_5f4dc01249fdc8::t_d5e2c1973e6c07 407-408
+  s_5f4dc01249fdc8::t_53e833cb88f226 403-406,409-410
+  s_5f4dc01249fdc8::t_12ef9bc5c33c3d 555
+  s_5f4dc01249fdc8::t_240b126a36e601 556-560
+  s_5f4dc01249fdc8::t_b921c622be8375 390-402,411-416
+  s_5f4dc01249fdc8::t_be592a9b28f134 354-355
+  s_5f4dc01249fdc8::t_9b795cfd12da17 456-458
+src/standalone/history/store.rs
+  s_5f4dc01249fdc8::t_2ec3814ca7503b 1920-1926
+  s_5f4dc01249fdc8::t_bf2741c9e43466 1927-1929
+  s_5f4dc01249fdc8::t_38836f6df0711a 1935
+  s_5f4dc01249fdc8::t_0c2c84a36107e0 1803
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c11e739fba9993873d6d951d594319582b70d867",
+  "prompts": {},
+  "sessions": {
+    "s_5f4dc01249fdc8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19384-04b6-70f2-977d-02d03f0005da",
+        "model": "gpt-5.6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    },
+    "s_d969eb75192cea": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18fec-1ff3-7f42-8866-fef568da3072",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
