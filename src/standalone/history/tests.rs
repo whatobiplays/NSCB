@@ -3231,6 +3231,151 @@ fn assert_mutated_retry_intent_is_rejected(
 }
 
 #[test]
+fn failed_items_retry_validation_rejects_destinationless_empty_selection() {
+    let store = valid_failed_batch_store();
+    let mut job = store.load("batch").unwrap();
+    let mut intent = valid_failed_batch_intent();
+
+    job.items[0].destination = None;
+    job.items[0].state = "failed".to_owned();
+    job.items[0].failure_code = Some("empty_selection".to_owned());
+    intent["plan"]["items"][0]["destination"] = serde_json::Value::Null;
+    intent["plan"]["items"][0]["state"] = serde_json::Value::String("preflight_failed".to_owned());
+    intent["plan"]["items"][0]["failure_code"] =
+        serde_json::Value::String("empty_selection".to_owned());
+    intent["selections"][0]["failure_code"] =
+        serde_json::Value::String("empty_selection".to_owned());
+    intent["selections"][0]["phase"] = serde_json::Value::String("resolution".to_owned());
+    job.items[0].provenance = Some(intent["selections"][0].clone());
+
+    assert_eq!(
+        super::store::validate_failed_items_retry_intent(&job, &intent),
+        Err(HistoryError::UnsupportedFailedItems)
+    );
+}
+
+#[test]
+fn failed_items_retry_validation_rejects_destinationful_empty_selection() {
+    let store = valid_failed_batch_store();
+    let mut job = store.load("batch").unwrap();
+    let mut intent = valid_failed_batch_intent();
+
+    assert!(job.items[0].destination.is_some());
+    assert!(intent["plan"]["items"][0]["destination"].is_string());
+    job.items[0].state = "failed".to_owned();
+    job.items[0].failure_code = Some("empty_selection".to_owned());
+    intent["plan"]["items"][0]["failure_code"] =
+        serde_json::Value::String("empty_selection".to_owned());
+    intent["selections"][0]["failure_code"] =
+        serde_json::Value::String("empty_selection".to_owned());
+    intent["selections"][0]["phase"] = serde_json::Value::String("resolution".to_owned());
+    job.items[0].provenance = Some(intent["selections"][0].clone());
+
+    assert_eq!(
+        super::store::validate_failed_items_retry_intent(&job, &intent),
+        Err(HistoryError::UnsupportedFailedItems)
+    );
+}
+
+#[test]
+fn failed_items_retry_rejects_viable_empty_selection_contradiction_before_admission() {
+    let store = valid_failed_batch_store();
+    let mut intent = valid_failed_batch_intent();
+    intent["plan"]["items"][0]["state"] = serde_json::Value::String("viable".to_owned());
+    intent["plan"]["items"][0]["failure_code"] = serde_json::Value::Null;
+    intent["selections"][0]
+        .as_object_mut()
+        .unwrap()
+        .retain(|field, _| !matches!(field.as_str(), "requested_path" | "failure_code" | "phase"));
+    replace_batch_intent(&store, &intent);
+    replace_batch_source_intent(&store, &intent);
+
+    let evidence = failed_batch_checkpoint_evidence(
+        0,
+        "failed-item",
+        "/fixture/first.bin",
+        "/output/first.bin",
+        "failed",
+        None,
+        Some("empty_selection"),
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE job_items
+             SET failure_code = 'empty_selection', evidence_json = ?1,
+                 provenance_json = ?2
+             WHERE job_id = 'batch' AND item_key = 'failed-item'",
+            params![evidence.to_string(), intent["selections"][0].to_string()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE batch_item_checkpoints
+             SET failure_code = 'empty_selection', evidence_json = ?1
+             WHERE job_id = 'batch' AND item_key = 'failed-item'",
+            [evidence.to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        store.failed_items_retry_intent("batch"),
+        Err(HistoryError::UnsupportedFailedItems)
+    );
+}
+
+#[test]
+fn failed_items_retry_accepts_viable_runtime_failure() {
+    let store = valid_failed_batch_store();
+    let mut intent = valid_failed_batch_intent();
+    intent["plan"]["items"][0]["state"] = serde_json::Value::String("viable".to_owned());
+    intent["plan"]["items"][0]["failure_code"] = serde_json::Value::Null;
+    intent["selections"][0]
+        .as_object_mut()
+        .unwrap()
+        .retain(|field, _| !matches!(field.as_str(), "requested_path" | "failure_code" | "phase"));
+    replace_batch_intent(&store, &intent);
+    replace_batch_source_intent(&store, &intent);
+
+    let evidence = failed_batch_checkpoint_evidence(
+        0,
+        "failed-item",
+        "/fixture/first.bin",
+        "/output/first.bin",
+        "failed",
+        None,
+        Some("write_failed"),
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE job_items
+             SET failure_code = 'write_failed', evidence_json = ?1,
+                 provenance_json = ?2
+             WHERE job_id = 'batch' AND item_key = 'failed-item'",
+            params![evidence.to_string(), intent["selections"][0].to_string()],
+        )
+        .unwrap();
+    store
+        .connection
+        .execute(
+            "UPDATE batch_item_checkpoints
+             SET failure_code = 'write_failed', evidence_json = ?1
+             WHERE job_id = 'batch' AND item_key = 'failed-item'",
+            [evidence.to_string()],
+        )
+        .unwrap();
+
+    let retry = store.failed_items_retry_intent("batch").unwrap();
+    assert_eq!(retry.items.len(), 1);
+    assert_eq!(retry.items[0].item_key, "failed-item");
+    assert_eq!(
+        retry.items[0].destination,
+        Some(PathBuf::from("/output/first.bin"))
+    );
+}
+
+#[test]
 fn failed_items_retry_rejects_unsafe_publication_states_and_unreleased_claims() {
     for state in ["published_unresolved", "uncertain", "unknown"] {
         let store = valid_failed_batch_store();
@@ -3453,7 +3598,11 @@ fn failed_items_retry_verifies_intent_against_durable_job_and_item_rows() {
             [],
         )
         .unwrap();
-    assert!(store.failed_items_retry_intent("batch").is_ok());
+    assert_eq!(
+        store.failed_items_retry_intent("batch"),
+        Err(HistoryError::UnsupportedFailedItems),
+        "empty selections must never authorize failed-item retry"
+    );
     let store = valid_failed_batch_store();
     let mut unavailable_list = valid_failed_batch_intent();
     unavailable_list["selections"][0]["source"] =

@@ -1800,7 +1800,7 @@ enum FailedItemsRetrySelectionSource {
     InputList,
 }
 
-fn validate_failed_items_retry_intent(
+pub(super) fn validate_failed_items_retry_intent(
     job: &JobDetail,
     intent: &serde_json::Value,
 ) -> Result<(), HistoryError> {
@@ -1917,21 +1917,22 @@ fn validate_failed_items_retry_intent(
             return Err(HistoryError::UnsupportedFailedItems);
         }
         let selection = parse_retry_selection(raw_selection)?;
+        // Empty selection is a preflight-only failure. Reject it in every
+        // validated authority so a saved destination, viable plan state, or
+        // success-looking provenance cannot make the item eligible.
+        let empty_selection = OperationFailureCode::EmptySelection.as_str();
+        if item.failure_code.as_deref() == Some(empty_selection)
+            || stored_plan_item.failure_code.as_deref() == Some(empty_selection)
+            || selection.failure_code.as_deref() == Some(empty_selection)
+        {
+            return Err(HistoryError::UnsupportedFailedItems);
+        }
         match item.destination.as_deref() {
             Some(destination)
                 if Path::new(destination).is_absolute()
                     && Path::new(destination).parent()
                         == Some(record.plan.destination_directory.as_path()) => {}
-            Some(_) => return Err(HistoryError::UnsupportedFailedItems),
-            None if stored_plan_item.state == FailedItemsRetryPlanState::PreflightFailed
-                && stored_plan_item.failure_code.as_deref() == Some("empty_selection")
-                && item.state == "failed"
-                && item.failure_code.as_deref() == Some("empty_selection")
-                && selection.failure_code.as_deref() == Some("empty_selection")
-                && selection.phase.as_deref() == Some("resolution")
-                && selection.split_qualification.is_none()
-                && selection.requested_path.as_deref() == Some(Path::new(&item.source)) => {}
-            None => return Err(HistoryError::UnsupportedFailedItems),
+            Some(_) | None => return Err(HistoryError::UnsupportedFailedItems),
         }
         if previous_selection_index.is_some_and(|previous| selection.selection_index < previous) {
             return Err(HistoryError::UnsupportedFailedItems);

@@ -406,9 +406,10 @@ for `CompletedWithIssues` when a batch has at least one actual copy success
 internal failure, which exits 7. Skipped items do not count as actual
 successes. A cancelled batch exits 6 unless an item has an internal failure,
 which exits 7. A failed batch selects the highest-ranked aggregate or item
-exit: internal 7 > cancellation 6 > conflict 4 > input 3 > other mapped exits
-(rank 0). If no mapped failure exit exists, it exits 7. A succeeded batch exits
-0. Human success goes to stdout and human failure to stderr. Machine stdout
+exit: internal 7 > cancellation 6 > conflict 4 > input 3. Every current failure
+code selects one of the four exits. A failed batch with no recorded failure
+exits 7. A succeeded batch exits 0. Human success goes to stdout and human
+failure to stderr. Machine stdout
 contains exactly one document and no human diagnostics. Existing Probe records
 and base Copy event semantics remain compatible.
 

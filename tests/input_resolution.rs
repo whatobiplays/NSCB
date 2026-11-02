@@ -603,6 +603,74 @@ fn nonrecursive_discovery_ignores_irrelevant_symlinks_when_follow_is_enabled() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn nonrecursive_broken_ordinary_symlink_is_item_local_beside_a_viable_sibling() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write("present.nsp", b"present");
+    symlink("missing-target.nsp", tree.path().join("broken.nsp")).unwrap();
+
+    let error = Engine::new()
+        .resolve_inputs(request(&tree).with_path(".").with_follow_symlinks(true))
+        .expect_err("single-input resolution must still report the unavailable child");
+    assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+
+    let result = Engine::new()
+        .resolve_inputs_batch(request(&tree).with_path(".").with_follow_symlinks(true))
+        .expect("an ordinary broken symlink must not suppress a viable sibling");
+    assert_eq!(result.entries.len(), 2);
+    let nscb::InputResolutionBatchEntry::Failed(failure) = &result.entries[0] else {
+        panic!("expected the broken symlink to remain an item-local failure");
+    };
+    assert_eq!(failure.code(), InputResolutionErrorCode::InputUnavailable);
+    assert_eq!(
+        failure.discovered_relative_path(),
+        Some(Path::new("broken.nsp"))
+    );
+    assert!(matches!(
+        &result.entries[1],
+        nscb::InputResolutionBatchEntry::Resolved(input)
+            if input.segments[0].path.file_name() == Some(std::ffi::OsStr::new("present.nsp"))
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn nonrecursive_broken_split_shaped_symlink_remains_global() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write("present.nsp", b"present");
+    symlink("missing-target", tree.path().join("game.00.nsp")).unwrap();
+
+    let error = Engine::new()
+        .resolve_inputs_batch(request(&tree).with_path(".").with_follow_symlinks(true))
+        .expect_err("a split-shaped broken symlink must reject the batch globally");
+    assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+}
+
+#[cfg(unix)]
+#[test]
+fn recursive_broken_ordinary_symlink_remains_global() {
+    use std::os::unix::fs::symlink;
+
+    let tree = TempTree::new();
+    tree.write("present.nsp", b"present");
+    symlink("missing-target.nsp", tree.path().join("broken.nsp")).unwrap();
+
+    let error = Engine::new()
+        .resolve_inputs_batch(
+            request(&tree)
+                .with_path(".")
+                .with_recursive(true)
+                .with_follow_symlinks(true),
+        )
+        .expect_err("recursive canonicalization failure leaves traversal completeness unknown");
+    assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+}
+
 #[test]
 fn invalid_bases_and_missing_paths_are_typed_failures() {
     let tree = TempTree::new();

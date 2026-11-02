@@ -125,8 +125,9 @@ or `AlreadyUpToDate`) and a failed item. Skipped items do not count as successes
 A `CompletedWithIssues` batch exits 8 unless an item has an internal failure,
 which exits 7. A cancelled batch exits 6 unless an item has an internal failure,
 which exits 7. A failed batch selects the highest-ranked aggregate or item exit:
-internal 7, cancellation 6, conflict 4, input 3; all other mapped exits rank 0.
-If no mapped failure exit exists, a failed batch exits 7. A succeeded batch exits 0.
+internal 7, cancellation 6, conflict 4, input 3. Every current failure code
+selects one of the four exits. A failed batch with no recorded failure exits 7.
+A succeeded batch exits 0.
 
 ## Planning, admission, and host-owned execution
 
@@ -236,8 +237,8 @@ copied or already-up-to-date success for aggregate classification. `Fail` and
 The CLI exits 0 for an all-skipped batch. Mixed success and failure exits 8
 unless an item has an internal failure, which exits 7. For a failed batch, the
 CLI selects the highest-ranked aggregate or item exit: internal 7, cancellation
-6, conflict 4, input 3, then other mapped exits at rank 0. If no mapped failure
-exit exists, the CLI exits 7.
+6, conflict 4, input 3. Every current failure code selects one of those four
+exits. A failed batch with no recorded failure exits 7.
 
 ## Standalone Job lifecycle
 
@@ -304,11 +305,13 @@ result and artifact ownership, releases or retains the lease claim, and applies
 retention. If aggregate completion fails, the transaction rolls back its
 aggregate writes while completed item checkpoints remain available for
 recovery.
-The v3 migration marks independent batch rows that lack source-intent evidence
-with `nscb.legacy_unqualified_batch_sources`. It preserves their job and item
-history for inspection without inventing resolver provenance. Failed-item
-retry rejects these records because the marker is not a qualified source
-intent.
+Newly admitted v4 item records use `nscb.copy_batch_item_provenance`. A
+migrated v3 Job gets the `nscb.legacy_unqualified_batch_sources` source-intent
+marker, and each migrated item gets
+`nscb.legacy_unqualified_copy_batch_item_provenance`. These markers preserve
+job and item history for inspection without inventing resolver provenance.
+Failed-item retry rejects records whose marker does not establish qualified
+source and item identity.
 
 On startup and before history queries, NSCB scans nonterminal records and tries
 to acquire each record's slot lock without waiting. Recovery checks the slot

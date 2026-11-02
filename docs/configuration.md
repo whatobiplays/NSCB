@@ -364,8 +364,8 @@ as actual successes. For a batch, `Succeeded` exits 0. `CompletedWithIssues`
 exits 8 unless an item has an internal failure, which exits 7. `Cancelled` exits
 6 unless an item has an internal failure, which exits 7. `Failed` uses the
 highest-ranked aggregate or item failure class: internal 7 > cancellation 6 >
-conflict 4 > input 3 > other mapped exits (rank 0). A failed batch with no
-mapped item failure exits 7.
+conflict 4 > input 3. Every current failure code selects one of the four exits.
+A failed batch with no recorded failure returns 7.
 Standalone Copy adds top-level `job_id` to terminal `job.result`. If durable
 completion persistence fails after filesystem execution, the same terminal
 record also carries `history_error`; the operation result and filesystem state
@@ -421,7 +421,19 @@ Each schema change runs in one transaction. If the v3-to-v4 schema transaction
 fails, it rolls back and leaves the v3 database readable; the verified backup
 remains a pre-migration snapshot for recovery. A binary that supports only v3
 cannot open a v4 database. Restoring the v3 snapshot is operator-managed and
-returns history to the snapshot state, discarding later history.
+returns history to the snapshot state. The snapshot does not contain history
+written after its capture, so stop all history writers and preserve the current
+database and SQLite sidecars before replacing anything.
+
+If an old v3 binary writes to the restored database, the existing
+`jobs.sqlite3.v3.bak` remains from an earlier v3 state and no longer matches the
+current rows. A later v4 open compares the backup schemas and rows with the
+committed v3 source. It fails closed rather than overwrite history or claim that
+the stale backup protects the current state. To recover, preserve the stale
+backup under a distinct name, leave `jobs.sqlite3.v3.bak` absent, and start the
+v4 binary again. It creates and verifies a fresh v3 backup before changing the
+schema. Keep the stale backup and any displaced database as evidence; neither
+is safe to delete merely to make migration proceed.
 
 Version 4 keeps independent batch source intent in `batch_source_intents`;
 `jobs.source` continues to hold the filesystem source path for single-copy Jobs
@@ -433,6 +445,12 @@ migrates v3 independently admitted batch rows, it writes explicit
 `nscb.legacy_unqualified_copy_batch_item_provenance` markers. Those rows remain
 readable, but the markers do not establish child or Split identity and cannot
 authorize `jobs retry --failed-items`.
+
+Version 4 does not enforce at the SQLite layer that a
+`batch_item_checkpoints` row belongs to an `independent_batch` Job. The foreign
+key requires an existing Job/item pair, and NSCB writes checkpoints through the
+independent-batch execution path. The missing database-level submission-kind
+ownership check is an accepted v4 limitation deferred to Issue #68.
 
 History written by the earlier v4 implementation can contain regular batch
 item provenance without the version tags above. NSCB keeps those records

@@ -217,10 +217,12 @@ pub struct InputResolutionResult {
 ///
 /// A resolved entry is ready for planning. A failed entry records a selection-
 /// local failure whose exact identity is known. An unavailable ordinary direct
-/// path is item-local, as is an unavailable path inside a readable input list.
-/// A missing, unreadable, or malformed input-list file, a Split resolution
-/// failure, duplicate inputs, unsafe filesystem layouts, cancellation, and
-/// resource limits reject the whole batch. External callers must include a
+/// path is item-local, as is an unavailable path inside a readable input list
+/// and a broken discoverable symlink found without recursive traversal. A
+/// split-shaped broken symlink, a broken symlink found during recursion, a
+/// missing, unreadable, or malformed input-list file, a Split resolution
+/// failure, duplicate inputs, unsafe filesystem layout, cancellation, and a
+/// resource limit reject the whole batch. External callers must include a
 /// wildcard match arm to handle entries added in future releases.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -1724,6 +1726,8 @@ impl<'a> Resolver<'a> {
                             InputResolutionError::new(InputResolutionErrorCode::InputUnavailable);
                         if suspected_split {
                             ExpansionError::split_related(error, encountered_path.clone())
+                        } else if !self.recursive && discovery_candidate {
+                            ExpansionError::ordinary(error, encountered_path.clone())
                         } else {
                             ExpansionError::global(error, encountered_path.clone())
                         }
@@ -1731,11 +1735,7 @@ impl<'a> Resolver<'a> {
                     let target_metadata = fs::metadata(&target).map_err(|_| {
                         let error =
                             InputResolutionError::new(InputResolutionErrorCode::InputUnavailable);
-                        if suspected_split {
-                            ExpansionError::split_related(error, encountered_path.clone())
-                        } else {
-                            ExpansionError::global(error, encountered_path.clone())
-                        }
+                        ExpansionError::global(error, encountered_path.clone())
                     })?;
                     if target_metadata.is_dir() {
                         if self.recursive {
@@ -1786,7 +1786,7 @@ impl<'a> Resolver<'a> {
                             }
                             found.push(FoundInput::File(
                                 found_file(&target, &target_metadata, relative_path).map_err(
-                                    |error| ExpansionError::ordinary(error, target.clone()),
+                                    |error| ExpansionError::global(error, target.clone()),
                                 )?,
                             ));
                         }

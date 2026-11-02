@@ -344,10 +344,10 @@ A batch in which every item is skipped or already current succeeds with exit
 reports `completed_with_issues` and exits 8 unless an item has an internal
 failure, which exits 7. Failures without an actual success report `failed`; the
 CLI selects the highest-ranked aggregate or item failure exit: internal 7,
-cancellation 6, conflict 4, then input 3. Other mapped exits have rank 0, and a
-failed batch with no mapped failure exits 7. A cancelled batch exits 6 unless
-an internal item failure raises it to 7. Skipped items do not count as
-successes. A succeeded batch exits 0.
+cancellation 6, conflict 4, then input 3. Every current failure code selects
+one of those exits. A failed batch with no recorded failure exits 7. A
+cancelled batch exits 6 unless an internal item failure raises it to 7.
+Skipped items do not count as successes. A succeeded batch exits 0.
 
 `--json` emits one aggregate `job.result`. `--jsonl` emits bounded, ordered
 `job.event` records followed by exactly one aggregate `job.result`. Events

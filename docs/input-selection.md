@@ -62,6 +62,16 @@ The extension filter applies only to directory discovery. Hidden matching files 
 
 Directory discovery is nonrecursive and skips discovered symlinks by default. `--recursive` enables recursive discovery. `--follow-symlinks` allows traversal through discovered symlinks; discovered directory symlinks are traversed only when recursion is also enabled. An explicitly selected directory symlink can be used as the discovery root with `--follow-symlinks` alone. Explicit regular-file symlinks are eligible selections. A canonical Split directory or numbered member reached through an intermediate symlinked path also requires `--follow-symlinks`, matching the directory alias policy. A symlink target reached during discovery must stay within the selected directory tree. Cycle back-edges are skipped. Reaching the same directory through another alias or selecting the same logical file more than once returns `duplicate_selection`.
 
+With `--follow-symlinks` but without recursion, a broken symlink with a
+discoverable ordinary filename is an item-local `input_unavailable` failure in
+batch resolution. Sorted viable siblings still resolve, while single-input
+resolution reports the failure. A Split-shaped broken name remains a global
+Split failure. With `--recursive`, every broken discovered symlink remains
+global because the missing target might have been a directory needed to prove
+traversal completeness. Failures after a target resolves, unsafe target
+escapes, duplicates, cancellation, and resource limits also reject the whole
+batch.
+
 ## JSON input-list v1
 
 A list is data for selecting paths; it is not an Operation Plan and cannot request execution. Its required shape is:

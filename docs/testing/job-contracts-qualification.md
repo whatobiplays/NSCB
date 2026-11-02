@@ -409,8 +409,33 @@ content-policy, documentation-test, and diff checks also passed.
 These counts and source hash describe Issue #12. They do not describe the
 Issue #13 candidate.
 
-The current Issue #13 source hash and final focused counts remain to be
-recorded after final validation.
+### Issue #13 published and reported evidence
+
+The published Linux evidence for Issue #13 is PR #67 workflow run
+`41508834577`. GitHub reports head
+`6531a3116eb50760535d6d35e843dd0118009569`, and both the `validate` and
+`content-policy-git` jobs succeeded. The workflow checked merge ref
+`4a9ac86c3d4c8ac9c647a2b7011c6a24de66323e`.
+
+A local macOS run was previously reported as 1,278 Rust tests passed, 8
+ignored, and 64 Python tests passed. No retained source-bound manifest is
+available here for those totals, so they remain reported rather than exact
+evidence for one Issue #13 working tree.
+
+A later local `RUST_TEST_THREADS=1 make all` run in the uncommitted Issue #13
+worktree reported 1,285 Rust tests passed, 0 failed, and 8 ignored, plus 64
+Python tests passed. Its log is
+`/tmp/nscb-issue13-logs.6CAGd7/make-all-final.log`, and its exit record is
+`/tmp/nscb-issue13-logs.6CAGd7/make-all-final.exit` (exit `0`). It provides
+real local test evidence but does not establish source-bound identity or
+supply the missing `repo_validate` artifact or formal review attestation.
+
+No source-bound focused test count and source hash, `repo_validate` Rust or
+Makefile artifact, or formal review attestation is established by these
+records. The successful jobs and reported local totals do not supply those
+missing artifacts.
+
+### Issue #12 historical rerun details
 
 An intermediate rerun of the filtered history suite observed 55 passed and 1
 failed:
@@ -446,9 +471,9 @@ The concrete historical CI failure was Linux x86_64 in GitHub Actions run
 migration test read an empty marker instead of ddl-applied. The subsequent
 20/20 exact-test and 5/5 complete-suite results are local Rust 1.98.1 candidate
 evidence with default test parallelism; they are not native Linux execution or
-a post-fix Linux CI result. A post-fix Linux CI run must be recorded only after
-this corrective commit is pushed. No post-fix Linux CI result exists at the
-current HEAD.
+Issue #12 post-fix Linux CI evidence. At the Issue #12 cutoff, no later Linux
+run had been recorded. Issue #13 run `41508834577` is separate evidence and
+does not retroactively qualify Issue #12.
 
 Post-fix evidence from Rust 1.98.1 records 20/20 passes for
 `standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries`
@@ -563,7 +588,9 @@ live-owner preservation, concurrent processes, current-configuration retry,
 retry from a different working directory, malformed future retry records,
 parent conflict-policy provenance, noninheritance of replacement
 authorization, retry reporting failure with exit 7 and durable completion,
-exact failed-item selection, JSONL completion failure with one terminal record, and
+exact failed-item selection, rejection of destinationless `empty_selection`
+failed-item retry with an unchanged Job listing and no admitted retry, JSONL
+completion failure with one terminal record, and
 configuration/key/cache/output/artifact-preserving clear.
 
 The Issue #13 test inventory covers all-skipped success, mixed success and
@@ -616,7 +643,10 @@ cannot establish operation-created identity, so check-then-unlink remains
 prohibited. Automatic artifact reclamation remains a separate follow-up and
 is not claimed by NDR-1.
 
-Native Linux and Windows history behavior remains unqualified. Portable tests
-cover path composition and schema rejection, but they do not establish native
-SQLite locking, file permissions, process-lifetime lease semantics, crash
-durability, or filesystem publication on those platforms.
+Linux repository CI is recorded by run `41508834577`. Native Linux and Windows
+history behavior beyond that run remains unqualified. The run does not supply
+source-bound focused counts or hashes, or a `repo_validate` attestation.
+Portable tests cover path composition and schema rejection, but they do not
+establish all native SQLite locking, file permissions, process-lifetime lease
+semantics, crash durability, or filesystem publication behavior on those
+platforms.
