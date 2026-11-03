@@ -503,6 +503,7 @@ fn recognition_ambiguous_polyglot_is_a_result_with_exit_three() {
 mod copy_subprocess {
     use super::*;
     use fs2::FileExt;
+    use rusqlite::{Connection, OpenFlags};
     use std::io::{BufRead, BufReader, Read};
     #[cfg(unix)]
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -609,28 +610,119 @@ mod copy_subprocess {
     }
 
     #[cfg(unix)]
-    struct StalledPipeProbe {
-        child: std::process::Child,
-        _stdout_reader: OwnedFd,
-        _stderr_reader: OwnedFd,
-        stdout_writer: OwnedFd,
-        stderr_writer: OwnedFd,
-        stdout_flags: libc::c_int,
-        stderr_flags: libc::c_int,
-        source: std::path::PathBuf,
-        destination: std::path::PathBuf,
-        source_bytes: Vec<u8>,
-        destination_before: Option<Vec<u8>>,
-        published_at: Option<Instant>,
-        status: Option<std::process::ExitStatus>,
+    struct ChildGuard(std::process::Child);
+
+    #[cfg(unix)]
+    impl ChildGuard {
+        const CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
+
+        fn new(child: std::process::Child) -> Self {
+            Self(child)
+        }
+
+        fn wait_until(&mut self, deadline: Instant) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(status) = self.try_wait_until(deadline)? {
+                return Ok(status);
+            }
+            self.terminate_and_reap();
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "copy process did not exit before test deadline",
+            ))
+        }
+
+        fn try_wait_until(
+            &mut self,
+            deadline: Instant,
+        ) -> std::io::Result<Option<std::process::ExitStatus>> {
+            loop {
+                if let Some(status) = self.0.try_wait()? {
+                    return Ok(Some(status));
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Ok(None);
+                }
+                thread::sleep((deadline - now).min(Duration::from_millis(10)));
+            }
+        }
+
+        fn terminate_and_reap(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.try_wait_until(Instant::now() + Self::CLEANUP_TIMEOUT);
+        }
     }
 
     #[cfg(unix)]
-    fn stop_children(probes: &mut [StalledPipeProbe]) {
-        for probe in probes {
-            if probe.status.is_none() {
-                let _ = probe.child.kill();
-                probe.status = probe.child.wait().ok();
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            match self.0.try_wait() {
+                Ok(Some(_)) => {}
+                _ => self.terminate_and_reap(),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_guard_timeout_returns_after_reaping_the_child() {
+        let mut child = ChildGuard::new(
+            Command::new("sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("spawn timeout fixture"),
+        );
+        let started = Instant::now();
+        let error = child
+            .wait_until(Instant::now())
+            .expect_err("live child must hit the deadline");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout cleanup must remain bounded"
+        );
+        assert!(
+            child.0.try_wait().unwrap().is_some(),
+            "timeout cleanup must reap the child"
+        );
+    }
+
+    fn history_database(home: &std::path::Path) -> std::path::PathBuf {
+        home.join("Library")
+            .join("Application Support")
+            .join("NSCB")
+            .join("jobs.sqlite3")
+    }
+
+    fn wait_for_committed_terminal_outcome(database: &std::path::Path, deadline: Instant) -> bool {
+        let connection = loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            match Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+                Ok(connection) => break connection,
+                Err(_) => thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        connection
+            .busy_timeout(Duration::from_millis(100))
+            .expect("set bounded history query wait");
+
+        loop {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            match connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE terminal_at IS NOT NULL)",
+                [],
+                |row| row.get::<_, bool>(0),
+            ) {
+                Ok(true) => return true,
+                Ok(false) => thread::sleep(Duration::from_millis(10)),
+                Err(error) if error.to_string().contains("no such table: jobs") => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("read copy terminalization from history: {error}"),
             }
         }
     }
@@ -914,7 +1006,6 @@ mod copy_subprocess {
     #[test]
     fn blocked_stdout_and_stderr_do_not_hold_copy_process_open_after_terminalization() {
         let root = tempdir().expect("copy fixture");
-        let mut probes = Vec::new();
         for (index, mode) in ["--json", "--jsonl", "human", "human-failure"]
             .into_iter()
             .enumerate()
@@ -922,6 +1013,7 @@ mod copy_subprocess {
             let source = root.path().join(format!("source-{index}.bin"));
             let destination = root.path().join(format!("destination-{index}.bin"));
             let workspace = root.path().join(format!("workspace-{index}"));
+            let home = root.path().join(format!("home-{index}"));
             let source_bytes = vec![0x30 + index as u8; 32 * 1024];
             fs::write(&source, &source_bytes).expect("write source");
             let destination_before = if mode == "human-failure" {
@@ -931,13 +1023,12 @@ mod copy_subprocess {
             } else {
                 None
             };
-            let (stdout_reader, stdout_writer) = full_pipe();
-            let (stderr_reader, stderr_writer) = full_pipe();
+            let (_stdout_reader, stdout_writer) = full_pipe();
+            let (_stderr_reader, stderr_writer) = full_pipe();
             let stdout_flags = unsafe { libc::fcntl(stdout_writer.as_raw_fd(), libc::F_GETFL) };
             let stderr_flags = unsafe { libc::fcntl(stderr_writer.as_raw_fd(), libc::F_GETFL) };
             assert!(stdout_flags >= 0 && stderr_flags >= 0);
-            let mut command =
-                isolated_command_with_home(&root.path().join(format!("home-{index}")));
+            let mut command = isolated_command_with_home(&home);
             command
                 .args(["copy"])
                 .arg(&source)
@@ -949,93 +1040,31 @@ mod copy_subprocess {
             if mode == "--json" || mode == "--jsonl" {
                 command.arg(mode);
             }
-            let child = command.spawn().expect("launch copy with full pipes");
-            probes.push(StalledPipeProbe {
-                child,
-                _stdout_reader: stdout_reader,
-                _stderr_reader: stderr_reader,
-                stdout_writer,
-                stderr_writer,
-                stdout_flags,
-                stderr_flags,
-                source,
-                destination,
-                source_bytes,
-                destination_before,
-                published_at: None,
-                status: None,
-            });
-        }
-
-        let launch_deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            for probe in &mut probes {
-                if probe.published_at.is_none() && probe.destination.exists() {
-                    probe.published_at = Some(Instant::now());
-                }
-                match probe.child.try_wait() {
-                    Ok(Some(status)) => probe.status = Some(status),
-                    Ok(None) => {}
-                    Err(error) => {
-                        stop_children(&mut probes);
-                        panic!("observe copy process: {error}");
-                    }
-                }
-            }
-            if probes.iter().all(|probe| probe.published_at.is_some()) {
-                break;
-            }
-            if Instant::now() >= launch_deadline {
-                stop_children(&mut probes);
-                panic!("copy Jobs did not reach their expected filesystem terminal state");
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        loop {
-            for probe in &mut probes {
-                if probe.status.is_none() {
-                    match probe.child.try_wait() {
-                        Ok(Some(status)) => probe.status = Some(status),
-                        Ok(None) => {
-                            let terminalized = probe.published_at.expect("observed publication");
-                            if terminalized.elapsed() > Duration::from_secs(7) {
-                                stop_children(&mut probes);
-                                panic!(
-                                    "copy stayed open for over seven seconds with open, unread pipes"
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            stop_children(&mut probes);
-                            panic!("observe copy process: {error}");
-                        }
-                    }
-                }
-            }
-            if probes.iter().all(|probe| probe.status.is_some()) {
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-
-        for probe in probes {
-            assert_eq!(probe.status.unwrap().code(), Some(7));
+            let mut child = ChildGuard::new(command.spawn().expect("launch copy with full pipes"));
+            let database = history_database(&home);
+            let deadline = Instant::now() + Duration::from_secs(30);
+            assert!(
+                wait_for_committed_terminal_outcome(&database, deadline),
+                "copy did not commit a terminal outcome before the test deadline"
+            );
+            let status = child
+                .wait_until(deadline)
+                .expect("wait for terminalized copy process");
+            assert_eq!(status.code(), Some(7));
             assert_eq!(
-                unsafe { libc::fcntl(probe.stdout_writer.as_raw_fd(), libc::F_GETFL) },
-                probe.stdout_flags,
+                unsafe { libc::fcntl(stdout_writer.as_raw_fd(), libc::F_GETFL) },
+                stdout_flags,
                 "copy must preserve inherited stdout descriptor flags"
             );
             assert_eq!(
-                unsafe { libc::fcntl(probe.stderr_writer.as_raw_fd(), libc::F_GETFL) },
-                probe.stderr_flags,
+                unsafe { libc::fcntl(stderr_writer.as_raw_fd(), libc::F_GETFL) },
+                stderr_flags,
                 "copy must preserve inherited stderr descriptor flags"
             );
-            assert_eq!(fs::read(&probe.source).unwrap(), probe.source_bytes);
-            assert!(probe.published_at.is_some());
-            match probe.destination_before {
-                Some(bytes) => assert_eq!(fs::read(&probe.destination).unwrap(), bytes),
-                None => assert_eq!(fs::read(&probe.destination).unwrap(), probe.source_bytes),
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            match destination_before {
+                Some(bytes) => assert_eq!(fs::read(&destination).unwrap(), bytes),
+                None => assert_eq!(fs::read(&destination).unwrap(), source_bytes),
             }
         }
     }

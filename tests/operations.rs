@@ -1,13 +1,17 @@
 #[cfg(target_os = "macos")]
 use nscb::{
-    ConflictPolicy, InputResolutionCapabilities, InputResolutionRequest, JobState,
-    LocalSplitTrustStore, OperationArtifact, OperationArtifactRole, OperationMilestone,
-    OperationOutcome, OperationSession, StagingStrategy,
+    CancellationHandle, ConflictPolicy, CopyBatchCheckpointError, CopyBatchEventKind,
+    CopyBatchItemPlanState, CopyBatchItemState, CopyBatchRequest, CopyBatchSession,
+    CopyBatchSessionPhase, CopyBatchSessionStatus, InputResolutionCapabilities,
+    InputResolutionRequest, JobState, LocalSplitTrustStore, OperationArtifact,
+    OperationArtifactRole, OperationMilestone, OperationOutcome, OperationSession, StagingStrategy,
 };
 use nscb::{CopyThroughRequest, DestinationBaseline, Engine, OperationFailureCode, PlannedEffect};
 mod support;
 #[cfg(target_os = "macos")]
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
 use tempfile::tempdir;
 
@@ -552,6 +556,28 @@ fn byte_identical_destination_is_reported_as_successful_already_up_to_date() {
 
 #[test]
 #[cfg(target_os = "macos")]
+fn skip_policy_reports_a_byte_identical_destination_as_already_up_to_date() {
+    let (root, source, destination) = operation_paths();
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("create workspace");
+    fs::copy(&source, &destination).expect("create identical destination");
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_through(
+            CopyThroughRequest::new(&source, &destination, &workspace)
+                .with_conflict_policy(ConflictPolicy::Skip),
+        )
+        .expect("plan an identical destination under skip");
+
+    let result = engine.execute_operation(plan, &OperationSession::new());
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(result.outcome(), Some(OperationOutcome::AlreadyUpToDate));
+    assert_eq!(fs::read(&destination).unwrap(), fs::read(&source).unwrap());
+}
+
+#[test]
+#[cfg(target_os = "macos")]
 fn same_length_source_rewrite_after_planning_cannot_be_published() {
     let (root, source, destination) = operation_paths();
     let workspace = root.path().join("workspace");
@@ -940,4 +966,1547 @@ fn copy_through_fails_closed_when_native_filesystem_guarantees_are_unavailable()
         .expect("non-macOS copy-through is not qualified");
 
     assert_eq!(error.code(), OperationFailureCode::UnsupportedCapability);
+}
+
+#[cfg(target_os = "macos")]
+fn batch_paths() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let root = tempdir().expect("create batch test directory");
+    let output = root.path().join("output");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&output).expect("create batch output directory");
+    fs::create_dir(&workspace).expect("create batch workspace");
+    (root, output, workspace)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_rejects_duplicate_sources_keys_and_normalized_destination_collisions() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+    let engine = Engine::new();
+
+    let duplicate_source = engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace)
+            .with_item(&first, output.join("first.bin"))
+            .with_item(&first, output.join("alias.bin")),
+    );
+    assert_eq!(
+        duplicate_source.err().unwrap().code(),
+        OperationFailureCode::DuplicateInput
+    );
+
+    let duplicate_key = engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace)
+            .with_keyed_item("same-key", &first, output.join("first.bin"))
+            .with_keyed_item("same-key", &second, output.join("second.bin")),
+    );
+    assert_eq!(
+        duplicate_key.err().unwrap().code(),
+        OperationFailureCode::DuplicateInput
+    );
+
+    let destination_collision = engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace)
+            .with_item(&first, output.join("shared.bin"))
+            .with_item(&second, output.join("shared.bin")),
+    );
+    assert_eq!(
+        destination_collision.err().unwrap().code(),
+        OperationFailureCode::DestinationCollision
+    );
+
+    let normalized_destination = engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace)
+            .with_item(&first, output.join("Name.bin"))
+            .with_item(&second, output.join("name.bin")),
+    );
+    assert_eq!(
+        normalized_destination.err().unwrap().code(),
+        OperationFailureCode::DestinationCollision
+    );
+
+    let hardlink = root.path().join("hardlink.bin");
+    fs::hard_link(&first, &hardlink).unwrap();
+    let duplicate_identity = engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace)
+            .with_item(&first, output.join("first.bin"))
+            .with_item(&hardlink, output.join("hardlink.bin")),
+    );
+    assert_eq!(
+        duplicate_identity.err().unwrap().code(),
+        OperationFailureCode::DuplicateInput
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_rejects_unicode_normalization_destination_collisions() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::write(&first, b"first").unwrap();
+    fs::write(&second, b"second").unwrap();
+
+    let error = Engine::new()
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("caf\u{e9}.bin"))
+                .with_item(&second, output.join("cafe\u{301}.bin")),
+        )
+        .err()
+        .expect("canonically equivalent destination names must collide");
+
+    assert_eq!(error.code(), OperationFailureCode::DestinationCollision);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_rejects_source_destination_overlap_and_hardlink_aliases() {
+    let (root, output, workspace) = batch_paths();
+    let same_path = output.join("same-path.bin");
+    fs::write(&same_path, b"same path source").unwrap();
+    let engine = Engine::new();
+
+    let same_path_error = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&same_path, output.join("same-path.bin")),
+        )
+        .err()
+        .expect("a source cannot also be its destination");
+    assert_eq!(same_path_error.code(), OperationFailureCode::UnsafePath);
+
+    let source = root.path().join("source.bin");
+    fs::write(&source, b"hardlink source").unwrap();
+    fs::hard_link(&source, output.join("hardlink-destination.bin")).unwrap();
+    let hardlink_error = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("hardlink-destination.bin")),
+        )
+        .err()
+        .expect("a destination hardlink to the source is the same filesystem object");
+    assert_eq!(hardlink_error.code(), OperationFailureCode::UnsafePath);
+    assert_eq!(fs::read(&source).unwrap(), b"hardlink source");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_preserves_distinct_non_utf8_source_and_destination_names() {
+    let (root, output, workspace) = batch_paths();
+    let first = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source-\xff.bin".to_vec()));
+    let second = root
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source-\xfe.bin".to_vec()));
+    let present = root.path().join("present.bin");
+    fs::write(&present, b"present").unwrap();
+    let engine = Engine::new();
+
+    let source_plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first.bin"))
+                .with_item(&second, output.join("second.bin"))
+                .with_item(&present, output.join("present.bin")),
+        )
+        .expect("distinct non-UTF-8 source names must not be treated as duplicates");
+    assert_eq!(source_plan.snapshot().items().len(), 3);
+    assert_eq!(
+        source_plan.snapshot().items()[0].state(),
+        CopyBatchItemPlanState::PreflightFailed
+    );
+    assert_eq!(
+        source_plan.snapshot().items()[1].state(),
+        CopyBatchItemPlanState::PreflightFailed
+    );
+    assert_eq!(
+        source_plan.snapshot().items()[2].state(),
+        CopyBatchItemPlanState::Viable
+    );
+
+    let normal_first = root.path().join("normal-first.bin");
+    let normal_second = root.path().join("normal-second.bin");
+    fs::write(&normal_first, b"first").unwrap();
+    fs::write(&normal_second, b"second").unwrap();
+    let first_destination = output.join(std::ffi::OsString::from_vec(
+        b"destination-\xff.bin".to_vec(),
+    ));
+    let second_destination = output.join(std::ffi::OsString::from_vec(
+        b"destination-\xfe.bin".to_vec(),
+    ));
+    let destination_plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&normal_first, first_destination)
+                .with_item(&normal_second, second_destination),
+        )
+        .expect("distinct non-UTF-8 destination names must not collide");
+    assert_eq!(destination_plan.snapshot().items().len(), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_keeps_only_item_local_preflight_failures_and_requires_one_viable_item() {
+    let (root, output, workspace) = batch_paths();
+    let present = root.path().join("present.bin");
+    let missing = root.path().join("missing.bin");
+    fs::write(&present, b"present").unwrap();
+    let engine = Engine::new();
+
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&missing, output.join("missing.bin"))
+                .with_item(&present, output.join("present.bin")),
+        )
+        .expect("a missing ordinary source is item-local");
+    assert_eq!(plan.snapshot().items().len(), 2);
+    assert_eq!(
+        plan.snapshot().items()[0].state(),
+        CopyBatchItemPlanState::PreflightFailed
+    );
+    assert_eq!(
+        plan.snapshot().items()[1].state(),
+        CopyBatchItemPlanState::Viable
+    );
+
+    let all_failed = engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace).with_item(&missing, output.join("missing.bin")),
+    );
+    assert_eq!(
+        all_failed.err().unwrap().code(),
+        OperationFailureCode::SourceUnavailable
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn empty_directory_without_destination_is_item_local_beside_viable_copy() {
+    let (root, output, workspace) = batch_paths();
+    let empty_directory = root.path().join("empty-selection");
+    let source = root.path().join("good.nsp");
+    fs::create_dir(&empty_directory).unwrap();
+    fs::write(&source, b"valid sibling").unwrap();
+
+    let engine = Engine::new();
+    let empty_failure = match engine
+        .resolve_inputs_batch(
+            nscb::InputResolutionRequest::new(root.path())
+                .with_selection(nscb::InputSelection::Path(empty_directory.clone())),
+        )
+        .unwrap()
+        .entries
+        .into_iter()
+        .next()
+        .unwrap()
+    {
+        nscb::InputResolutionBatchEntry::Failed(failure) => failure,
+        _ => panic!("empty directory must resolve to an empty-selection failure"),
+    };
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("good.nsp"))
+                .with_resolved_empty_selection_failure(empty_failure)
+                .unwrap(),
+        )
+        .expect("an empty directory remains an item-local failure beside viable work");
+
+    assert_eq!(plan.snapshot().items().len(), 2);
+    let expected_destination = fs::canonicalize(&output).unwrap().join("good.nsp");
+    assert_eq!(
+        plan.snapshot().items()[0].destination(),
+        Some(expected_destination.as_path())
+    );
+    assert_eq!(plan.snapshot().items()[1].destination(), None);
+    assert_eq!(
+        plan.snapshot().items()[1].failure_code(),
+        Some(OperationFailureCode::EmptySelection)
+    );
+
+    let result = engine.execute_copy_batch(plan, &CopyBatchSession::new());
+    assert_eq!(result.state(), JobState::CompletedWithIssues);
+    assert_eq!(result.items()[0].state(), CopyBatchItemState::Succeeded);
+    assert_eq!(
+        result.items()[1].state(),
+        CopyBatchItemState::PreflightFailed
+    );
+    assert_eq!(result.items()[1].destination(), None);
+    assert_eq!(
+        result.items()[1].failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::EmptySelection)
+    );
+    assert_eq!(fs::read(output.join("good.nsp")).unwrap(), b"valid sibling");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn all_empty_directory_batch_fails_planning_before_admission() {
+    let (root, output, workspace) = batch_paths();
+    let empty_directory = root.path().join("empty-selection");
+    fs::create_dir(&empty_directory).unwrap();
+
+    let engine = Engine::new();
+    let empty_failure = match engine
+        .resolve_inputs_batch(
+            nscb::InputResolutionRequest::new(root.path())
+                .with_selection(nscb::InputSelection::Path(empty_directory.clone())),
+        )
+        .unwrap()
+        .entries
+        .into_iter()
+        .next()
+        .unwrap()
+    {
+        nscb::InputResolutionBatchEntry::Failed(failure) => failure,
+        _ => panic!("empty directory must resolve to an empty-selection failure"),
+    };
+
+    let error = match engine.plan_copy_batch(
+        CopyBatchRequest::new(&output, &workspace)
+            .with_resolved_empty_selection_failure(empty_failure)
+            .unwrap(),
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("a batch with no viable item must fail before admission"),
+    };
+
+    assert_eq!(error.code(), OperationFailureCode::EmptySelection);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_rejects_untrusted_and_unsafe_split_candidates_globally() {
+    use support::split_fixture::SplitFixture;
+
+    let (root, output, workspace) = batch_paths();
+    let present = root.path().join("present.bin");
+    fs::write(&present, b"present").unwrap();
+    let split = SplitFixture::new(b"untrusted split source", 128);
+    let split_directory = split.write(root.path(), "untrusted.nsp");
+    let numeric_layout = root.path().join("000");
+    fs::write(&numeric_layout, b"unsafe numeric split layout").unwrap();
+    let engine = Engine::new();
+
+    for source in [&split_directory, &numeric_layout] {
+        let error = engine
+            .plan_copy_batch(
+                CopyBatchRequest::new(&output, &workspace)
+                    .with_item(source, output.join("split.nsp"))
+                    .with_item(&present, output.join("present.bin")),
+            )
+            .err()
+            .expect("untrusted or unsafe Split qualification must reject admission");
+        assert_eq!(error.code(), OperationFailureCode::SplitInputUnsupported);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_rejects_an_unqualified_split_preflight_claim_globally() {
+    let (root, output, workspace) = batch_paths();
+    let present = root.path().join("present.bin");
+    fs::write(&present, b"present").unwrap();
+    let split_directory = root.path().join("unqualified.nsp");
+    fs::write(&split_directory, b"unqualified split candidate").unwrap();
+
+    let error = Engine::new()
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_preflight_failure(
+                    &split_directory,
+                    output.join("unqualified.nsp"),
+                    OperationFailureCode::SplitInputUnsupported,
+                )
+                .with_item(&present, output.join("present.bin")),
+        )
+        .err()
+        .expect("an unqualified Split preflight claim must reject admission");
+
+    assert_eq!(error.code(), OperationFailureCode::SplitInputUnsupported);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_planning_accepts_a_qualified_split_as_one_item_local_copy_failure() {
+    use support::split_fixture::SplitFixture;
+
+    let (root, output, workspace) = batch_paths();
+    let present = root.path().join("present.bin");
+    fs::write(&present, b"present").unwrap();
+    let split = SplitFixture::new(b"qualified split source", 128);
+    let split_directory = split.write(root.path(), "qualified.nsp");
+    let store = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+    split.issue(&store);
+    let engine = Engine::new();
+    let resolved = engine
+        .resolve_inputs_with(
+            InputResolutionRequest::new(root.path()).with_path(&split_directory),
+            InputResolutionCapabilities::new().with_split_trust_store(&store),
+        )
+        .expect("qualify the Split through host-owned trust evidence");
+    assert_eq!(resolved.inputs.len(), 1);
+    assert!(resolved.inputs[0].qualification.is_some());
+
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_qualified_split_input_unsupported(
+                    resolved.inputs[0].clone(),
+                    output.join("qualified.nsp"),
+                )
+                .with_item(&present, output.join("present.bin")),
+        )
+        .expect("a qualified Split remains one item-local copy failure");
+    assert_eq!(plan.snapshot().items().len(), 2);
+    assert_eq!(
+        plan.snapshot().items()[0].state(),
+        CopyBatchItemPlanState::PreflightFailed
+    );
+    assert_eq!(
+        plan.snapshot().items()[0].failure_code(),
+        Some(OperationFailureCode::SplitInputUnsupported)
+    );
+    assert_eq!(
+        plan.snapshot().items()[1].state(),
+        CopyBatchItemPlanState::Viable
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_skip_reports_byte_identity_truthfully_in_item_and_progress() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("identical.bin");
+    fs::write(&source, b"identical batch bytes").unwrap();
+    fs::copy(&source, output.join("identical.bin")).unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_conflict_policy(ConflictPolicy::Skip)
+                .with_item(&source, output.join("identical.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+
+    let result = engine.execute_copy_batch(plan, &session);
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(result.items()[0].state(), CopyBatchItemState::Succeeded);
+    assert_eq!(
+        result.items()[0].outcome(),
+        Some(OperationOutcome::AlreadyUpToDate)
+    );
+    let snapshot = session.current_operation().unwrap();
+    assert_eq!(snapshot.progress().completed_items(), 1);
+    assert_eq!(snapshot.progress().succeeded_items(), 1);
+    assert_eq!(snapshot.progress().skipped_items(), 0);
+    assert_eq!(snapshot.progress().completed_bytes(), 0);
+    assert_eq!(
+        snapshot.progress().total_bytes(),
+        u64::try_from(b"identical batch bytes".len()).unwrap()
+    );
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    let completed_item = events
+        .iter()
+        .find_map(|event| match event.event() {
+            CopyBatchEventKind::ItemCompleted {
+                state,
+                outcome,
+                failure_code,
+                ..
+            } => Some((*state, *outcome, *failure_code)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        completed_item,
+        (
+            CopyBatchItemState::Succeeded,
+            Some(OperationOutcome::AlreadyUpToDate),
+            None
+        )
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn conflict_skip_does_not_claim_untouched_source_bytes() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("conflict.bin");
+    fs::write(&source, b"source bytes").unwrap();
+    fs::write(output.join("conflict.bin"), b"existing destination").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_conflict_policy(ConflictPolicy::Skip)
+                .with_item(&source, output.join("conflict.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+
+    let result = engine.execute_copy_batch(plan, &session);
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(result.items()[0].state(), CopyBatchItemState::Skipped);
+    assert_eq!(result.items()[0].outcome(), Some(OperationOutcome::Skipped));
+    let snapshot = session.current_operation().unwrap();
+    assert_eq!(snapshot.progress().completed_items(), 1);
+    assert_eq!(snapshot.progress().skipped_items(), 1);
+    assert_eq!(snapshot.progress().completed_bytes(), 0);
+    assert_eq!(
+        fs::read(output.join("conflict.bin")).unwrap(),
+        b"existing destination"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn skipped_item_does_not_hide_the_only_engine_failure() {
+    let (root, output, workspace) = batch_paths();
+    let skipped_source = root.path().join("skip.bin");
+    let disappearing_source = root.path().join("removed-after-planning.bin");
+    fs::write(&skipped_source, b"new bytes").unwrap();
+    fs::write(&disappearing_source, b"bytes planned for copy").unwrap();
+    fs::write(output.join("skip.bin"), b"existing bytes").unwrap();
+
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_conflict_policy(ConflictPolicy::Skip)
+                .with_item(&skipped_source, output.join("skip.bin"))
+                .with_item(
+                    &disappearing_source,
+                    output.join("removed-after-planning.bin"),
+                ),
+        )
+        .unwrap();
+    fs::remove_file(&disappearing_source).unwrap();
+
+    let result = engine.execute_copy_batch(plan, &CopyBatchSession::new());
+
+    assert_eq!(result.items()[0].state(), CopyBatchItemState::Skipped);
+    assert!(matches!(
+        result.items()[1].state(),
+        CopyBatchItemState::Failed | CopyBatchItemState::PreflightFailed
+    ));
+    assert_eq!(result.state(), JobState::Failed);
+    assert_eq!(
+        fs::read(output.join("skip.bin")).unwrap(),
+        b"existing bytes"
+    );
+    assert!(!output.join("removed-after-planning.bin").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn item_completion_is_published_only_after_checkpoint_acknowledgement() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("checkpoint-ack.bin");
+    fs::write(&source, b"checkpointed bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("checkpoint-ack.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let (checkpoint_entered_tx, checkpoint_entered_rx) = std::sync::mpsc::channel();
+    let (checkpoint_release_tx, checkpoint_release_rx) = std::sync::mpsc::channel();
+    let (inspect_tx, inspect_rx) = std::sync::mpsc::channel();
+    let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+    let (before_tx, before_rx) = std::sync::mpsc::channel();
+    let (after_tx, after_rx) = std::sync::mpsc::channel();
+
+    let observer = std::thread::spawn(move || {
+        inspect_rx.recv().unwrap();
+        let mut before = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            before.push(event);
+        }
+        before_tx.send(before).unwrap();
+        continue_rx.recv().unwrap();
+        let mut after = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            after.push(event);
+        }
+        after_tx.send(after).unwrap();
+    });
+    let execution = std::thread::spawn(move || {
+        engine.execute_copy_batch_with_checkpoint(
+            plan,
+            &session,
+            CancellationHandle::new(),
+            move |checkpoint| {
+                checkpoint_entered_tx.send(checkpoint.sequence()).unwrap();
+                checkpoint_release_rx.recv().unwrap();
+                Ok(())
+            },
+        )
+    });
+
+    let checkpoint_sequence = checkpoint_entered_rx.recv().unwrap();
+    inspect_tx.send(()).unwrap();
+    let before_ack = before_rx.recv().unwrap();
+    checkpoint_release_tx.send(()).unwrap();
+    let result = execution.join().unwrap();
+    continue_tx.send(()).unwrap();
+    let after_ack = after_rx.recv().unwrap();
+    observer.join().unwrap();
+
+    assert_eq!(checkpoint_sequence, 1);
+    assert_eq!(result.result().state(), JobState::Succeeded);
+    assert!(
+        !before_ack
+            .iter()
+            .any(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }))
+    );
+    assert_eq!(
+        after_ack
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }))
+            .count(),
+        1
+    );
+    let sequences = before_ack
+        .iter()
+        .chain(after_ack.iter())
+        .map(|event| event.sequence())
+        .collect::<Vec<_>>();
+    assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn failed_checkpoint_never_publishes_item_completion() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("checkpoint-fail-first.bin");
+    let second = root.path().join("checkpoint-fail-second.bin");
+    fs::write(&first, b"first item").unwrap();
+    fs::write(&second, b"second item").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("checkpoint-fail-first.bin"))
+                .with_item(&second, output.join("checkpoint-fail-second.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let (checkpoint_entered_tx, checkpoint_entered_rx) = std::sync::mpsc::channel();
+    let (checkpoint_release_tx, checkpoint_release_rx) = std::sync::mpsc::channel();
+    let (inspect_tx, inspect_rx) = std::sync::mpsc::channel();
+    let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+    let (before_tx, before_rx) = std::sync::mpsc::channel();
+    let (after_tx, after_rx) = std::sync::mpsc::channel();
+
+    let observer = std::thread::spawn(move || {
+        inspect_rx.recv().unwrap();
+        let mut before = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            before.push(event);
+        }
+        before_tx.send(before).unwrap();
+        continue_rx.recv().unwrap();
+        let mut after = Vec::new();
+        while let Ok(event) = consumer.try_recv() {
+            after.push(event);
+        }
+        after_tx.send(after).unwrap();
+    });
+    let execution = std::thread::spawn(move || {
+        engine.execute_copy_batch_with_checkpoint(
+            plan,
+            &session,
+            CancellationHandle::new(),
+            move |_| {
+                checkpoint_entered_tx.send(()).unwrap();
+                checkpoint_release_rx.recv().unwrap();
+                Err(CopyBatchCheckpointError)
+            },
+        )
+    });
+
+    checkpoint_entered_rx.recv().unwrap();
+    inspect_tx.send(()).unwrap();
+    let before_ack = before_rx.recv().unwrap();
+    checkpoint_release_tx.send(()).unwrap();
+    let result = execution.join().unwrap();
+    continue_tx.send(()).unwrap();
+    let after_ack = after_rx.recv().unwrap();
+    observer.join().unwrap();
+
+    assert_eq!(result.result().state(), JobState::Failed);
+    assert_eq!(
+        result.result().items()[1].state(),
+        CopyBatchItemState::NotStarted
+    );
+    assert!(
+        !before_ack
+            .iter()
+            .any(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }))
+    );
+    assert!(
+        !after_ack
+            .iter()
+            .any(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }))
+    );
+    assert!(
+        after_ack
+            .iter()
+            .any(|event| matches!(event.event(), CopyBatchEventKind::CheckpointFailed { .. }))
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_checkpoint_order_is_monotonic_and_checkpoint_failure_stops_later_items() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::write(&first, b"first checkpoint bytes").unwrap();
+    fs::write(&second, b"second checkpoint bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first.bin"))
+                .with_item(&second, output.join("second.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let mut checkpoints = Vec::new();
+    let execution = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &session,
+        CancellationHandle::new(),
+        |checkpoint| {
+            checkpoints.push((
+                checkpoint.sequence(),
+                checkpoint.item().item_key().to_owned(),
+            ));
+            Ok(())
+        },
+    );
+    assert_eq!(execution.result().state(), JobState::Succeeded);
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(
+        checkpoints
+            .iter()
+            .map(|checkpoint| checkpoint.0)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(checkpoints[0].1, "batch-item-0001");
+    assert_eq!(checkpoints[1].1, "batch-item-0002");
+    assert!(execution.failed_checkpoint().is_none());
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    assert!(matches!(
+        events.first().map(|event| event.event()),
+        Some(CopyBatchEventKind::Started { total_items: 2, .. })
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::Completed { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.sequence() == index as u64)
+    );
+    assert_eq!(
+        session
+            .current_operation()
+            .unwrap()
+            .progress()
+            .completed_items(),
+        2
+    );
+
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("failed-checkpoint-first.bin"))
+                .with_item(&second, output.join("failed-checkpoint-second.bin")),
+        )
+        .unwrap();
+    let failed_session = CopyBatchSession::new();
+    let failed = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &failed_session,
+        CancellationHandle::new(),
+        |_| Err(CopyBatchCheckpointError),
+    );
+    assert_eq!(failed.result().state(), JobState::Failed);
+    assert_eq!(
+        failed.result().failure().unwrap().code(),
+        OperationFailureCode::CheckpointFailed
+    );
+    assert_eq!(
+        failed.failed_checkpoint().unwrap().item().state(),
+        CopyBatchItemState::Succeeded
+    );
+    assert_eq!(
+        failed.result().items()[1].state(),
+        CopyBatchItemState::NotStarted
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn checkpoint_failure_keeps_precedence_over_accepted_cancellation() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("checkpoint-cancel.bin");
+    fs::write(&source, b"checkpoint cancellation bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("checkpoint-cancel.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let cancellation = CancellationHandle::new();
+    let checkpoint_cancellation = cancellation.clone();
+
+    let execution =
+        engine.execute_copy_batch_with_checkpoint(plan, &session, cancellation, move |_| {
+            checkpoint_cancellation.cancel();
+            Err(CopyBatchCheckpointError)
+        });
+
+    assert!(execution.checkpoint_failed());
+    assert_eq!(execution.result().state(), JobState::Failed);
+    assert_eq!(
+        execution.result().failure().unwrap().code(),
+        OperationFailureCode::CheckpointFailed
+    );
+    let snapshot = session.current_operation().unwrap();
+    assert_eq!(snapshot.phase(), CopyBatchSessionPhase::Idle);
+    assert_eq!(snapshot.status(), CopyBatchSessionStatus::Failed);
+
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event.event() {
+                CopyBatchEventKind::CancellationRequested { accepted } => Some(*accepted),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![true]
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.event(), CopyBatchEventKind::CheckpointFailed { .. }))
+    );
+    assert!(matches!(
+        events.last().map(|event| event.event()),
+        Some(CopyBatchEventKind::Completed { result })
+            if result.state() == JobState::Failed
+                && result.failure().map(|failure| failure.code())
+                    == Some(OperationFailureCode::CheckpointFailed)
+    ));
+    assert!(!events.iter().any(|event| matches!(
+        event.event(),
+        CopyBatchEventKind::Completed { result }
+            if result.state() == JobState::Succeeded || result.state() == JobState::Cancelled
+    )));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_execution_revalidates_destination_identity_and_writability_after_planning() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("source.bin");
+    fs::write(&source, b"destination revalidation bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("source.bin")),
+        )
+        .unwrap();
+    let moved = root.path().join("moved-output");
+    fs::rename(&output, &moved).unwrap();
+    fs::create_dir(&output).unwrap();
+    let result = engine.execute_copy_batch(plan, &CopyBatchSession::new());
+    assert_eq!(result.state(), JobState::Failed);
+    assert_eq!(
+        result.items()[0].failure().unwrap().code(),
+        OperationFailureCode::StalePlan
+    );
+    assert!(!output.join("source.bin").exists());
+
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("source.bin");
+    fs::write(&source, b"destination writability bytes").unwrap();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("source.bin")),
+        )
+        .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o555)).unwrap();
+    let result = engine.execute_copy_batch(plan, &CopyBatchSession::new());
+    fs::set_permissions(&output, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(result.state(), JobState::Failed);
+    assert_eq!(
+        result.items()[0].failure().unwrap().code(),
+        OperationFailureCode::DestinationUnavailable
+    );
+    assert!(!output.join("source.bin").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn no_consumer_batch_completes_and_retains_terminal_completion() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::write(&first, b"first no-consumer source").unwrap();
+    fs::write(&second, b"second no-consumer source").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first.bin"))
+                .with_item(&second, output.join("second.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+
+    let result = engine.execute_copy_batch(plan, &session);
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(
+        fs::read(output.join("first.bin")).unwrap(),
+        b"first no-consumer source"
+    );
+    assert_eq!(
+        fs::read(output.join("second.bin")).unwrap(),
+        b"second no-consumer source"
+    );
+    assert_eq!(session.last_result().unwrap(), Some(result.clone()));
+    let completion = session
+        .last_completion()
+        .unwrap()
+        .expect("batch completion is retained without a consumer");
+    assert_eq!(completion.sequence(), 5);
+    assert_eq!(completion.result(), &result);
+    assert_eq!(completion.snapshot().phase(), CopyBatchSessionPhase::Idle);
+    assert_eq!(
+        completion.snapshot().status(),
+        CopyBatchSessionStatus::Succeeded
+    );
+    assert_eq!(completion.snapshot().progress().completed_items(), 2);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn bounded_batch_event_delivery_preserves_semantic_sequence() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::write(&first, b"first bounded-event source").unwrap();
+    fs::write(&second, b"second bounded-event source").unwrap();
+    let plan = Engine::new()
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first.bin"))
+                .with_item(&second, output.join("second.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(1).unwrap();
+    let producer_session = session.clone();
+    let producer =
+        std::thread::spawn(move || Engine::new().execute_copy_batch(plan, &producer_session));
+
+    let result = producer.join().unwrap();
+    let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(
+        events.len(),
+        6,
+        "one start, two item pairs, and one terminal"
+    );
+    assert!(matches!(
+        events.first().map(|event| event.event()),
+        Some(CopyBatchEventKind::Started { total_items: 2, .. })
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::ItemStarted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::Completed { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.sequence() == index as u64)
+    );
+    assert!(matches!(
+        consumer.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    assert_eq!(
+        session
+            .last_completion()
+            .unwrap()
+            .expect("terminal completion retained")
+            .result()
+            .state(),
+        JobState::Succeeded
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn batch_events_are_single_consumer_and_report_mixed_progress_in_order() {
+    let (root, output, workspace) = batch_paths();
+    let succeeded = root.path().join("succeeded.bin");
+    let missing = root.path().join("missing.bin");
+    let conflicted = root.path().join("conflicted.bin");
+    fs::write(&succeeded, b"successful bytes").unwrap();
+    fs::write(&conflicted, b"replacement bytes").unwrap();
+    fs::write(output.join("conflicted.bin"), b"operator bytes").unwrap();
+
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&succeeded, output.join("succeeded.bin"))
+                .with_item(&missing, output.join("missing.bin"))
+                .with_item(&conflicted, output.join("conflicted.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(32).unwrap();
+    assert_eq!(
+        session.subscribe_events().unwrap_err(),
+        OperationFailureCode::EventConsumerUnavailable
+    );
+
+    let execution = engine.execute_copy_batch(plan, &session);
+
+    assert_eq!(execution.state(), JobState::CompletedWithIssues);
+    assert_eq!(
+        execution
+            .items()
+            .iter()
+            .map(|item| item.state())
+            .collect::<Vec<_>>(),
+        vec![
+            CopyBatchItemState::Succeeded,
+            CopyBatchItemState::PreflightFailed,
+            CopyBatchItemState::Failed,
+        ]
+    );
+    let snapshot = session.current_operation().unwrap();
+    assert_eq!(snapshot.phase(), CopyBatchSessionPhase::Idle);
+    assert_eq!(
+        snapshot.status(),
+        CopyBatchSessionStatus::CompletedWithIssues
+    );
+    assert_eq!(snapshot.progress().total_items(), 3);
+    assert_eq!(snapshot.progress().completed_items(), 3);
+    assert_eq!(snapshot.progress().succeeded_items(), 1);
+    assert_eq!(snapshot.progress().failed_items(), 2);
+    assert_eq!(snapshot.progress().skipped_items(), 0);
+    assert_eq!(snapshot.progress().cancelled_items(), 0);
+    assert_eq!(snapshot.progress().current_item_key(), None);
+
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    assert!(matches!(
+        events.first().map(|event| event.event()),
+        Some(CopyBatchEventKind::Started { total_items: 3, .. })
+    ));
+    assert!(matches!(
+        events.last().map(|event| event.event()),
+        Some(CopyBatchEventKind::Completed { .. })
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::Completed { .. }))
+            .count(),
+        1
+    );
+    assert!(
+        events
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.sequence() == index as u64)
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event(), CopyBatchEventKind::ItemCompleted { .. }))
+            .count(),
+        3
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn preflight_failure_preserves_cumulative_batch_bytes_and_item_progress() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first-100.bin");
+    let missing = root.path().join("missing.bin");
+    let last = root.path().join("last-50.bin");
+    fs::write(&first, vec![0x11; 100]).unwrap();
+    fs::write(&last, vec![0x22; 50]).unwrap();
+
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first-100.bin"))
+                .with_item(&missing, output.join("missing.bin"))
+                .with_item(&last, output.join("last-50.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let mut checkpoints = Vec::new();
+
+    let execution = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &session,
+        CancellationHandle::new(),
+        |_| {
+            checkpoints.push(session.current_operation().unwrap().progress().clone());
+            Ok(())
+        },
+    );
+
+    assert_eq!(execution.result().state(), JobState::CompletedWithIssues);
+    assert_eq!(
+        execution
+            .result()
+            .items()
+            .iter()
+            .map(|item| item.state())
+            .collect::<Vec<_>>(),
+        vec![
+            CopyBatchItemState::Succeeded,
+            CopyBatchItemState::PreflightFailed,
+            CopyBatchItemState::Succeeded,
+        ]
+    );
+    assert_eq!(checkpoints.len(), 3);
+    assert_eq!(checkpoints[0].completed_bytes(), 100);
+    assert_eq!(checkpoints[0].current_item_completed_bytes(), 100);
+    assert_eq!(checkpoints[0].current_item_total_bytes(), 100);
+    assert_eq!(checkpoints[1].completed_bytes(), 100);
+    assert_eq!(checkpoints[1].current_item_key(), None);
+    assert_eq!(checkpoints[1].current_item_completed_bytes(), 0);
+    assert_eq!(checkpoints[2].completed_bytes(), 150);
+    assert_eq!(checkpoints[2].current_item_key(), Some("batch-item-0003"));
+    assert_eq!(checkpoints[2].current_item_completed_bytes(), 50);
+    assert_eq!(checkpoints[2].current_item_total_bytes(), 50);
+
+    let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+    let completed = events
+        .iter()
+        .filter_map(|event| match event.event() {
+            CopyBatchEventKind::ItemCompleted {
+                item_key,
+                state,
+                failure_code,
+                ..
+            } => Some((
+                item_key.as_str(),
+                *state,
+                *failure_code,
+                event.snapshot().progress().completed_bytes(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed,
+        vec![
+            ("batch-item-0001", CopyBatchItemState::Succeeded, None, 100,),
+            (
+                "batch-item-0002",
+                CopyBatchItemState::PreflightFailed,
+                Some(OperationFailureCode::SourceUnavailable),
+                100,
+            ),
+            ("batch-item-0003", CopyBatchItemState::Succeeded, None, 150,),
+        ]
+    );
+    let aggregate_bytes = events
+        .iter()
+        .map(|event| event.snapshot().progress().completed_bytes())
+        .collect::<Vec<_>>();
+    assert!(aggregate_bytes.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(
+        fs::read(output.join("first-100.bin")).unwrap(),
+        vec![0x11; 100]
+    );
+    assert_eq!(
+        fs::read(output.join("last-50.bin")).unwrap(),
+        vec![0x22; 50]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pre_start_cancellation_preserves_cumulative_batch_bytes() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first-100.bin");
+    let second = root.path().join("cancelled-50.bin");
+    fs::write(&first, vec![0x11; 100]).unwrap();
+    fs::write(&second, vec![0x22; 50]).unwrap();
+
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first-100.bin"))
+                .with_item(&second, output.join("cancelled-50.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let mut checkpoints = Vec::new();
+    let mut cancellation_accepted = false;
+
+    let execution = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &session,
+        CancellationHandle::new(),
+        |_| {
+            checkpoints.push(session.current_operation().unwrap().progress().clone());
+            if !cancellation_accepted {
+                cancellation_accepted = session.cancel();
+            }
+            Ok(())
+        },
+    );
+
+    assert!(cancellation_accepted);
+    assert_eq!(execution.result().state(), JobState::Cancelled);
+    assert_eq!(
+        execution
+            .result()
+            .items()
+            .iter()
+            .map(|item| item.state())
+            .collect::<Vec<_>>(),
+        vec![CopyBatchItemState::Succeeded, CopyBatchItemState::Cancelled]
+    );
+    assert_eq!(checkpoints.len(), 2);
+    assert_eq!(checkpoints[0].completed_bytes(), 100);
+    assert_eq!(checkpoints[0].current_item_completed_bytes(), 100);
+    assert_eq!(checkpoints[1].completed_bytes(), 100);
+    assert_eq!(checkpoints[1].current_item_key(), None);
+    assert_eq!(checkpoints[1].current_item_completed_bytes(), 0);
+    assert_eq!(checkpoints[1].current_item_total_bytes(), 0);
+
+    let events = std::iter::from_fn(|| consumer.try_recv().ok()).collect::<Vec<_>>();
+    let completed = events
+        .iter()
+        .filter_map(|event| match event.event() {
+            CopyBatchEventKind::ItemCompleted {
+                item_key, state, ..
+            } => Some((
+                item_key.as_str(),
+                *state,
+                event.snapshot().progress().completed_bytes(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        completed,
+        vec![
+            ("batch-item-0001", CopyBatchItemState::Succeeded, 100),
+            ("batch-item-0002", CopyBatchItemState::Cancelled, 100),
+        ]
+    );
+    let aggregate_bytes = events
+        .iter()
+        .map(|event| event.snapshot().progress().completed_bytes())
+        .collect::<Vec<_>>();
+    assert!(aggregate_bytes.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(
+        fs::read(output.join("first-100.bin")).unwrap(),
+        vec![0x11; 100]
+    );
+    assert!(!output.join("cancelled-50.bin").exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn pre_cancelled_batch_handle_emits_one_cancellation_transition() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("pre-cancelled.bin");
+    fs::write(&source, b"pre-cancelled batch bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("pre-cancelled.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let cancellation = CancellationHandle::new();
+    cancellation.cancel();
+
+    let execution =
+        engine.execute_copy_batch_with_checkpoint(plan, &session, cancellation, |_| Ok(()));
+
+    assert_eq!(execution.result().state(), JobState::Cancelled);
+    assert_eq!(
+        execution.result().items()[0].state(),
+        CopyBatchItemState::Cancelled
+    );
+    assert!(!output.join("pre-cancelled.bin").exists());
+    assert_eq!(
+        session.current_operation().unwrap().status(),
+        CopyBatchSessionStatus::Cancelled
+    );
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    let transitions = events
+        .iter()
+        .filter_map(|event| match event.event() {
+            CopyBatchEventKind::CancellationRequested { accepted } => {
+                Some((*accepted, event.snapshot().status()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        transitions,
+        vec![(true, CopyBatchSessionStatus::CancellationRequested)]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accepted_batch_cancellation_stops_only_unfinished_items() {
+    let (root, output, workspace) = batch_paths();
+    let first = root.path().join("first.bin");
+    let second = root.path().join("second.bin");
+    fs::write(&first, b"first cancellation bytes").unwrap();
+    fs::write(&second, b"second cancellation bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&first, output.join("first.bin"))
+                .with_item(&second, output.join("second.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let mut cancellation_accepted = false;
+    let execution = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &session,
+        CancellationHandle::new(),
+        |_| {
+            if !cancellation_accepted {
+                cancellation_accepted = session.cancel();
+            }
+            Ok(())
+        },
+    );
+
+    assert!(cancellation_accepted);
+    assert_eq!(execution.result().state(), JobState::Cancelled);
+    assert_eq!(
+        execution
+            .result()
+            .items()
+            .iter()
+            .map(|item| item.state())
+            .collect::<Vec<_>>(),
+        vec![CopyBatchItemState::Succeeded, CopyBatchItemState::Cancelled]
+    );
+    assert_eq!(
+        fs::read(output.join("first.bin")).unwrap(),
+        b"first cancellation bytes"
+    );
+    assert!(!output.join("second.bin").exists());
+
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.event(),
+                    CopyBatchEventKind::CancellationRequested { accepted: true }
+                )
+            })
+            .count(),
+        1
+    );
+    assert!(matches!(
+        events.last().map(|event| event.event()),
+        Some(CopyBatchEventKind::Completed { .. })
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn cancellation_after_the_last_item_checkpoint_controls_the_terminal_result() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("last-item.bin");
+    fs::write(&source, b"completed item before cancellation").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("last-item.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let consumer = session.subscribe_events_with_capacity(16).unwrap();
+    let mut cancellation_accepted = false;
+    let execution = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &session,
+        CancellationHandle::new(),
+        |_| {
+            cancellation_accepted = session.cancel();
+            Ok(())
+        },
+    );
+
+    assert!(cancellation_accepted);
+    assert_eq!(execution.result().state(), JobState::Cancelled);
+    assert_eq!(
+        execution.result().items()[0].state(),
+        CopyBatchItemState::Succeeded
+    );
+    let completion = session.last_completion().unwrap().unwrap();
+    assert_eq!(completion.result().state(), JobState::Cancelled);
+    assert_eq!(
+        session.current_operation().unwrap().status(),
+        CopyBatchSessionStatus::Cancelled
+    );
+    assert_eq!(
+        fs::read(output.join("last-item.bin")).unwrap(),
+        b"completed item before cancellation"
+    );
+
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter_map(|event| match event.event() {
+                CopyBatchEventKind::CancellationRequested { accepted } => Some(*accepted),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![true]
+    );
+    assert!(matches!(
+        events.last().map(|event| event.event()),
+        Some(CopyBatchEventKind::Completed { result })
+            if result.state() == JobState::Cancelled
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dropping_the_event_consumer_mid_batch_allows_resubscription_after_completion() {
+    let (root, output, workspace) = batch_paths();
+    let source = root.path().join("consumer-drop.bin");
+    fs::write(&source, b"consumer lifecycle bytes").unwrap();
+    let engine = Engine::new();
+    let plan = engine
+        .plan_copy_batch(
+            CopyBatchRequest::new(&output, &workspace)
+                .with_item(&source, output.join("consumer-drop.bin")),
+        )
+        .unwrap();
+    let session = CopyBatchSession::new();
+    let mut consumer = Some(session.subscribe_events_with_capacity(16).unwrap());
+
+    let execution = engine.execute_copy_batch_with_checkpoint(
+        plan,
+        &session,
+        CancellationHandle::new(),
+        |_| {
+            drop(consumer.take());
+            assert_eq!(
+                session.subscribe_events().unwrap_err(),
+                OperationFailureCode::EventConsumerUnavailable,
+                "active batch must keep its single-consumer claim"
+            );
+            Ok(())
+        },
+    );
+
+    assert_eq!(execution.result().state(), JobState::Succeeded);
+    let replacement = session
+        .subscribe_events()
+        .expect("completed batch must release a dropped consumer's claim");
+    drop(replacement);
 }

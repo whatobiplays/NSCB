@@ -8,6 +8,7 @@
 //! it never issues or repairs trust itself.
 
 use crate::file_identity::{FileIdentity, path_identity};
+use crate::inspection::CancellationHandle;
 use crate::sha256::Sha256Digest;
 use crate::split_resolution::{
     SplitResolutionContext, canonical_member_index, directory_has_canonical_member,
@@ -102,6 +103,98 @@ impl InputResolutionRequest {
     }
 }
 
+/// Ordered selections with a separate resolution base for each batch entry.
+///
+/// All entries share one resolver, so duplicate detection and aggregate resource
+/// limits apply across the complete batch. The traversal settings apply to every
+/// entry. Each base must be an absolute directory.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct InputResolutionBatchRequest {
+    selections: Vec<InputResolutionBatchSelection>,
+    recursive: bool,
+    follow_symlinks: bool,
+}
+
+#[derive(Clone, Debug)]
+struct InputResolutionBatchSelection {
+    base_directory: PathBuf,
+    selection: InputSelection,
+}
+
+impl InputResolutionBatchRequest {
+    /// Creates an empty batch request.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appends one typed selection and its path base in request order.
+    #[must_use]
+    pub fn with_selection(
+        mut self,
+        base_directory: impl Into<PathBuf>,
+        selection: InputSelection,
+    ) -> Self {
+        self.selections.push(InputResolutionBatchSelection {
+            base_directory: base_directory.into(),
+            selection,
+        });
+        self
+    }
+
+    /// Appends a direct path selection and its path base.
+    #[must_use]
+    pub fn with_path(self, base_directory: impl Into<PathBuf>, path: impl Into<PathBuf>) -> Self {
+        self.with_selection(base_directory, InputSelection::Path(path.into()))
+    }
+
+    /// Appends a versioned JSON input-list selection and its path base.
+    #[must_use]
+    pub fn with_input_list(
+        self,
+        base_directory: impl Into<PathBuf>,
+        path: impl Into<PathBuf>,
+    ) -> Self {
+        self.with_selection(base_directory, InputSelection::InputList(path.into()))
+    }
+
+    /// Enables bounded recursive directory discovery for every entry.
+    #[must_use]
+    pub fn with_recursive(mut self, recursive: bool) -> Self {
+        self.recursive = recursive;
+        self
+    }
+
+    /// Enables traversal through symbolic links for every entry.
+    #[must_use]
+    pub fn with_follow_symlinks(mut self, follow_symlinks: bool) -> Self {
+        self.follow_symlinks = follow_symlinks;
+        self
+    }
+}
+
+impl From<InputResolutionRequest> for InputResolutionBatchRequest {
+    fn from(request: InputResolutionRequest) -> Self {
+        let InputResolutionRequest {
+            base_directory,
+            selections,
+            recursive,
+            follow_symlinks,
+        } = request;
+        Self {
+            selections: selections
+                .into_iter()
+                .map(|selection| InputResolutionBatchSelection {
+                    base_directory: base_directory.clone(),
+                    selection,
+                })
+                .collect(),
+            recursive,
+            follow_symlinks,
+        }
+    }
+}
+
 /// A caller selection in the order it was supplied.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -118,6 +211,102 @@ pub enum InputSelection {
 pub struct InputResolutionResult {
     /// Resolved logical inputs in stable selection order.
     pub inputs: Vec<ResolvedInput>,
+}
+
+/// One request-order entry from independent batch resolution.
+///
+/// A resolved entry is ready for planning. A failed entry records a selection-
+/// local failure whose exact identity is known. An unavailable ordinary direct
+/// path is item-local, as is an unavailable path inside a readable input list
+/// and a broken discoverable symlink found without recursive traversal. A
+/// split-shaped broken symlink, a broken symlink found during recursion, a
+/// missing, unreadable, or malformed input-list file, a Split resolution
+/// failure, duplicate inputs, unsafe filesystem layout, cancellation, and a
+/// resource limit reject the whole batch. External callers must include a
+/// wildcard match arm to handle entries added in future releases.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum InputResolutionBatchEntry {
+    /// A logical input that resolved successfully.
+    Resolved(ResolvedInput),
+    /// A selection-local failure retained for its batch item.
+    Failed(InputResolutionFailure),
+}
+
+/// Sanitized failure for one independently selectable batch item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct InputResolutionFailure {
+    selection_index: usize,
+    source: InputSelectionSource,
+    selection_path: PathBuf,
+    base_directory: PathBuf,
+    input_list_entry_index: Option<usize>,
+    input_list_entry_path: Option<PathBuf>,
+    discovered_directory: Option<PathBuf>,
+    discovered_relative_path: Option<PathBuf>,
+    requested_path: PathBuf,
+    code: InputResolutionErrorCode,
+}
+
+impl InputResolutionFailure {
+    /// Returns the caller selection index that produced this item.
+    pub const fn selection_index(&self) -> usize {
+        self.selection_index
+    }
+
+    /// Returns whether the caller supplied a direct path or an input list.
+    pub const fn source(&self) -> InputSelectionSource {
+        self.source
+    }
+
+    /// Returns the original caller-side selection path.
+    pub fn selection_path(&self) -> &Path {
+        &self.selection_path
+    }
+
+    /// Returns the absolute request base used for relative path resolution.
+    pub fn base_directory(&self) -> &Path {
+        &self.base_directory
+    }
+
+    /// Returns the input-list entry index, when the item came from a list.
+    pub const fn input_list_entry_index(&self) -> Option<usize> {
+        self.input_list_entry_index
+    }
+
+    /// Returns the input-list entry path, when the item came from a list.
+    pub fn input_list_entry_path(&self) -> Option<&Path> {
+        self.input_list_entry_path.as_deref()
+    }
+
+    /// Returns the selected directory that produced a discovered failure.
+    pub fn discovered_directory(&self) -> Option<&Path> {
+        self.discovered_directory.as_deref()
+    }
+
+    /// Returns the failed child's path relative to its selected directory.
+    pub fn discovered_relative_path(&self) -> Option<&Path> {
+        self.discovered_relative_path.as_deref()
+    }
+
+    /// Returns the exact path selected for this item before failure.
+    pub fn requested_path(&self) -> &Path {
+        &self.requested_path
+    }
+
+    /// Returns the stable failure category.
+    pub const fn code(&self) -> InputResolutionErrorCode {
+        self.code
+    }
+}
+
+/// Ordered partial resolution result for an independent copy batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct InputResolutionBatchResult {
+    /// Resolved inputs and item-local failures in request order.
+    pub entries: Vec<InputResolutionBatchEntry>,
 }
 
 /// Additive host capabilities used for one read-only resolution request.
@@ -198,6 +387,7 @@ pub struct InputResolutionControl {
     completed_bytes: AtomicU64,
     total_bytes: AtomicU64,
     cancelled: AtomicBool,
+    external_cancellation: Option<CancellationHandle>,
 }
 
 impl Default for InputResolutionControl {
@@ -207,6 +397,7 @@ impl Default for InputResolutionControl {
             completed_bytes: AtomicU64::new(0),
             total_bytes: AtomicU64::new(PROGRESS_TOTAL_UNSET),
             cancelled: AtomicBool::new(false),
+            external_cancellation: None,
         }
     }
 }
@@ -222,9 +413,24 @@ impl InputResolutionControl {
         self.cancelled.store(true, Ordering::Release);
     }
 
+    /// Binds an existing invocation cancellation handle to this control.
+    ///
+    /// Resolution checks the control and the bound handle before filesystem
+    /// work and between directory entries. Split validation also checks while
+    /// hashing. The caller retains ownership of the handle.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: CancellationHandle) -> Self {
+        self.external_cancellation = Some(cancellation);
+        self
+    }
+
     /// Reports whether cancellation has been requested.
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Acquire)
+            || self
+                .external_cancellation
+                .as_ref()
+                .is_some_and(CancellationHandle::is_cancelled)
     }
 
     /// Returns the latest progress snapshot without blocking.
@@ -285,6 +491,22 @@ pub struct SplitQualification {
     pub original_sha256: Sha256Digest,
 }
 
+impl SplitQualification {
+    /// Creates qualification evidence from a validated local Split receipt.
+    pub const fn local_receipt(
+        manifest_schema_version: u16,
+        original_size_bytes: u64,
+        original_sha256: Sha256Digest,
+    ) -> Self {
+        Self {
+            kind: SplitQualificationKind::LocalSplitReceipt,
+            manifest_schema_version,
+            original_size_bytes,
+            original_sha256,
+        }
+    }
+}
+
 /// Kind of completeness evidence attached to a resolved Split input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -308,6 +530,25 @@ pub struct ResolvedInput {
     pub provenance: InputProvenance,
     /// Split completeness evidence, present only for qualified Split inputs.
     pub qualification: Option<SplitQualification>,
+    /// Hash of the exact manifest bytes used to qualify a Split input.
+    pub(crate) split_manifest_sha256: Option<Sha256Digest>,
+}
+
+impl ResolvedInput {
+    /// Returns the logical caller-selected path represented by this input.
+    ///
+    /// For a Split directory this is the directory itself, rather than any
+    /// physical member file.
+    pub fn logical_selection_path(&self) -> PathBuf {
+        self.provenance.logical_selection_path()
+    }
+
+    /// Returns the digest of the exact manifest bytes used to qualify a Split.
+    ///
+    /// Ordinary inputs do not have a Split manifest.
+    pub fn split_manifest_sha256(&self) -> Option<&Sha256Digest> {
+        self.split_manifest_sha256.as_ref()
+    }
 }
 
 /// One physical file segment and its observed byte length.
@@ -330,6 +571,8 @@ pub struct InputProvenance {
     pub source: InputSelectionSource,
     /// Path supplied for the top-level selection, kept as supplied.
     pub selection_path: PathBuf,
+    /// Absolute request base used to resolve relative selections.
+    pub base_directory: PathBuf,
     /// Zero-based entry position when the input came from a JSON input list.
     pub input_list_entry_index: Option<usize>,
     /// Path string supplied by that JSON entry, when applicable.
@@ -338,6 +581,35 @@ pub struct InputProvenance {
     pub discovered_directory: Option<PathBuf>,
     /// Relative path within the selected directory, when discovery produced the input.
     pub discovered_relative_path: Option<PathBuf>,
+}
+
+impl InputProvenance {
+    /// Returns the logical selected path represented by this provenance.
+    ///
+    /// Directory discovery uses its recorded root and relative path. Input-list
+    /// entries are resolved against the directory containing the list, anchored
+    /// to the request's stored base. Direct selections retain the caller-supplied path.
+    pub fn logical_selection_path(&self) -> PathBuf {
+        if let (Some(directory), Some(relative)) = (
+            self.discovered_directory.as_deref(),
+            self.discovered_relative_path.as_deref(),
+        ) {
+            return directory.join(relative);
+        }
+        if let Some(entry) = self.input_list_entry_path.as_deref() {
+            let selected = if entry.is_absolute() {
+                entry.to_path_buf()
+            } else {
+                let list_path = absolute_path(&self.base_directory, &self.selection_path);
+                match list_path.parent() {
+                    Some(parent) => parent.join(entry),
+                    None => return self.selection_path.clone(),
+                }
+            };
+            return fs::canonicalize(&selected).unwrap_or(selected);
+        }
+        self.selection_path.clone()
+    }
 }
 
 /// Kind of top-level selection that produced a resolved input.
@@ -539,6 +811,54 @@ impl crate::Engine {
     ) -> Result<InputResolutionResult, InputResolutionError> {
         resolve_inputs_impl(request, capabilities)
     }
+
+    /// Resolves independent batch selections while retaining item-local failures.
+    ///
+    /// The resolver keeps one shared duplicate set, traversal counter, input-list
+    /// budget, segment budget, Split byte budget, and cancellation state across
+    /// the whole request. A contract, duplicate, resource, Split, or safety
+    /// failure still rejects the request globally. An unavailable ordinary
+    /// path, empty input list, or empty selected directory remains a failed
+    /// entry when its identity is known, so viable siblings can proceed. An
+    /// item-local failure discovered inside a directory remains in sorted path
+    /// order and does not suppress later discovered siblings. An unavailable
+    /// input-list file rejects the request because its selections
+    /// cannot be known. Split qualification failures always reject globally.
+    pub fn resolve_inputs_batch(
+        &self,
+        request: InputResolutionRequest,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        self.resolve_inputs_batch_request(request.into())
+    }
+
+    /// Resolves independent batch selections with explicit host capabilities.
+    pub fn resolve_inputs_batch_with(
+        &self,
+        request: InputResolutionRequest,
+        capabilities: InputResolutionCapabilities<'_>,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        self.resolve_inputs_batch_request_with(request.into(), capabilities)
+    }
+
+    /// Resolves ordered batch entries with a separate path base for each entry.
+    ///
+    /// One resolver tracks duplicate identities and aggregate resource use across
+    /// all entries. Item-local ordinary selection failures remain in the result.
+    pub fn resolve_inputs_batch_request(
+        &self,
+        request: InputResolutionBatchRequest,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        resolve_inputs_batch_impl(request, InputResolutionCapabilities::default())
+    }
+
+    /// Resolves batch entries with per-entry path bases and explicit capabilities.
+    pub fn resolve_inputs_batch_request_with(
+        &self,
+        request: InputResolutionBatchRequest,
+        capabilities: InputResolutionCapabilities<'_>,
+    ) -> Result<InputResolutionBatchResult, InputResolutionError> {
+        resolve_inputs_batch_impl(request, capabilities)
+    }
 }
 
 fn resolve_inputs_impl(
@@ -571,6 +891,9 @@ fn resolve_inputs_impl(
             InputResolutionErrorCode::ResourceLimitExceeded,
         ));
     }
+    if let Some(control) = capabilities.control {
+        control.check_cancelled()?;
+    }
 
     let mut resolver = Resolver::new(
         request.recursive,
@@ -580,6 +903,7 @@ fn resolve_inputs_impl(
         capabilities.max_split_validation_bytes,
     );
     for (selection_index, selection) in request.selections.iter().enumerate() {
+        resolver.check_cancelled()?;
         match selection {
             InputSelection::Path(path) => {
                 let before = resolver.inputs.len();
@@ -587,10 +911,12 @@ fn resolve_inputs_impl(
                     selection_index,
                     source: InputSelectionSource::Path,
                     selection_path: path.clone(),
+                    base_directory: base_directory.clone(),
                     input_list_entry_index: None,
                     input_list_entry_path: None,
                 };
-                resolver.expand_path(path, &base_directory, &selection)?;
+                let expanded = resolver.expand_path(path, &base_directory, &selection)?;
+                reject_failed_expansion_entries(&expanded)?;
                 if resolver.inputs.len() == before {
                     return Err(InputResolutionError::new(
                         InputResolutionErrorCode::EmptySelection,
@@ -608,6 +934,7 @@ fn resolve_inputs_impl(
                 let bytes = read_bounded_regular_file(&selected_list_path)?;
                 let entries = parse_input_list(&bytes)?;
                 resolver.record_input_list(bytes.len(), entries.len())?;
+                resolver.check_cancelled()?;
                 if entries.is_empty() {
                     return Err(InputResolutionError::new(
                         InputResolutionErrorCode::EmptySelection,
@@ -615,15 +942,18 @@ fn resolve_inputs_impl(
                 }
                 let before_list = resolver.inputs.len();
                 for (entry_index, entry_path) in entries.into_iter().enumerate() {
+                    resolver.check_cancelled()?;
                     let before_entry = resolver.inputs.len();
                     let selection = SelectionContext {
                         selection_index,
                         source: InputSelectionSource::InputList,
                         selection_path: path.clone(),
+                        base_directory: base_directory.clone(),
                         input_list_entry_index: Some(entry_index),
                         input_list_entry_path: Some(entry_path.clone()),
                     };
-                    resolver.expand_path(&entry_path, &list_parent, &selection)?;
+                    let expanded = resolver.expand_path(&entry_path, &list_parent, &selection)?;
+                    reject_failed_expansion_entries(&expanded)?;
                     if resolver.inputs.len() == before_entry {
                         return Err(InputResolutionError::new(
                             InputResolutionErrorCode::EmptySelection,
@@ -649,6 +979,315 @@ fn resolve_inputs_impl(
     })
 }
 
+fn resolve_inputs_batch_impl(
+    request: InputResolutionBatchRequest,
+    capabilities: InputResolutionCapabilities<'_>,
+) -> Result<InputResolutionBatchResult, InputResolutionError> {
+    if request.selections.is_empty() {
+        return Err(InputResolutionError::new(
+            InputResolutionErrorCode::EmptySelection,
+        ));
+    }
+    if request.selections.len() > MAX_INPUT_LIST_ENTRIES {
+        return Err(InputResolutionError::new(
+            InputResolutionErrorCode::ResourceLimitExceeded,
+        ));
+    }
+    if let Some(control) = capabilities.control {
+        control.check_cancelled()?;
+    }
+    let base_directories = request
+        .selections
+        .iter()
+        .map(|selection| {
+            if let Some(control) = capabilities.control {
+                control.check_cancelled()?;
+            }
+            if !selection.base_directory.is_absolute() {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InvalidBaseDirectory,
+                ));
+            }
+            let base_directory = fs::canonicalize(&selection.base_directory).map_err(|_| {
+                InputResolutionError::new(InputResolutionErrorCode::InvalidBaseDirectory)
+            })?;
+            if !fs::metadata(&base_directory)
+                .map_err(|_| {
+                    InputResolutionError::new(InputResolutionErrorCode::InvalidBaseDirectory)
+                })?
+                .is_dir()
+            {
+                return Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InvalidBaseDirectory,
+                ));
+            }
+            #[cfg(test)]
+            BASE_DIRECTORY_VALIDATION_CHECKPOINT.with(|checkpoint| {
+                if let Some(checkpoint) = checkpoint.borrow_mut().take() {
+                    checkpoint();
+                }
+            });
+            if let Some(control) = capabilities.control {
+                control.check_cancelled()?;
+            }
+            Ok(base_directory)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut resolver = Resolver::new(
+        request.recursive,
+        request.follow_symlinks,
+        capabilities.split_trust_store,
+        capabilities.control,
+        capabilities.max_split_validation_bytes,
+    );
+    let mut entries = Vec::new();
+    for (selection_index, selection) in request.selections.iter().enumerate() {
+        resolver.check_cancelled()?;
+        let base_directory = &base_directories[selection_index];
+        match &selection.selection {
+            InputSelection::Path(path) => {
+                let context = SelectionContext {
+                    selection_index,
+                    source: InputSelectionSource::Path,
+                    selection_path: path.clone(),
+                    base_directory: base_directory.clone(),
+                    input_list_entry_index: None,
+                    input_list_entry_path: None,
+                };
+                match resolver.expand_path_for_batch(path, base_directory, &context) {
+                    Ok(expanded) if expanded.is_empty() => {
+                        entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                            &context,
+                            absolute_path(base_directory, path),
+                            InputResolutionErrorCode::EmptySelection,
+                            None,
+                            None,
+                        )))
+                    }
+                    Ok(expanded) => append_expansion_entries(expanded, &context, &mut entries),
+                    Err(error) => match error.class() {
+                        ExpansionFailureClass::ItemLocal => {
+                            entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                                &context,
+                                error.requested_path().to_path_buf(),
+                                error.code(),
+                                None,
+                                None,
+                            )));
+                        }
+                        ExpansionFailureClass::Global => return Err(error.into()),
+                    },
+                }
+            }
+            InputSelection::InputList(path) => {
+                let selected_list_path = absolute_path(base_directory, path);
+                let context = SelectionContext {
+                    selection_index,
+                    source: InputSelectionSource::InputList,
+                    selection_path: path.clone(),
+                    base_directory: base_directory.clone(),
+                    input_list_entry_index: None,
+                    input_list_entry_path: None,
+                };
+                let list_parent = selected_list_path
+                    .parent()
+                    .ok_or_else(|| {
+                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
+                    })?
+                    .to_path_buf();
+                let bytes = read_bounded_regular_file(&selected_list_path)?;
+                let listed_entries = parse_input_list(&bytes)?;
+                resolver.record_input_list(bytes.len(), listed_entries.len())?;
+                resolver.check_cancelled()?;
+                if listed_entries.is_empty() {
+                    entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                        &context,
+                        selected_list_path,
+                        InputResolutionErrorCode::EmptySelection,
+                        None,
+                        None,
+                    )));
+                    continue;
+                }
+                for (entry_index, entry_path) in listed_entries.into_iter().enumerate() {
+                    resolver.check_cancelled()?;
+                    let context = SelectionContext {
+                        selection_index,
+                        source: InputSelectionSource::InputList,
+                        selection_path: path.clone(),
+                        base_directory: base_directory.clone(),
+                        input_list_entry_index: Some(entry_index),
+                        input_list_entry_path: Some(entry_path.clone()),
+                    };
+                    match resolver.expand_path_for_batch(&entry_path, &list_parent, &context) {
+                        Ok(expanded) if expanded.is_empty() => {
+                            entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                                &context,
+                                absolute_path(&list_parent, &entry_path),
+                                InputResolutionErrorCode::EmptySelection,
+                                None,
+                                None,
+                            )))
+                        }
+                        Ok(expanded) => append_expansion_entries(expanded, &context, &mut entries),
+                        Err(error) => match error.class() {
+                            ExpansionFailureClass::ItemLocal => {
+                                entries.push(InputResolutionBatchEntry::Failed(batch_failure(
+                                    &context,
+                                    error.requested_path().to_path_buf(),
+                                    error.code(),
+                                    None,
+                                    None,
+                                )));
+                            }
+                            ExpansionFailureClass::Global => return Err(error.into()),
+                        },
+                    }
+                }
+            }
+        }
+    }
+    Ok(InputResolutionBatchResult { entries })
+}
+
+fn append_expansion_entries(
+    expanded: Vec<ExpansionEntry>,
+    context: &SelectionContext,
+    entries: &mut Vec<InputResolutionBatchEntry>,
+) {
+    for entry in expanded {
+        entries.push(match entry {
+            ExpansionEntry::Resolved(input) => InputResolutionBatchEntry::Resolved(*input),
+            ExpansionEntry::Failed {
+                requested_path,
+                code,
+                discovered_directory,
+                discovered_relative_path,
+            } => InputResolutionBatchEntry::Failed(batch_failure(
+                context,
+                requested_path,
+                code,
+                discovered_directory,
+                discovered_relative_path,
+            )),
+        });
+    }
+}
+
+fn reject_failed_expansion_entries(
+    expanded: &[ExpansionEntry],
+) -> Result<(), InputResolutionError> {
+    if let Some(code) = expanded.iter().find_map(|entry| match entry {
+        ExpansionEntry::Failed { code, .. } => Some(*code),
+        ExpansionEntry::Resolved(_) => None,
+    }) {
+        return Err(InputResolutionError::new(code));
+    }
+    Ok(())
+}
+
+fn batch_failure(
+    context: &SelectionContext,
+    requested_path: PathBuf,
+    code: InputResolutionErrorCode,
+    discovered_directory: Option<PathBuf>,
+    discovered_relative_path: Option<PathBuf>,
+) -> InputResolutionFailure {
+    InputResolutionFailure {
+        selection_index: context.selection_index,
+        source: context.source,
+        selection_path: context.selection_path.clone(),
+        base_directory: context.base_directory.clone(),
+        input_list_entry_index: context.input_list_entry_index,
+        input_list_entry_path: context.input_list_entry_path.clone(),
+        discovered_directory,
+        discovered_relative_path,
+        requested_path,
+        code,
+    }
+}
+
+fn is_item_local_resolution_failure(code: InputResolutionErrorCode, path: &Path) -> bool {
+    matches!(
+        code,
+        InputResolutionErrorCode::EmptySelection | InputResolutionErrorCode::InputUnavailable
+    ) && !path
+        .file_name()
+        .is_some_and(|name| looks_like_split_segment(Path::new(name)))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpansionFailureClass {
+    ItemLocal,
+    Global,
+}
+
+#[derive(Debug)]
+enum ExpansionEntry {
+    Resolved(Box<ResolvedInput>),
+    Failed {
+        requested_path: PathBuf,
+        code: InputResolutionErrorCode,
+        discovered_directory: Option<PathBuf>,
+        discovered_relative_path: Option<PathBuf>,
+    },
+}
+
+struct ExpansionError {
+    error: InputResolutionError,
+    requested_path: PathBuf,
+    class: ExpansionFailureClass,
+}
+
+impl ExpansionError {
+    fn ordinary(error: InputResolutionError, requested_path: PathBuf) -> Self {
+        let class = if is_item_local_resolution_failure(error.code(), &requested_path) {
+            ExpansionFailureClass::ItemLocal
+        } else {
+            ExpansionFailureClass::Global
+        };
+        Self {
+            error,
+            requested_path,
+            class,
+        }
+    }
+
+    fn split_related(error: InputResolutionError, requested_path: PathBuf) -> Self {
+        Self {
+            error,
+            requested_path,
+            class: ExpansionFailureClass::Global,
+        }
+    }
+
+    fn global(error: InputResolutionError, requested_path: PathBuf) -> Self {
+        Self {
+            error,
+            requested_path,
+            class: ExpansionFailureClass::Global,
+        }
+    }
+
+    fn code(&self) -> InputResolutionErrorCode {
+        self.error.code()
+    }
+
+    fn class(&self) -> ExpansionFailureClass {
+        self.class
+    }
+
+    fn requested_path(&self) -> &Path {
+        &self.requested_path
+    }
+}
+
+impl From<ExpansionError> for InputResolutionError {
+    fn from(error: ExpansionError) -> Self {
+        error.error
+    }
+}
+
 struct Resolver<'a> {
     recursive: bool,
     follow_symlinks: bool,
@@ -669,6 +1308,7 @@ struct SelectionContext {
     selection_index: usize,
     source: InputSelectionSource,
     selection_path: PathBuf,
+    base_directory: PathBuf,
     input_list_entry_index: Option<usize>,
     input_list_entry_path: Option<PathBuf>,
 }
@@ -725,6 +1365,13 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    fn check_cancelled(&self) -> Result<(), InputResolutionError> {
+        if let Some(control) = self.control {
+            control.check_cancelled()?;
+        }
+        Ok(())
+    }
+
     fn record_resolved_segments(&mut self, count: usize) -> Result<(), InputResolutionError> {
         self.resolved_segments = self.resolved_segments.checked_add(count).ok_or_else(|| {
             InputResolutionError::new(InputResolutionErrorCode::ResourceLimitExceeded)
@@ -737,18 +1384,37 @@ impl<'a> Resolver<'a> {
         Ok(())
     }
 
+    fn expand_path_for_batch(
+        &mut self,
+        path: &Path,
+        path_base: &Path,
+        selection: &SelectionContext,
+    ) -> Result<Vec<ExpansionEntry>, ExpansionError> {
+        self.expand_path(path, path_base, selection)
+    }
+
     fn expand_path(
         &mut self,
         path: &Path,
         path_base: &Path,
         selection: &SelectionContext,
-    ) -> Result<(), InputResolutionError> {
+    ) -> Result<Vec<ExpansionEntry>, ExpansionError> {
         let selected_path = absolute_path(path_base, path);
-        let link_metadata = fs::symlink_metadata(&selected_path)
-            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
+        self.check_cancelled()
+            .map_err(|error| ExpansionError::ordinary(error, selected_path.clone()))?;
+        let link_metadata = fs::symlink_metadata(&selected_path).map_err(|_| {
+            ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                selected_path.clone(),
+            )
+        })?;
         let is_symlink = link_metadata.file_type().is_symlink();
-        let target_metadata = fs::metadata(&selected_path)
-            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
+        let target_metadata = fs::metadata(&selected_path).map_err(|_| {
+            ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                selected_path.clone(),
+            )
+        })?;
 
         if target_metadata.is_file() {
             if selected_path
@@ -756,57 +1422,99 @@ impl<'a> Resolver<'a> {
                 .and_then(canonical_member_index)
                 .is_some()
             {
-                if is_symlink {
-                    return Err(InputResolutionError::new(
-                        InputResolutionErrorCode::SplitSetIncomplete,
-                    ));
-                }
-                if !self.follow_symlinks
-                    && traverses_intermediate_symlink(&selected_path, path_base)?
-                {
-                    return Err(InputResolutionError::new(
-                        InputResolutionErrorCode::UnsupportedFilesystemEntry,
-                    ));
-                }
-                return self.append_split_member(&selected_path, selection);
+                let before = self.inputs.len();
+                (|| {
+                    if is_symlink {
+                        return Err(InputResolutionError::new(
+                            InputResolutionErrorCode::SplitSetIncomplete,
+                        ));
+                    }
+                    if !self.follow_symlinks
+                        && traverses_intermediate_symlink(&selected_path, path_base)?
+                    {
+                        return Err(InputResolutionError::new(
+                            InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                        ));
+                    }
+                    self.append_split_member(&selected_path, selection)
+                })()
+                .map_err(|error| ExpansionError::split_related(error, selected_path))?;
+                return Ok(vec![ExpansionEntry::Resolved(Box::new(
+                    self.inputs[before].clone(),
+                ))]);
             }
+            let before = self.inputs.len();
             self.append_file(&selected_path, selection, None, None)
+                .map_err(|error| ExpansionError::ordinary(error, selected_path))?;
+            Ok(vec![ExpansionEntry::Resolved(Box::new(
+                self.inputs[before].clone(),
+            ))])
         } else if target_metadata.is_dir() {
             if is_symlink && !self.follow_symlinks {
-                return Err(InputResolutionError::new(
-                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                return Err(ExpansionError::ordinary(
+                    InputResolutionError::new(InputResolutionErrorCode::UnsupportedFilesystemEntry),
+                    selected_path,
                 ));
             }
             let canonical = fs::canonicalize(&selected_path).map_err(|_| {
-                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
+                ExpansionError::ordinary(
+                    InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                    selected_path.clone(),
+                )
             })?;
-            let has_sidecar = has_adjacent_sidecar(&canonical)?;
-            let has_canonical_member = if has_sidecar {
-                false
-            } else {
-                directory_has_canonical_member(&canonical)?
-            };
-            let split_candidate = has_sidecar || has_canonical_member;
-            if split_candidate
+            let (has_sidecar, has_canonical_member) = (|| {
+                #[cfg(test)]
+                ADJACENT_SIDECAR_PROBE_CHECKPOINT.with(|checkpoint| {
+                    if let Some(checkpoint) = checkpoint.borrow_mut().take() {
+                        checkpoint(&canonical)?;
+                    }
+                    Ok::<(), InputResolutionError>(())
+                })?;
+                let has_sidecar = has_adjacent_sidecar(&canonical)?;
+                let has_canonical_member = if has_sidecar {
+                    false
+                } else {
+                    #[cfg(test)]
+                    CANONICAL_MEMBER_PROBE_CHECKPOINT.with(|checkpoint| {
+                        if let Some(checkpoint) = checkpoint.borrow_mut().take() {
+                            checkpoint(&canonical)?;
+                        }
+                        Ok::<(), InputResolutionError>(())
+                    })?;
+                    directory_has_canonical_member(&canonical)?
+                };
+                Ok::<_, InputResolutionError>((has_sidecar, has_canonical_member))
+            })()
+            .map_err(|error| ExpansionError::split_related(error, selected_path.clone()))?;
+            if (has_sidecar || has_canonical_member)
                 && !self.follow_symlinks
-                && traverses_intermediate_symlink(&selected_path, path_base)?
+                && traverses_intermediate_symlink(&selected_path, path_base)
+                    .map_err(|error| ExpansionError::split_related(error, selected_path.clone()))?
             {
-                return Err(InputResolutionError::new(
-                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                return Err(ExpansionError::split_related(
+                    InputResolutionError::new(InputResolutionErrorCode::UnsupportedFilesystemEntry),
+                    selected_path,
                 ));
             }
             if has_sidecar {
+                let before = self.inputs.len();
                 self.append_split_directory(&canonical, selection, None, None)
+                    .map_err(|error| ExpansionError::split_related(error, selected_path))?;
+                Ok(vec![ExpansionEntry::Resolved(Box::new(
+                    self.inputs[before].clone(),
+                ))])
             } else if has_canonical_member {
-                Err(InputResolutionError::new(
-                    InputResolutionErrorCode::SplitManifestMissing,
+                Err(ExpansionError::split_related(
+                    InputResolutionError::new(InputResolutionErrorCode::SplitManifestMissing),
+                    selected_path,
                 ))
             } else {
                 self.expand_directory(&selected_path, selection)
             }
         } else {
-            Err(InputResolutionError::new(
-                InputResolutionErrorCode::InputUnavailable,
+            Err(ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                selected_path,
             ))
         }
     }
@@ -815,14 +1523,25 @@ impl<'a> Resolver<'a> {
         &mut self,
         selected_path: &Path,
         selection: &SelectionContext,
-    ) -> Result<(), InputResolutionError> {
-        let canonical_root = fs::canonicalize(selected_path)
-            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
-        let root_metadata = fs::metadata(&canonical_root)
-            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
+    ) -> Result<Vec<ExpansionEntry>, ExpansionError> {
+        self.check_cancelled()
+            .map_err(|error| ExpansionError::ordinary(error, selected_path.to_path_buf()))?;
+        let canonical_root = fs::canonicalize(selected_path).map_err(|_| {
+            ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                selected_path.to_path_buf(),
+            )
+        })?;
+        let root_metadata = fs::metadata(&canonical_root).map_err(|_| {
+            ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                canonical_root.clone(),
+            )
+        })?;
         if !root_metadata.is_dir() {
-            return Err(InputResolutionError::new(
-                InputResolutionErrorCode::InputUnavailable,
+            return Err(ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                canonical_root,
             ));
         }
 
@@ -845,34 +1564,80 @@ impl<'a> Resolver<'a> {
                     raw_path_key(left.relative_path()).cmp(&raw_path_key(right.relative_path()))
                 })
         });
+        self.check_cancelled()
+            .map_err(|error| ExpansionError::ordinary(error, selected_path.to_path_buf()))?;
 
         if found.is_empty() {
-            return Err(InputResolutionError::new(
-                InputResolutionErrorCode::EmptySelection,
+            return Err(ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::EmptySelection),
+                canonical_root,
             ));
         }
+        let mut outcomes = Vec::with_capacity(found.len());
         for candidate in found {
+            self.check_cancelled()
+                .map_err(|error| ExpansionError::ordinary(error, canonical_root.clone()))?;
             match candidate {
-                FoundInput::File(candidate) => self.append_known_file(
-                    candidate.canonical_path,
-                    candidate.size,
-                    candidate.file_identity,
-                    selection,
-                    Some(canonical_root.clone()),
-                    Some(candidate.relative_path),
-                )?,
+                FoundInput::File(candidate) => {
+                    let before = self.inputs.len();
+                    let failure_path = candidate.canonical_path.clone();
+                    let failure_relative_path = candidate.relative_path.clone();
+                    let append =
+                        observe_append_file_fault(&candidate.canonical_path).and_then(|()| {
+                            self.append_known_file(
+                                candidate.canonical_path,
+                                candidate.size,
+                                candidate.file_identity,
+                                selection,
+                                Some(canonical_root.clone()),
+                                Some(candidate.relative_path),
+                            )
+                        });
+                    match append {
+                        Ok(()) => outcomes.push(ExpansionEntry::Resolved(Box::new(
+                            self.inputs[before].clone(),
+                        ))),
+                        Err(error) => {
+                            let error = ExpansionError::ordinary(error, failure_path);
+                            match error.class() {
+                                ExpansionFailureClass::ItemLocal => {
+                                    outcomes.push(ExpansionEntry::Failed {
+                                        requested_path: error.requested_path().to_path_buf(),
+                                        code: error.code(),
+                                        discovered_directory: Some(canonical_root.clone()),
+                                        discovered_relative_path: Some(failure_relative_path),
+                                    });
+                                }
+                                ExpansionFailureClass::Global => return Err(error),
+                            }
+                        }
+                    }
+                }
                 FoundInput::Split {
                     canonical_directory,
                     relative_path,
-                } => self.append_split_directory(
-                    &canonical_directory,
-                    selection,
-                    Some(canonical_root.clone()),
-                    Some(relative_path),
-                )?,
+                } => {
+                    let before = self.inputs.len();
+                    self.append_split_directory(
+                        &canonical_directory,
+                        selection,
+                        Some(canonical_root.clone()),
+                        Some(relative_path),
+                    )
+                    .map_err(|error| ExpansionError::split_related(error, canonical_directory))?;
+                    outcomes.push(ExpansionEntry::Resolved(Box::new(
+                        self.inputs[before].clone(),
+                    )));
+                }
+                FoundInput::Failed(failure) => outcomes.push(ExpansionEntry::Failed {
+                    requested_path: failure.requested_path,
+                    code: failure.code,
+                    discovered_directory: Some(canonical_root.clone()),
+                    discovered_relative_path: Some(failure.relative_path),
+                }),
             }
         }
-        Ok(())
+        Ok(outcomes)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -885,26 +1650,35 @@ impl<'a> Resolver<'a> {
         visited_directories: &mut HashSet<DirectoryIdentity>,
         active_directories: &mut HashSet<DirectoryIdentity>,
         found: &mut Vec<FoundInput>,
-    ) -> Result<(), InputResolutionError> {
+    ) -> Result<(), ExpansionError> {
+        self.check_cancelled()
+            .map_err(|error| ExpansionError::ordinary(error, directory.to_path_buf()))?;
         if depth > MAX_TRAVERSAL_DEPTH {
-            return Err(InputResolutionError::new(
-                InputResolutionErrorCode::ResourceLimitExceeded,
+            return Err(ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::ResourceLimitExceeded),
+                directory.to_path_buf(),
             ));
         }
-        let metadata = fs::metadata(directory)
-            .map_err(|_| InputResolutionError::new(InputResolutionErrorCode::InputUnavailable))?;
+        let metadata = fs::metadata(directory).map_err(|_| {
+            ExpansionError::global(
+                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                directory.to_path_buf(),
+            )
+        })?;
         let identity = directory_identity(directory, &metadata);
         if active_directories.contains(&identity) {
             return Ok(());
         }
         if !visited_directories.insert(identity.clone()) {
-            return Err(InputResolutionError::new(
-                InputResolutionErrorCode::DuplicateSelection,
+            return Err(ExpansionError::ordinary(
+                InputResolutionError::new(InputResolutionErrorCode::DuplicateSelection),
+                directory.to_path_buf(),
             ));
         }
         active_directories.insert(identity.clone());
 
-        let mut entries = read_directory(directory, &mut self.visited_entries)?;
+        let mut entries = read_directory(directory, &mut self.visited_entries)
+            .map_err(|error| ExpansionError::global(error, directory.to_path_buf()))?;
         entries.sort_by(|left, right| {
             let left_name = left.file_name();
             let right_name = right.file_name();
@@ -916,142 +1690,236 @@ impl<'a> Resolver<'a> {
         for entry in entries {
             let name = entry.file_name();
             let encountered_path = directory.join(&name);
+            #[cfg(test)]
+            SCAN_DIRECTORY_ENTRY_CHECKPOINT.with(|checkpoint| {
+                let mut checkpoint = checkpoint.borrow_mut();
+                let completed = checkpoint
+                    .as_mut()
+                    .is_some_and(|checkpoint| checkpoint(&encountered_path));
+                if completed {
+                    checkpoint.take();
+                }
+            });
+            self.check_cancelled()
+                .map_err(|error| ExpansionError::ordinary(error, encountered_path.clone()))?;
             let relative_path = relative_directory.join(&name);
-            let file_type = entry.file_type().map_err(|_| {
-                InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-            })?;
+            let failure_relative_path = relative_path.clone();
+            let scan_result = (|| {
+                let file_type = entry.file_type().map_err(|_| {
+                    ExpansionError::global(
+                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable),
+                        encountered_path.clone(),
+                    )
+                })?;
 
-            if file_type.is_symlink() {
-                if !self.follow_symlinks {
-                    continue;
-                }
-                let suspected_split = looks_like_split_segment(&encountered_path);
-                let discovery_candidate = is_discovery_candidate(&encountered_path);
-                if !self.recursive && !discovery_candidate && !suspected_split {
-                    continue;
-                }
-                let target = fs::canonicalize(&encountered_path).map_err(|_| {
-                    InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-                })?;
-                let target_metadata = fs::metadata(&target).map_err(|_| {
-                    InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-                })?;
-                if target_metadata.is_dir() {
-                    if self.recursive {
-                        if !target.starts_with(root) {
-                            return Err(InputResolutionError::new(
-                                InputResolutionErrorCode::UnsupportedFilesystemEntry,
-                            ));
-                        }
-                        if has_adjacent_sidecar(&target)? {
-                            found.push(FoundInput::Split {
-                                canonical_directory: target,
-                                relative_path,
-                            });
+                if file_type.is_symlink() {
+                    if !self.follow_symlinks {
+                        return Ok(());
+                    }
+                    let suspected_split = looks_like_split_segment(&encountered_path);
+                    let discovery_candidate = is_discovery_candidate(&encountered_path);
+                    if !self.recursive && !discovery_candidate && !suspected_split {
+                        return Ok(());
+                    }
+                    let target = fs::canonicalize(&encountered_path).map_err(|_| {
+                        let error =
+                            InputResolutionError::new(InputResolutionErrorCode::InputUnavailable);
+                        if suspected_split {
+                            ExpansionError::split_related(error, encountered_path.clone())
+                        } else if !self.recursive && discovery_candidate {
+                            ExpansionError::ordinary(error, encountered_path.clone())
                         } else {
-                            self.scan_directory(
-                                root,
-                                &target,
-                                &relative_path,
-                                depth + 1,
-                                visited_directories,
-                                active_directories,
-                                found,
-                            )?;
+                            ExpansionError::global(error, encountered_path.clone())
                         }
-                    }
-                } else if target_metadata.is_file() {
-                    if suspected_split || looks_like_split_segment(&target) {
-                        return Err(InputResolutionError::new(
-                            InputResolutionErrorCode::UnsupportedSplitLayout,
-                        ));
-                    }
-                    if discovery_candidate {
-                        if !target.starts_with(root) {
-                            return Err(InputResolutionError::new(
-                                InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                    })?;
+                    let target_metadata = fs::metadata(&target).map_err(|_| {
+                        let error =
+                            InputResolutionError::new(InputResolutionErrorCode::InputUnavailable);
+                        ExpansionError::global(error, encountered_path.clone())
+                    })?;
+                    if target_metadata.is_dir() {
+                        if self.recursive {
+                            if !target.starts_with(root) {
+                                return Err(ExpansionError::ordinary(
+                                    InputResolutionError::new(
+                                        InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                                    ),
+                                    target,
+                                ));
+                            }
+                            if has_adjacent_sidecar(&target).map_err(|error| {
+                                ExpansionError::split_related(error, target.clone())
+                            })? {
+                                found.push(FoundInput::Split {
+                                    canonical_directory: target,
+                                    relative_path,
+                                });
+                            } else {
+                                self.scan_directory(
+                                    root,
+                                    &target,
+                                    &relative_path,
+                                    depth + 1,
+                                    visited_directories,
+                                    active_directories,
+                                    found,
+                                )?;
+                            }
+                        }
+                    } else if target_metadata.is_file() {
+                        if suspected_split || looks_like_split_segment(&target) {
+                            return Err(ExpansionError::split_related(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::UnsupportedSplitLayout,
+                                ),
+                                target,
                             ));
                         }
-                        found.push(FoundInput::File(found_file(
-                            &target,
-                            &target_metadata,
-                            relative_path,
-                        )?));
+                        if discovery_candidate {
+                            if !target.starts_with(root) {
+                                return Err(ExpansionError::ordinary(
+                                    InputResolutionError::new(
+                                        InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                                    ),
+                                    target,
+                                ));
+                            }
+                            found.push(FoundInput::File(
+                                found_file(&target, &target_metadata, relative_path).map_err(
+                                    |error| ExpansionError::global(error, target.clone()),
+                                )?,
+                            ));
+                        }
+                    } else if discovery_candidate || suspected_split {
+                        return Err(ExpansionError::ordinary(
+                            InputResolutionError::new(
+                                InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                            ),
+                            target,
+                        ));
                     }
-                } else if discovery_candidate || suspected_split {
-                    return Err(InputResolutionError::new(
-                        InputResolutionErrorCode::UnsupportedFilesystemEntry,
-                    ));
+                    return Ok(());
                 }
-                continue;
-            }
 
-            if file_type.is_dir() {
-                if has_adjacent_sidecar(&encountered_path)? {
-                    let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
-                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-                    })?;
-                    if !canonical.starts_with(root) {
-                        return Err(InputResolutionError::new(
-                            InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                if file_type.is_dir() {
+                    if has_adjacent_sidecar(&encountered_path).map_err(|error| {
+                        ExpansionError::split_related(error, encountered_path.clone())
+                    })? {
+                        let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
+                            ExpansionError::split_related(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::InputUnavailable,
+                                ),
+                                encountered_path.clone(),
+                            )
+                        })?;
+                        if !canonical.starts_with(root) {
+                            return Err(ExpansionError::split_related(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                                ),
+                                canonical,
+                            ));
+                        }
+                        found.push(FoundInput::Split {
+                            canonical_directory: canonical,
+                            relative_path,
+                        });
+                    } else if self.recursive {
+                        let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
+                            ExpansionError::global(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::InputUnavailable,
+                                ),
+                                encountered_path.clone(),
+                            )
+                        })?;
+                        if !canonical.starts_with(root) {
+                            return Err(ExpansionError::ordinary(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                                ),
+                                canonical,
+                            ));
+                        }
+                        self.scan_directory(
+                            root,
+                            &canonical,
+                            &relative_path,
+                            depth + 1,
+                            visited_directories,
+                            active_directories,
+                            found,
+                        )?;
+                    }
+                } else if file_type.is_file() {
+                    if looks_like_split_segment(&encountered_path) {
+                        return Err(ExpansionError::split_related(
+                            InputResolutionError::new(
+                                InputResolutionErrorCode::UnsupportedSplitLayout,
+                            ),
+                            encountered_path,
                         ));
                     }
-                    found.push(FoundInput::Split {
-                        canonical_directory: canonical,
-                        relative_path,
-                    });
-                } else if self.recursive {
-                    let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
-                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-                    })?;
-                    if !canonical.starts_with(root) {
-                        return Err(InputResolutionError::new(
-                            InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                    if is_discovery_candidate(&encountered_path) {
+                        let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
+                            ExpansionError::ordinary(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::InputUnavailable,
+                                ),
+                                encountered_path.clone(),
+                            )
+                        })?;
+                        if !canonical.starts_with(root) {
+                            return Err(ExpansionError::ordinary(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                                ),
+                                canonical,
+                            ));
+                        }
+                        let metadata = fs::metadata(&canonical).map_err(|_| {
+                            ExpansionError::ordinary(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::InputUnavailable,
+                                ),
+                                canonical.clone(),
+                            )
+                        })?;
+                        if looks_like_split_segment(&canonical) {
+                            return Err(ExpansionError::split_related(
+                                InputResolutionError::new(
+                                    InputResolutionErrorCode::UnsupportedSplitLayout,
+                                ),
+                                canonical,
+                            ));
+                        }
+                        found.push(FoundInput::File(
+                            found_file(&canonical, &metadata, relative_path).map_err(|error| {
+                                ExpansionError::ordinary(error, canonical.clone())
+                            })?,
                         ));
                     }
-                    self.scan_directory(
-                        root,
-                        &canonical,
-                        &relative_path,
-                        depth + 1,
-                        visited_directories,
-                        active_directories,
-                        found,
-                    )?;
-                }
-            } else if file_type.is_file() {
-                if looks_like_split_segment(&encountered_path) {
-                    return Err(InputResolutionError::new(
-                        InputResolutionErrorCode::UnsupportedSplitLayout,
+                } else if is_discovery_candidate(&encountered_path) {
+                    return Err(ExpansionError::ordinary(
+                        InputResolutionError::new(
+                            InputResolutionErrorCode::UnsupportedFilesystemEntry,
+                        ),
+                        encountered_path,
                     ));
                 }
-                if is_discovery_candidate(&encountered_path) {
-                    let canonical = fs::canonicalize(&encountered_path).map_err(|_| {
-                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-                    })?;
-                    if !canonical.starts_with(root) {
-                        return Err(InputResolutionError::new(
-                            InputResolutionErrorCode::UnsupportedFilesystemEntry,
-                        ));
-                    }
-                    let metadata = fs::metadata(&canonical).map_err(|_| {
-                        InputResolutionError::new(InputResolutionErrorCode::InputUnavailable)
-                    })?;
-                    if looks_like_split_segment(&canonical) {
-                        return Err(InputResolutionError::new(
-                            InputResolutionErrorCode::UnsupportedSplitLayout,
-                        ));
-                    }
-                    found.push(FoundInput::File(found_file(
-                        &canonical,
-                        &metadata,
-                        relative_path,
-                    )?));
+                Ok(())
+            })();
+            match scan_result {
+                Ok(()) => {}
+                Err(error) if error.class() == ExpansionFailureClass::ItemLocal => {
+                    found.push(FoundInput::Failed(FoundFailure {
+                        relative_path: failure_relative_path,
+                        requested_path: error.requested_path().to_path_buf(),
+                        code: error.code(),
+                    }));
                 }
-            } else if is_discovery_candidate(&encountered_path) {
-                return Err(InputResolutionError::new(
-                    InputResolutionErrorCode::UnsupportedFilesystemEntry,
-                ));
+                Err(error) => return Err(error),
             }
         }
 
@@ -1086,17 +1954,27 @@ impl<'a> Resolver<'a> {
         discovered_directory: Option<PathBuf>,
         discovered_relative_path: Option<PathBuf>,
     ) -> Result<(), InputResolutionError> {
+        #[cfg(test)]
+        if let Some(checkpoint) =
+            SPLIT_QUALIFICATION_CHECKPOINT.with(|checkpoint| checkpoint.borrow_mut().take())
+        {
+            checkpoint(directory, selection)?;
+        }
+
         let input_index = self.inputs.len();
-        let mut context = SplitResolutionContext {
-            trust_store: self.trust_store,
-            control: self.control,
-            visited_entries: &mut self.visited_entries,
-            validated_bytes: &mut self.validated_split_bytes,
-            max_validated_bytes: self.max_split_validation_bytes,
-            input_index,
+        let qualified = {
+            let mut context = SplitResolutionContext {
+                trust_store: self.trust_store,
+                control: self.control,
+                visited_entries: &mut self.visited_entries,
+                validated_bytes: &mut self.validated_split_bytes,
+                max_validated_bytes: self.max_split_validation_bytes,
+                input_index,
+            };
+            qualify_directory(directory, &mut context)?
         };
-        let qualified = qualify_directory(directory, &mut context)?;
         self.record_resolved_segments(qualified.segments.len())?;
+        let split_manifest_sha256 = qualified.manifest_sha256;
 
         let mut segments = Vec::with_capacity(qualified.segments.len());
         for segment in qualified.segments {
@@ -1126,12 +2004,14 @@ impl<'a> Resolver<'a> {
                 selection_index: selection.selection_index,
                 source: selection.source,
                 selection_path: selection.selection_path.clone(),
+                base_directory: selection.base_directory.clone(),
                 input_list_entry_index: selection.input_list_entry_index,
                 input_list_entry_path: selection.input_list_entry_path.clone(),
                 discovered_directory,
                 discovered_relative_path,
             },
             qualification: Some(qualified.qualification),
+            split_manifest_sha256: Some(split_manifest_sha256),
         });
         Ok(())
     }
@@ -1212,12 +2092,14 @@ impl<'a> Resolver<'a> {
                 selection_index: selection.selection_index,
                 source: selection.source,
                 selection_path: selection.selection_path.clone(),
+                base_directory: selection.base_directory.clone(),
                 input_list_entry_index: selection.input_list_entry_index,
                 input_list_entry_path: selection.input_list_entry_path.clone(),
                 discovered_directory,
                 discovered_relative_path,
             },
             qualification: None,
+            split_manifest_sha256: None,
         });
         Ok(())
     }
@@ -1229,6 +2111,13 @@ enum FoundInput {
         canonical_directory: PathBuf,
         relative_path: PathBuf,
     },
+    Failed(FoundFailure),
+}
+
+struct FoundFailure {
+    relative_path: PathBuf,
+    requested_path: PathBuf,
+    code: InputResolutionErrorCode,
 }
 
 impl FoundInput {
@@ -1236,6 +2125,7 @@ impl FoundInput {
         match self {
             Self::File(file) => &file.relative_path,
             Self::Split { relative_path, .. } => relative_path,
+            Self::Failed(failure) => &failure.relative_path,
         }
     }
 }
@@ -1611,13 +2501,84 @@ fn hex_key(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+type SplitQualificationCheckpoint =
+    dyn FnOnce(&Path, &SelectionContext) -> Result<(), InputResolutionError>;
+
+#[cfg(test)]
+type SplitProbeCheckpoint = dyn FnOnce(&Path) -> Result<(), InputResolutionError>;
+
+#[cfg(test)]
+type AppendFileFaultCheckpoint = dyn FnMut(&Path) -> Result<bool, InputResolutionError>;
+
+#[cfg(test)]
+type ScanDirectoryEntryCheckpoint = dyn FnMut(&Path) -> bool;
+
+#[cfg(test)]
+thread_local! {
+    static SCAN_DIRECTORY_ENTRY_CHECKPOINT:
+        std::cell::RefCell<Option<Box<ScanDirectoryEntryCheckpoint>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    static BASE_DIRECTORY_VALIDATION_CHECKPOINT:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    static SPLIT_QUALIFICATION_CHECKPOINT:
+        std::cell::RefCell<Option<Box<SplitQualificationCheckpoint>>> = const {
+            std::cell::RefCell::new(None)
+        };
+static ADJACENT_SIDECAR_PROBE_CHECKPOINT: std::cell::RefCell<Option<Box<SplitProbeCheckpoint>>> =
+    const { std::cell::RefCell::new(None) };
+static CANONICAL_MEMBER_PROBE_CHECKPOINT: std::cell::RefCell<Option<Box<SplitProbeCheckpoint>>> =
+    const { std::cell::RefCell::new(None) };
+static APPEND_FILE_FAULT_CHECKPOINT: std::cell::RefCell<Option<Box<AppendFileFaultCheckpoint>>> =
+    const { std::cell::RefCell::new(None) };
+}
+
+fn observe_append_file_fault(path: &Path) -> Result<(), InputResolutionError> {
+    #[cfg(test)]
+    APPEND_FILE_FAULT_CHECKPOINT.with(|checkpoint| {
+        let mut checkpoint = checkpoint.borrow_mut();
+        let result = match checkpoint.as_mut() {
+            Some(checkpoint) => checkpoint(path),
+            None => Ok(false),
+        };
+        match result {
+            Ok(true) => {
+                checkpoint.take();
+                Ok(())
+            }
+            Err(error) => {
+                checkpoint.take();
+                Err(error)
+            }
+            Ok(false) => Ok(()),
+        }
+    })?;
+    #[cfg(not(test))]
+    let _ = path;
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputResolutionCapabilities, InputResolutionControl,
         MAX_INPUT_LIST_BYTES_PER_REQUEST, MAX_INPUT_LIST_ENTRIES, MAX_TRAVERSAL_DEPTH,
         MAX_TRAVERSAL_ENTRIES, Resolver, parse_input_list,
     };
-    use crate::input_resolution::InputResolutionErrorCode;
+    use crate::input_resolution::{
+        ADJACENT_SIDECAR_PROBE_CHECKPOINT, APPEND_FILE_FAULT_CHECKPOINT,
+        BASE_DIRECTORY_VALIDATION_CHECKPOINT, CANONICAL_MEMBER_PROBE_CHECKPOINT,
+        InputResolutionError, InputResolutionErrorCode, SCAN_DIRECTORY_ENTRY_CHECKPOINT,
+        SPLIT_QUALIFICATION_CHECKPOINT,
+    };
+    use crate::inspection::CancellationHandle;
+    use crate::{LocalSplitTrustStore, Sha256Digest, SplitTrustReceipt, SplitTrustWriter};
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn resolver() -> Resolver<'static> {
         Resolver::new(
@@ -1627,6 +2588,525 @@ mod tests {
             None,
             DEFAULT_MAX_SPLIT_VALIDATION_BYTES,
         )
+    }
+
+    fn queue_split_qualification_failure(
+        expected_source: super::InputSelectionSource,
+        expected_entry_index: Option<usize>,
+        expected_entry_path: Option<&'static str>,
+    ) {
+        let expected_entry_path = expected_entry_path.map(std::path::PathBuf::from);
+        SPLIT_QUALIFICATION_CHECKPOINT.with(|checkpoint| {
+            let previous =
+                checkpoint
+                    .borrow_mut()
+                    .replace(Box::new(move |directory, selection| {
+                        assert_eq!(
+                            directory.file_name().and_then(|name| name.to_str()),
+                            Some("Game.nsp")
+                        );
+                        assert_eq!(selection.source, expected_source);
+                        assert_eq!(selection.input_list_entry_index, expected_entry_index);
+                        assert_eq!(selection.input_list_entry_path, expected_entry_path);
+                        Err(InputResolutionError::new(
+                            InputResolutionErrorCode::InputUnavailable,
+                        ))
+                    }));
+            assert!(previous.is_none(), "checkpoint was already queued");
+        });
+    }
+
+    fn write_recognized_split_candidate(root: &Path) -> std::path::PathBuf {
+        let directory = root.join("Game.nsp");
+        std::fs::create_dir_all(&directory).expect("create recognized Split directory");
+        std::fs::write(directory.join("00"), b"member").expect("write Split member");
+        std::fs::write(root.join("Game.nsp.nscb-split.json"), b"fixture")
+            .expect("write adjacent Split sidecar");
+        directory
+    }
+
+    fn write_unqualified_split_candidate(root: &Path) -> PathBuf {
+        let directory = root.join("Game.nsp");
+        std::fs::create_dir_all(&directory).expect("create canonical member directory");
+        std::fs::write(directory.join("00"), b"member").expect("write canonical member");
+        directory
+    }
+
+    fn write_qualified_split_fixture(root: &Path) -> (PathBuf, LocalSplitTrustStore) {
+        let directory = root.join("Game.nsp");
+        let source = b"qualified batch source";
+        let parts: [&[u8]; 2] = [&source[..8], &source[8..]];
+        std::fs::create_dir_all(&directory).expect("create qualified Split directory");
+        for (index, part) in parts.iter().enumerate() {
+            std::fs::write(directory.join(format!("{index:02}")), part)
+                .expect("write qualified Split part");
+        }
+        let manifest = serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "kind": "nscb.split_manifest",
+            "required_features": [],
+            "source": {
+                "size_bytes": source.len(),
+                "sha256": Sha256Digest::digest(source).to_hex(),
+            },
+            "segments": parts
+                .iter()
+                .enumerate()
+                .map(|(index, part)| serde_json::json!({
+                    "name": format!("{index:02}"),
+                    "size_bytes": part.len(),
+                    "sha256": Sha256Digest::digest(part).to_hex(),
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .expect("serialize qualified Split manifest");
+        std::fs::write(root.join("Game.nsp.nscb-split.json"), &manifest)
+            .expect("write qualified Split sidecar");
+
+        let store = LocalSplitTrustStore::new(root.join("state").join("split-trust"));
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(&manifest),
+                source.len() as u64,
+                Sha256Digest::digest(source),
+            ))
+            .expect("issue qualified Split receipt");
+        (directory, store)
+    }
+
+    fn queue_adjacent_sidecar_probe_failure(expected_path: PathBuf) {
+        ADJACENT_SIDECAR_PROBE_CHECKPOINT.with(|checkpoint| {
+            let previous = checkpoint.borrow_mut().replace(Box::new(move |path| {
+                assert_eq!(path, expected_path);
+                Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InputUnavailable,
+                ))
+            }));
+            assert!(previous.is_none(), "checkpoint was already queued");
+        });
+    }
+
+    fn queue_canonical_member_probe_failure(expected_path: PathBuf) {
+        CANONICAL_MEMBER_PROBE_CHECKPOINT.with(|checkpoint| {
+            let previous = checkpoint.borrow_mut().replace(Box::new(move |path| {
+                assert_eq!(path, expected_path);
+                Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InputUnavailable,
+                ))
+            }));
+            assert!(previous.is_none(), "checkpoint was already queued");
+        });
+    }
+
+    fn queue_append_file_failure(expected_path: PathBuf) {
+        APPEND_FILE_FAULT_CHECKPOINT.with(|checkpoint| {
+            let previous = checkpoint.borrow_mut().replace(Box::new(move |path| {
+                if path != expected_path {
+                    return Ok(false);
+                }
+                Err(InputResolutionError::new(
+                    InputResolutionErrorCode::InputUnavailable,
+                ))
+            }));
+            assert!(previous.is_none(), "checkpoint was already queued");
+        });
+    }
+
+    #[test]
+    fn batch_resolution_rejects_an_adjacent_sidecar_probe_error_for_a_direct_directory() {
+        let tree = tempfile::tempdir().expect("create direct sidecar probe fixture");
+        std::fs::write(tree.path().join("ordinary.bin"), b"ordinary")
+            .expect("write viable batch item");
+        let split_directory = write_recognized_split_candidate(tree.path());
+        queue_adjacent_sidecar_probe_failure(
+            std::fs::canonicalize(split_directory).expect("canonical Split directory"),
+        );
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_path("ordinary.bin")
+                    .with_path("Game.nsp"),
+            )
+            .expect_err("sidecar probe uncertainty must reject a direct selection globally");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn batch_resolution_rejects_a_canonical_member_probe_error_for_a_direct_directory() {
+        let tree = tempfile::tempdir().expect("create direct member probe fixture");
+        std::fs::write(tree.path().join("ordinary.bin"), b"ordinary")
+            .expect("write viable batch item");
+        let split_directory = write_unqualified_split_candidate(tree.path());
+        queue_canonical_member_probe_failure(
+            std::fs::canonicalize(split_directory).expect("canonical Split directory"),
+        );
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_path("ordinary.bin")
+                    .with_path("Game.nsp"),
+            )
+            .expect_err("member probe uncertainty must reject a direct selection globally");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn batch_resolution_rejects_an_adjacent_sidecar_probe_error_for_an_input_list() {
+        let tree = tempfile::tempdir().expect("create input-list sidecar probe fixture");
+        std::fs::write(tree.path().join("ordinary.bin"), b"ordinary")
+            .expect("write viable batch item");
+        let split_directory = write_recognized_split_candidate(tree.path());
+        std::fs::write(
+            tree.path().join("selection.json"),
+            br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[{"path":"ordinary.bin"},{"path":"Game.nsp"}]}"#,
+        )
+        .expect("write input list");
+        queue_adjacent_sidecar_probe_failure(
+            std::fs::canonicalize(split_directory).expect("canonical Split directory"),
+        );
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_input_list("selection.json"),
+            )
+            .expect_err("sidecar probe uncertainty must reject an input-list selection globally");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn batch_resolution_rejects_a_canonical_member_probe_error_for_an_input_list() {
+        let tree = tempfile::tempdir().expect("create input-list member probe fixture");
+        std::fs::write(tree.path().join("ordinary.bin"), b"ordinary")
+            .expect("write viable batch item");
+        let split_directory = write_unqualified_split_candidate(tree.path());
+        std::fs::write(
+            tree.path().join("selection.json"),
+            br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[{"path":"ordinary.bin"},{"path":"Game.nsp"}]}"#,
+        )
+        .expect("write input list");
+        queue_canonical_member_probe_failure(
+            std::fs::canonicalize(split_directory).expect("canonical Split directory"),
+        );
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_input_list("selection.json"),
+            )
+            .expect_err("member probe uncertainty must reject an input-list selection globally");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn qualified_split_does_not_make_a_later_ordinary_append_failure_global() {
+        let tree = tempfile::tempdir().expect("create qualified Split batch fixture");
+        let batch = tree.path().join("batch");
+        std::fs::create_dir_all(&batch).expect("create mixed batch directory");
+        let (_split, store) = write_qualified_split_fixture(&batch);
+        let ordinary = batch.join("ordinary.nsp");
+        std::fs::write(&ordinary, b"ordinary").expect("write ordinary batch child");
+        let canonical_ordinary =
+            std::fs::canonicalize(&ordinary).expect("canonical ordinary child");
+        queue_append_file_failure(canonical_ordinary.clone());
+
+        let result = crate::Engine::new()
+            .resolve_inputs_batch_with(
+                super::InputResolutionRequest::new(tree.path().to_path_buf()).with_path("batch"),
+                InputResolutionCapabilities::new().with_split_trust_store(&store),
+            )
+            .expect("a qualified Split must survive a later ordinary append failure");
+
+        assert_eq!(result.entries.len(), 2);
+        let super::InputResolutionBatchEntry::Resolved(split) = &result.entries[0] else {
+            panic!("the qualified Split must remain a successful batch entry");
+        };
+        assert!(split.qualification.is_some());
+        let super::InputResolutionBatchEntry::Failed(failure) = &result.entries[1] else {
+            panic!("the later ordinary child failure must remain item-local");
+        };
+        assert_eq!(failure.code(), InputResolutionErrorCode::InputUnavailable);
+        assert_eq!(failure.requested_path(), canonical_ordinary);
+        assert_eq!(
+            failure.discovered_directory(),
+            Some(std::fs::canonicalize(&batch).unwrap().as_path())
+        );
+        assert_eq!(
+            failure.discovered_relative_path(),
+            Some(Path::new("ordinary.nsp"))
+        );
+    }
+
+    #[test]
+    fn directory_append_failure_preserves_later_ordered_sibling() {
+        let tree = tempfile::tempdir().expect("create ordered append fixture");
+        let batch = tree.path().join("batch");
+        std::fs::create_dir_all(&batch).expect("create ordered append directory");
+        let (_split, store) = write_qualified_split_fixture(&batch);
+        let middle = batch.join("middle.nsp");
+        let final_item = batch.join("z.nsp");
+        std::fs::write(&middle, b"middle").expect("write middle batch child");
+        std::fs::write(&final_item, b"final").expect("write final batch child");
+        let canonical_middle = std::fs::canonicalize(&middle).expect("canonical middle child");
+        let canonical_final = std::fs::canonicalize(&final_item).expect("canonical final child");
+        queue_append_file_failure(canonical_middle.clone());
+
+        let result = crate::Engine::new()
+            .resolve_inputs_batch_with(
+                super::InputResolutionRequest::new(tree.path().to_path_buf()).with_path("batch"),
+                InputResolutionCapabilities::new().with_split_trust_store(&store),
+            )
+            .expect("an item-local append failure must not abort directory expansion");
+
+        assert_eq!(result.entries.len(), 3);
+        let super::InputResolutionBatchEntry::Resolved(split) = &result.entries[0] else {
+            panic!("the qualified Split must remain the first ordered batch entry");
+        };
+        assert!(split.qualification.is_some());
+        assert_eq!(
+            split.logical_selection_path(),
+            std::fs::canonicalize(batch.join("Game.nsp")).expect("canonical Split child")
+        );
+        let super::InputResolutionBatchEntry::Failed(failure) = &result.entries[1] else {
+            panic!("the middle ordinary append failure must remain in order");
+        };
+        assert_eq!(failure.code(), InputResolutionErrorCode::InputUnavailable);
+        assert_eq!(failure.requested_path(), canonical_middle);
+        assert_eq!(
+            failure.discovered_directory(),
+            Some(std::fs::canonicalize(&batch).unwrap().as_path())
+        );
+        assert_eq!(
+            failure.discovered_relative_path(),
+            Some(Path::new("middle.nsp"))
+        );
+        let super::InputResolutionBatchEntry::Resolved(final_resolved) = &result.entries[2] else {
+            panic!("the viable sibling after the failure must remain in order");
+        };
+        assert_eq!(final_resolved.logical_selection_path(), canonical_final);
+    }
+
+    #[test]
+    fn single_resolution_rejects_an_item_local_directory_failure() {
+        let tree = tempfile::tempdir().expect("create single-resolution fixture");
+        let batch = tree.path().join("batch");
+        std::fs::create_dir_all(&batch).expect("create single-resolution directory");
+        let middle = batch.join("middle.nsp");
+        std::fs::write(batch.join("a.nsp"), b"first").expect("write first single child");
+        std::fs::write(&middle, b"middle").expect("write middle single child");
+        std::fs::write(batch.join("z.nsp"), b"final").expect("write final single child");
+        queue_append_file_failure(std::fs::canonicalize(&middle).expect("canonical middle child"));
+
+        let error = crate::Engine::new()
+            .resolve_inputs(
+                super::InputResolutionRequest::new(tree.path().to_path_buf()).with_path("batch"),
+            )
+            .expect_err("single resolution must reject an incomplete directory selection");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn later_ordinary_scan_failure_stays_item_local_after_a_split_candidate() {
+        let tree = tempfile::tempdir().expect("create mixed scan fixture");
+        std::fs::write(tree.path().join("present.bin"), b"present")
+            .expect("write viable top-level item");
+        let batch = tree.path().join("batch");
+        std::fs::create_dir_all(&batch).expect("create mixed scan directory");
+        let (_split, store) = write_qualified_split_fixture(&batch);
+        let ordinary = batch.join("ordinary.nsp");
+        std::fs::write(&ordinary, b"ordinary").expect("write ordinary scan child");
+        let canonical_ordinary =
+            std::fs::canonicalize(&ordinary).expect("canonical ordinary child");
+        let fault_triggered = Arc::new(AtomicBool::new(false));
+        let checkpoint_fault_triggered = Arc::clone(&fault_triggered);
+        let expected_ordinary = canonical_ordinary.clone();
+        SCAN_DIRECTORY_ENTRY_CHECKPOINT.with(|checkpoint| {
+            let previous = checkpoint.borrow_mut().replace(Box::new(move |path| {
+                if path != expected_ordinary {
+                    return false;
+                }
+                std::fs::remove_file(&ordinary).expect("remove ordinary child during scan");
+                checkpoint_fault_triggered.store(true, Ordering::SeqCst);
+                true
+            }));
+            assert!(previous.is_none(), "checkpoint was already queued");
+        });
+
+        let result = crate::Engine::new()
+            .resolve_inputs_batch_with(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_path("present.bin")
+                    .with_path("batch"),
+                InputResolutionCapabilities::new().with_split_trust_store(&store),
+            )
+            .expect("a later ordinary scan failure must not reject the batch");
+
+        assert!(
+            fault_triggered.load(Ordering::SeqCst),
+            "the ordinary-child scan fault must fire"
+        );
+        assert_eq!(result.entries.len(), 3);
+        assert!(matches!(
+            &result.entries[0],
+            super::InputResolutionBatchEntry::Resolved(_)
+        ));
+        let super::InputResolutionBatchEntry::Resolved(split) = &result.entries[1] else {
+            panic!("the qualified Split must remain successful");
+        };
+        assert!(split.qualification.is_some());
+        let super::InputResolutionBatchEntry::Failed(failure) = &result.entries[2] else {
+            panic!("the ordinary scan failure must remain item-local");
+        };
+        assert_eq!(failure.code(), InputResolutionErrorCode::InputUnavailable);
+        assert_eq!(failure.requested_path(), canonical_ordinary);
+        assert_eq!(
+            failure.discovered_directory(),
+            Some(std::fs::canonicalize(&batch).unwrap().as_path())
+        );
+        assert_eq!(
+            failure.discovered_relative_path(),
+            Some(Path::new("ordinary.nsp"))
+        );
+    }
+
+    #[test]
+    fn directory_scan_failure_preserves_later_ordered_sibling() {
+        let tree = tempfile::tempdir().expect("create ordered scan fixture");
+        let batch = tree.path().join("batch");
+        std::fs::create_dir_all(&batch).expect("create ordered scan directory");
+        let first = batch.join("a.nsp");
+        let middle = batch.join("middle.nsp");
+        let final_item = batch.join("z.nsp");
+        std::fs::write(&first, b"first").expect("write first scan child");
+        std::fs::write(&middle, b"middle").expect("write middle scan child");
+        std::fs::write(&final_item, b"final").expect("write final scan child");
+        let canonical_first = std::fs::canonicalize(&first).expect("canonical first child");
+        let canonical_middle = std::fs::canonicalize(&middle).expect("canonical middle child");
+        let canonical_final = std::fs::canonicalize(&final_item).expect("canonical final child");
+        let fault_triggered = Arc::new(AtomicBool::new(false));
+        let checkpoint_fault_triggered = Arc::clone(&fault_triggered);
+        let expected_middle = canonical_middle.clone();
+        SCAN_DIRECTORY_ENTRY_CHECKPOINT.with(|checkpoint| {
+            let previous = checkpoint.borrow_mut().replace(Box::new(move |path| {
+                if path != expected_middle {
+                    return false;
+                }
+                std::fs::remove_file(&middle).expect("remove middle child during scan");
+                checkpoint_fault_triggered.store(true, Ordering::SeqCst);
+                true
+            }));
+            assert!(previous.is_none(), "checkpoint was already queued");
+        });
+
+        let result = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf()).with_path("batch"),
+            )
+            .expect("an item-local scan failure must not abort directory expansion");
+
+        assert!(
+            fault_triggered.load(Ordering::SeqCst),
+            "the middle-child scan fault must fire"
+        );
+        assert_eq!(result.entries.len(), 3);
+        let super::InputResolutionBatchEntry::Resolved(first_resolved) = &result.entries[0] else {
+            panic!("the first viable child must remain first");
+        };
+        assert_eq!(first_resolved.logical_selection_path(), canonical_first);
+        let super::InputResolutionBatchEntry::Failed(failure) = &result.entries[1] else {
+            panic!("the middle scan failure must remain in order");
+        };
+        assert_eq!(failure.code(), InputResolutionErrorCode::InputUnavailable);
+        assert_eq!(failure.requested_path(), canonical_middle);
+        assert_eq!(
+            failure.discovered_directory(),
+            Some(std::fs::canonicalize(&batch).unwrap().as_path())
+        );
+        assert_eq!(
+            failure.discovered_relative_path(),
+            Some(Path::new("middle.nsp"))
+        );
+        let super::InputResolutionBatchEntry::Resolved(final_resolved) = &result.entries[2] else {
+            panic!("the viable sibling after the scan failure must remain in order");
+        };
+        assert_eq!(final_resolved.logical_selection_path(), canonical_final);
+    }
+
+    #[test]
+    fn batch_resolution_rejects_unavailable_direct_split_qualification() {
+        let tree = tempfile::tempdir().expect("create direct Split fixture");
+        std::fs::write(tree.path().join("ordinary.bin"), b"ordinary")
+            .expect("write viable batch item");
+        write_recognized_split_candidate(tree.path());
+        queue_split_qualification_failure(super::InputSelectionSource::Path, None, None);
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_path("ordinary.bin")
+                    .with_path("Game.nsp"),
+            )
+            .expect_err("a recognized Split qualification failure must reject the batch");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn batch_resolution_rejects_unavailable_input_list_split_qualification() {
+        let tree = tempfile::tempdir().expect("create input-list Split fixture");
+        std::fs::write(tree.path().join("ordinary.bin"), b"ordinary")
+            .expect("write viable batch item");
+        write_recognized_split_candidate(tree.path());
+        std::fs::write(
+            tree.path().join("selection.json"),
+            br#"{"schema_version":1,"kind":"nscb.input_list","required_features":[],"entries":[{"path":"Game.nsp"},{"path":"ordinary.bin"}]}"#,
+        )
+        .expect("write input list");
+        queue_split_qualification_failure(
+            super::InputSelectionSource::InputList,
+            Some(0),
+            Some("Game.nsp"),
+        );
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch(
+                super::InputResolutionRequest::new(tree.path().to_path_buf())
+                    .with_input_list("selection.json"),
+            )
+            .expect_err("an input-list Split qualification failure must reject the batch");
+
+        assert_eq!(error.code(), InputResolutionErrorCode::InputUnavailable);
+    }
+
+    #[test]
+    fn batch_resolution_checks_cancellation_between_base_directory_validations() {
+        let tree = tempfile::tempdir().expect("create base validation fixture");
+        let control = Arc::new(InputResolutionControl::new());
+        let checkpoint_control = Arc::clone(&control);
+        BASE_DIRECTORY_VALIDATION_CHECKPOINT.with(|checkpoint| {
+            *checkpoint.borrow_mut() = Some(Box::new(move || checkpoint_control.cancel()));
+        });
+
+        let error = crate::Engine::new()
+            .resolve_inputs_batch_request_with(
+                super::InputResolutionBatchRequest::new()
+                    .with_path(tree.path().to_path_buf(), "present.bin")
+                    .with_path(std::path::PathBuf::from("relative-base"), "second.bin"),
+                InputResolutionCapabilities::new().with_control(control.as_ref()),
+            )
+            .expect_err("cancellation after the first base must precede the second base check");
+
+        assert_eq!(
+            error.code(),
+            InputResolutionErrorCode::SplitResolutionCancelled
+        );
     }
 
     #[test]
@@ -1678,6 +3158,7 @@ mod tests {
             selection_index: 0,
             source: super::InputSelectionSource::Path,
             selection_path: split_path.clone(),
+            base_directory: std::path::PathBuf::from("/"),
             input_list_entry_index: None,
             input_list_entry_path: None,
         };
@@ -1703,5 +3184,59 @@ mod tests {
         assert_eq!(progress.completed_bytes, 0);
         assert_eq!(progress.total_bytes, None);
         assert!(!control.is_cancelled());
+    }
+
+    #[test]
+    fn control_observes_a_bound_invocation_cancellation_handle() {
+        let cancellation = CancellationHandle::new();
+        let control = InputResolutionControl::new().with_cancellation(cancellation.clone());
+
+        assert!(!control.is_cancelled());
+        cancellation.cancel();
+        assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn directory_scan_observes_cancellation_between_entries() {
+        let tree = tempfile::tempdir().expect("create traversal cancellation fixture");
+        std::fs::write(tree.path().join("present.nsp"), b"present")
+            .expect("write traversal candidate");
+        let root = std::fs::canonicalize(tree.path()).expect("canonical traversal root");
+        let control = Arc::new(InputResolutionControl::new());
+        let checkpoint_control = Arc::clone(&control);
+        SCAN_DIRECTORY_ENTRY_CHECKPOINT.with(|checkpoint| {
+            *checkpoint.borrow_mut() = Some(Box::new(move |_| {
+                checkpoint_control.cancel();
+                true
+            }));
+        });
+        let mut resolver = Resolver::new(
+            false,
+            false,
+            None,
+            Some(control.as_ref()),
+            DEFAULT_MAX_SPLIT_VALIDATION_BYTES,
+        );
+        let mut visited = HashSet::new();
+        let mut active = HashSet::new();
+        let mut found = Vec::new();
+
+        let error = resolver
+            .scan_directory(
+                &root,
+                &root,
+                Path::new(""),
+                0,
+                &mut visited,
+                &mut active,
+                &mut found,
+            )
+            .expect_err("cancellation between traversal entries must stop the scan");
+
+        assert_eq!(
+            error.code(),
+            InputResolutionErrorCode::SplitResolutionCancelled
+        );
+        assert!(found.is_empty());
     }
 }

@@ -1,19 +1,23 @@
 #[cfg(target_os = "macos")]
 use crate::cli_reporting::{ReportingControl, ReportingSession};
 use crate::standalone::history::{
-    AdmissionInput, AdmissionItem, ConflictPolicyProvenance, ConflictPolicyRecord,
-    DestinationSelection, HistoryError, HistoryStore, JobDetail, JobKind, JobLease, JobSummary,
-    PendingAdmission, RetryScope, SubmissionKind, WorkspaceSelection,
+    AdmissionInput, AdmissionItem, AdmissionSource, BatchFailedItemsRetryIntent,
+    COPY_BATCH_ITEM_PROVENANCE_KIND, COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
+    ConflictPolicyProvenance, ConflictPolicyRecord, DestinationSelection, HistoryError,
+    HistoryStore, JobDetail, JobKind, JobLease, JobSummary, PendingAdmission, RetryScope,
+    SubmissionKind, WorkspaceSelection,
 };
 use crate::standalone::{CopyDestinationSelection, StandaloneConfig};
 use nscb::{
     CancellationHandle, ConflictPolicy, ContainerProbeError, ContainerProbeErrorCode,
-    CopyThroughRequest, Engine, InputResolutionCapabilities, InputResolutionRequest,
-    InputSelectionSource, InspectionErrorCode, InspectionHost, InspectionPreflightStatus,
-    InspectionRequest, InspectionResult, JobState, LocalSplitTrustStore, OperationEventConsumer,
-    OperationEventKind, OperationFailureCode, OperationPlan, OperationResult, OperationSession,
-    OperationSessionSnapshot, SplitQualificationKind, VerificationErrorCode, VerificationProfile,
-    VerificationRequest,
+    CopyBatchCheckpointError, CopyBatchEventConsumer, CopyBatchEventKind, CopyBatchPlan,
+    CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyBatchSessionSnapshot,
+    CopyThroughRequest, Engine, InputResolutionCapabilities, InputResolutionControl,
+    InputResolutionRequest, InputSelection, InputSelectionSource, InspectionErrorCode,
+    InspectionHost, InspectionPreflightStatus, InspectionRequest, InspectionResult, JobState,
+    LocalSplitTrustStore, OperationEventConsumer, OperationEventKind, OperationFailureCode,
+    OperationPlan, OperationResult, OperationSession, OperationSessionSnapshot,
+    SplitQualificationKind, VerificationErrorCode, VerificationProfile, VerificationRequest,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -28,6 +32,7 @@ const EXIT_INPUT: i32 = 3;
 const EXIT_CONFLICT: i32 = 4;
 const EXIT_CANCELLED: i32 = 6;
 const EXIT_INTERNAL: i32 = 7;
+const EXIT_COMPLETED_WITH_ISSUES: i32 = 8;
 
 #[derive(Serialize)]
 struct SuccessDocument<'a, T> {
@@ -483,9 +488,25 @@ pub(crate) fn is_copy_command(args: &[OsString]) -> bool {
         .is_some_and(|argument| argument == OsStr::new("copy"))
 }
 
+pub(crate) fn is_copy_batch_command(args: &[OsString]) -> bool {
+    args.first()
+        .is_some_and(|argument| argument == OsStr::new("copy-batch"))
+}
+
+/// Reports machine output requested before the positional delimiter.
+///
+/// Parsing normally supplies the authoritative mode. This fallback is used
+/// only when parsing fails and the CLI must still choose the diagnostic stream.
+fn machine_output_requested_before_delimiter(args: &[OsString]) -> bool {
+    args.iter()
+        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
+        .any(|argument| argument == OsStr::new("--json") || argument == OsStr::new("--jsonl"))
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn requires_reporting_session(args: &[OsString]) -> bool {
     is_copy_command(args)
+        || is_copy_batch_command(args)
         || (args
             .first()
             .is_some_and(|argument| argument == OsStr::new("jobs"))
@@ -524,6 +545,18 @@ fn run_with_control(
         #[cfg(not(target_os = "macos"))]
         {
             return run_copy_with_standalone_config(args, engine, standalone, stdout, stderr);
+        }
+    }
+    if is_copy_batch_command(args) {
+        #[cfg(target_os = "macos")]
+        {
+            return run_copy_batch_with_control(
+                args, engine, standalone, stdout, stderr, reporting,
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return run_copy_batch(args, engine, standalone, stdout, stderr);
         }
     }
 
@@ -1764,6 +1797,7 @@ fn run_jobs_command(
                 parsed.positional.first().expect("retry parser requires ID"),
                 JobsRetryOptions {
                     replace: parsed.replace,
+                    skip: parsed.skip,
                     failed_items: parsed.failed_items,
                     json: parsed.json,
                     jsonl: parsed.jsonl,
@@ -1782,6 +1816,7 @@ fn run_jobs_command(
 
 #[derive(Default)]
 struct ParsedJobsCommand {
+    skip: bool,
     positional: Vec<OsString>,
     json: bool,
     jsonl: bool,
@@ -1791,6 +1826,7 @@ struct ParsedJobsCommand {
 
 #[derive(Clone, Copy)]
 struct JobsRetryOptions {
+    skip: bool,
     replace: bool,
     failed_items: bool,
     json: bool,
@@ -1834,6 +1870,11 @@ fn parse_jobs_retry(args: &[OsString]) -> Result<ParsedJobsCommand, ()> {
                 return Err(());
             }
             parsed.failed_items = true;
+        } else if argument == OsStr::new("--skip") {
+            if parsed.skip {
+                return Err(());
+            }
+            parsed.skip = true;
         } else if argument == OsStr::new("--json") {
             if parsed.json || parsed.jsonl {
                 return Err(());
@@ -1854,6 +1895,9 @@ fn parse_jobs_retry(args: &[OsString]) -> Result<ParsedJobsCommand, ()> {
         }
     }
     if parsed.positional.len() != 1 {
+        return Err(());
+    }
+    if parsed.replace && parsed.skip {
         return Err(());
     }
     Ok(parsed)
@@ -2061,15 +2105,19 @@ fn run_jobs_retry(
         Err(error) => return emit_jobs_error(error, machine_requested, stdout, stderr),
     };
     if options.failed_items {
-        return match store.retry_failed_item_keys(job_id) {
-            Ok(_) => emit_jobs_error(
-                HistoryError::UnsupportedFailedItems,
-                machine_requested,
-                stdout,
-                stderr,
-            ),
-            Err(error) => emit_jobs_error(error, machine_requested, stdout, stderr),
+        let intent = match store.failed_items_retry_intent(job_id) {
+            Ok(intent) => intent,
+            Err(error) => return emit_jobs_error(error, machine_requested, stdout, stderr),
         };
+        return execute_copy_batch_failed_items_retry(
+            intent,
+            options,
+            engine,
+            stdout,
+            stderr,
+            #[cfg(target_os = "macos")]
+            reporting,
+        );
     }
     let intent = match store.retry_intent(job_id) {
         Ok(intent) => intent,
@@ -2133,9 +2181,17 @@ fn run_jobs_retry(
         destination_selection,
         workspace,
         workspace_selection,
-        replace: options.replace,
+        conflict_policy: if options.replace {
+            ConflictPolicy::Replace
+        } else if options.skip {
+            ConflictPolicy::Skip
+        } else {
+            ConflictPolicy::Fail
+        },
         conflict_policy_provenance: if options.replace {
             ConflictPolicyProvenance::RetryExplicitReplace
+        } else if options.skip {
+            ConflictPolicyProvenance::RetryExplicitSkip
         } else {
             ConflictPolicyProvenance::RetryDefault
         },
@@ -2167,6 +2223,331 @@ struct CopyInvocation {
     jsonl: bool,
 }
 
+fn execute_copy_batch_failed_items_retry(
+    intent: BatchFailedItemsRetryIntent,
+    options: JobsRetryOptions,
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let machine_requested = options.json || options.jsonl;
+    let retry_invocation_cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_jobs_error(
+                HistoryError::DirectoryUnavailable,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    if let Err(exit) =
+        validate_invocation_cwd(&retry_invocation_cwd, machine_requested, stdout, stderr)
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        return exit;
+    }
+    let cancellation = match scoped_cancellation() {
+        Ok(cancellation) => cancellation,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return if machine_requested {
+                emit_error(stdout, "signal_handler_failed", EXIT_INTERNAL)
+            } else {
+                let _ =
+                    write_copy_record(stderr, crate::localization::english::copy_signal_failure());
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let workspace = match intent.workspace_selection {
+        WorkspaceSelection::Explicit => intent.workspace.clone(),
+        WorkspaceSelection::HostDefault => default_copy_workspace(),
+    };
+    if machine_requested {
+        let mut paths = intent
+            .items
+            .iter()
+            .flat_map(|item| {
+                std::iter::once(item.source.as_path()).chain(item.destination.as_deref())
+            })
+            .collect::<Vec<_>>();
+        paths.push(intent.destination.as_path());
+        paths.push(workspace.as_path());
+        if !paths_are_json_representable(paths) {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_error(stdout, "unrepresentable_path", EXIT_INPUT);
+        }
+    }
+    let resolution_control =
+        InputResolutionControl::new().with_cancellation(cancellation.handle().clone());
+    if let Err(error) = revalidate_failed_items_split_inputs(&intent, engine, &resolution_control) {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        let code = match error {
+            FailedItemsSplitRevalidationError::Changed => {
+                return emit_jobs_error(
+                    HistoryError::UnsupportedFailedItems,
+                    machine_requested,
+                    stdout,
+                    stderr,
+                );
+            }
+            FailedItemsSplitRevalidationError::Resolver(code) => code,
+        };
+        let exit = input_resolution_exit_code(code);
+        return if machine_requested {
+            emit_error(stdout, code.as_str(), exit)
+        } else if write_copy_record(
+            stderr,
+            crate::localization::english::input_resolution_error(code),
+        ) {
+            exit
+        } else {
+            EXIT_INTERNAL
+        };
+    }
+    let (conflict_policy, conflict_policy_provenance) = if options.replace {
+        (
+            ConflictPolicy::Replace,
+            ConflictPolicyProvenance::RetryExplicitReplace,
+        )
+    } else if options.skip {
+        (
+            ConflictPolicy::Skip,
+            ConflictPolicyProvenance::RetryExplicitSkip,
+        )
+    } else {
+        (ConflictPolicy::Fail, ConflictPolicyProvenance::RetryDefault)
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(reporting) = reporting {
+        reporting.begin_planning();
+    }
+    let mut request = if intent.workspace_selection == WorkspaceSelection::HostDefault {
+        CopyBatchRequest::with_host_default_workspace(&intent.destination, &workspace)
+    } else {
+        CopyBatchRequest::new(&intent.destination, &workspace)
+    }
+    .with_conflict_policy(conflict_policy);
+    for item in &intent.items {
+        let Some(destination) = item.destination.clone() else {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_jobs_error(
+                HistoryError::UnsupportedFailedItems,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        };
+        request = if let Some(qualification) = item.split_qualification.clone() {
+            request.with_keyed_qualified_split_input_unsupported(
+                item.item_key.clone(),
+                item.source.clone(),
+                destination,
+                qualification,
+            )
+        } else {
+            request.with_keyed_item(item.item_key.clone(), item.source.clone(), destination)
+        };
+    }
+    let plan = match engine.plan_copy_batch(request) {
+        Ok(plan) => plan,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            let exit = exit_for_operation_failure(error.code());
+            if machine_requested {
+                return emit_error(stdout, error.code().as_str(), exit);
+            }
+            return if write_copy_record(
+                stderr,
+                crate::localization::english::copy_error(error.code()),
+            ) {
+                exit
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let items = intent.items.clone();
+    let batch_intent = serde_json::json!({
+        "schema_version": 1,
+        "kind": "nscb.copy_batch_intent",
+        "parent_job_id": intent.job_id,
+        "retry_scope": "failed_items",
+        "plan": plan.snapshot(),
+        "selections": items
+            .iter()
+            .map(|item| item.provenance.clone())
+            .collect::<Vec<_>>(),
+    });
+    let history_input = AdmissionInput {
+        kind: JobKind::CopyThrough,
+        submission_kind: SubmissionKind::IndependentBatch,
+        invocation_cwd: retry_invocation_cwd,
+        source: AdmissionSource::IndependentBatch,
+        destination: intent.destination,
+        destination_selection: intent.destination_selection,
+        workspace,
+        workspace_selection: intent.workspace_selection,
+        conflict_policy: history_conflict_policy(conflict_policy),
+        conflict_policy_provenance,
+        parent_conflict_policy: Some(intent.conflict_policy),
+        parent_conflict_policy_provenance: Some(intent.conflict_policy_provenance),
+        parent_job_id: Some(intent.job_id),
+        retry_scope: RetryScope::FailedItems,
+        required_providers: Vec::new(),
+        required_keys: Vec::new(),
+        items,
+        batch_intent: Some(batch_intent),
+    };
+    execute_copy_batch_prepared(
+        engine,
+        PreparedCopyBatch {
+            plan,
+            history_input: Some(history_input),
+            json: options.json,
+            jsonl: options.jsonl,
+        },
+        cancellation,
+        stdout,
+        stderr,
+        #[cfg(target_os = "macos")]
+        reporting,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailedItemsSplitRevalidationError {
+    /// Persisted evidence no longer matches the current Split selection.
+    Changed,
+    /// Input resolution stopped with a stable operational error.
+    Resolver(nscb::InputResolutionErrorCode),
+}
+
+/// Revalidates saved Split selections in order before a failed-items retry.
+///
+/// One batch resolver receives only the saved logical paths under their recorded
+/// bases. It rechecks current trust, manifest, and member state while sharing
+/// duplicate detection and resource limits across every saved Split item.
+fn revalidate_failed_items_split_inputs(
+    intent: &BatchFailedItemsRetryIntent,
+    engine: &Engine,
+    control: &InputResolutionControl,
+) -> Result<(), FailedItemsSplitRevalidationError> {
+    let trust_store = LocalSplitTrustStore::from_environment();
+    let capabilities = InputResolutionCapabilities::new()
+        .with_split_trust_store(&trust_store)
+        .with_control(control);
+    revalidate_failed_item_split_selections(&intent.items, engine, capabilities)
+}
+
+fn revalidate_failed_item_split_selections(
+    items: &[AdmissionItem],
+    engine: &Engine,
+    capabilities: InputResolutionCapabilities<'_>,
+) -> Result<(), FailedItemsSplitRevalidationError> {
+    let mut request = nscb::InputResolutionBatchRequest::new();
+    let mut expected = Vec::new();
+    for item in items {
+        let Some(qualification) = item.split_qualification.as_ref() else {
+            if item.split_manifest_sha256.is_some() {
+                return Err(FailedItemsSplitRevalidationError::Changed);
+            }
+            continue;
+        };
+        let Some(expected_manifest_sha256) = item.split_manifest_sha256 else {
+            return Err(FailedItemsSplitRevalidationError::Changed);
+        };
+        let Some(base_directory) = item
+            .provenance
+            .as_ref()
+            .and_then(|provenance| provenance.get("base_directory"))
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+        else {
+            return Err(FailedItemsSplitRevalidationError::Changed);
+        };
+        if !base_directory.is_absolute() || !item.source.is_absolute() {
+            return Err(FailedItemsSplitRevalidationError::Changed);
+        }
+        let canonical_base_directory = std::fs::canonicalize(&base_directory).map_err(|_| {
+            FailedItemsSplitRevalidationError::Resolver(
+                nscb::InputResolutionErrorCode::InvalidBaseDirectory,
+            )
+        })?;
+        if canonical_base_directory != base_directory {
+            return Err(FailedItemsSplitRevalidationError::Resolver(
+                nscb::InputResolutionErrorCode::InvalidBaseDirectory,
+            ));
+        }
+        let expected_source = std::fs::canonicalize(&item.source).map_err(|_| {
+            FailedItemsSplitRevalidationError::Resolver(
+                nscb::InputResolutionErrorCode::InputUnavailable,
+            )
+        })?;
+        request = request.with_path(base_directory, item.source.clone());
+        expected.push((expected_source, qualification, expected_manifest_sha256));
+    }
+    if expected.is_empty() {
+        return Ok(());
+    }
+
+    let resolved = engine
+        .resolve_inputs_batch_request_with(request, capabilities)
+        .map_err(|error| FailedItemsSplitRevalidationError::Resolver(error.code()))?;
+    if resolved.entries.len() != expected.len() {
+        return Err(FailedItemsSplitRevalidationError::Changed);
+    }
+    for ((expected_source, qualification, expected_manifest_sha256), entry) in
+        expected.into_iter().zip(resolved.entries)
+    {
+        let current = match entry {
+            nscb::InputResolutionBatchEntry::Resolved(current) => current,
+            nscb::InputResolutionBatchEntry::Failed(failure) => {
+                return Err(FailedItemsSplitRevalidationError::Resolver(failure.code()));
+            }
+            _ => return Err(FailedItemsSplitRevalidationError::Changed),
+        };
+        let current_source =
+            std::fs::canonicalize(current.logical_selection_path()).map_err(|_| {
+                FailedItemsSplitRevalidationError::Resolver(
+                    nscb::InputResolutionErrorCode::InputUnavailable,
+                )
+            })?;
+        if current_source != expected_source
+            || current.qualification.as_ref() != Some(qualification)
+            || current.split_manifest_sha256() != Some(&expected_manifest_sha256)
+        {
+            return Err(FailedItemsSplitRevalidationError::Changed);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct ResolvedCopyJob {
     invocation_cwd: PathBuf,
@@ -2175,7 +2556,7 @@ struct ResolvedCopyJob {
     destination_selection: DestinationSelection,
     workspace: PathBuf,
     workspace_selection: WorkspaceSelection,
-    replace: bool,
+    conflict_policy: ConflictPolicy,
     conflict_policy_provenance: ConflictPolicyProvenance,
     parent_job_id: Option<String>,
     parent_conflict_policy: Option<ConflictPolicyRecord>,
@@ -2271,16 +2652,12 @@ impl ResolvedCopyJob {
             kind: JobKind::CopyThrough,
             submission_kind: SubmissionKind::Single,
             invocation_cwd: self.invocation_cwd.clone(),
-            source: self.source.clone(),
+            source: AdmissionSource::Single(self.source.clone()),
             destination: self.destination.clone(),
             destination_selection: self.destination_selection,
             workspace: self.workspace.clone(),
             workspace_selection: self.workspace_selection,
-            conflict_policy: if self.replace {
-                ConflictPolicyRecord::Replace
-            } else {
-                ConflictPolicyRecord::Fail
-            },
+            conflict_policy: history_conflict_policy(self.conflict_policy),
             conflict_policy_provenance: self.conflict_policy_provenance,
             parent_conflict_policy: self.parent_conflict_policy,
             parent_conflict_policy_provenance: self.parent_conflict_policy_provenance,
@@ -2288,12 +2665,879 @@ impl ResolvedCopyJob {
             retry_scope: RetryScope::All,
             required_providers: snapshot.required_providers().to_vec(),
             required_keys: snapshot.required_keys().to_vec(),
+            batch_intent: None,
             items: vec![AdmissionItem {
                 item_key: "copy-through".to_owned(),
                 source: self.source.clone(),
-                destination: self.destination.clone(),
+                destination: Some(self.destination.clone()),
+                provenance: None,
+                split_qualification: None,
+                split_manifest_sha256: None,
             }],
         }
+    }
+}
+
+struct CopyBatchInvocation {
+    output_directory: PathBuf,
+    selections: Vec<InputSelection>,
+    workspace: Option<PathBuf>,
+    recursive: bool,
+    follow_symlinks: bool,
+    conflict_policy: ConflictPolicy,
+    json: bool,
+    jsonl: bool,
+}
+
+struct ResolvedCopyBatchItem {
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    provenance: serde_json::Value,
+    forced_failure: Option<OperationFailureCode>,
+    qualified_split: Option<nscb::ResolvedInput>,
+    resolver_failure: Option<nscb::InputResolutionFailure>,
+}
+
+struct PreparedCopyBatch {
+    plan: CopyBatchPlan,
+    history_input: Option<AdmissionInput>,
+    json: bool,
+    jsonl: bool,
+}
+
+#[derive(Serialize)]
+struct CopyBatchJobEventDocument {
+    schema_version: u8,
+    kind: &'static str,
+    nscb_version: &'static str,
+    submission_kind: &'static str,
+    sequence: u64,
+    snapshot: CopyBatchSessionSnapshot,
+    #[serde(flatten)]
+    event: CopyBatchEventKind,
+}
+
+#[derive(Serialize)]
+struct CopyBatchJobResultDocument<'a> {
+    schema_version: u8,
+    kind: &'static str,
+    nscb_version: &'static str,
+    submission_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_error: Option<&'static str>,
+    sequence: u64,
+    snapshot: CopyBatchSessionSnapshot,
+    result: &'a CopyBatchResult,
+}
+
+fn parse_copy_batch(args: &[OsString]) -> Result<CopyBatchInvocation, ()> {
+    if args
+        .first()
+        .is_none_or(|argument| argument != OsStr::new("copy-batch"))
+    {
+        return Err(());
+    }
+    let mut output_directory = None;
+    let mut selections = Vec::new();
+    let mut workspace = None;
+    let mut recursive = false;
+    let mut follow_symlinks = false;
+    let mut conflict_policy = None;
+    let mut json = false;
+    let mut jsonl = false;
+    let mut positional_only = false;
+    let mut index = 1;
+    while index < args.len() {
+        let argument = &args[index];
+        if !positional_only && argument == OsStr::new("--") {
+            positional_only = true;
+        } else if !positional_only && argument == OsStr::new("--output-dir") {
+            if output_directory.is_some() {
+                return Err(());
+            }
+            index += 1;
+            let value = args.get(index).ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            output_directory = Some(PathBuf::from(value));
+        } else if !positional_only && argument == OsStr::new("--workspace") {
+            if workspace.is_some() {
+                return Err(());
+            }
+            index += 1;
+            let value = args.get(index).ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            workspace = Some(PathBuf::from(value));
+        } else if !positional_only && argument == OsStr::new("--input-list") {
+            index += 1;
+            let value = args.get(index).ok_or(())?;
+            if value.to_str().is_some_and(|value| value.starts_with("--")) {
+                return Err(());
+            }
+            selections.push(InputSelection::InputList(PathBuf::from(value)));
+        } else if !positional_only && argument == OsStr::new("--conflict") {
+            if conflict_policy.is_some() {
+                return Err(());
+            }
+            index += 1;
+            conflict_policy = Some(match args.get(index).and_then(|value| value.to_str()) {
+                Some("fail") => ConflictPolicy::Fail,
+                Some("replace") => ConflictPolicy::Replace,
+                Some("skip") => ConflictPolicy::Skip,
+                _ => return Err(()),
+            });
+        } else if !positional_only && argument == OsStr::new("--replace") {
+            if conflict_policy.replace(ConflictPolicy::Replace).is_some() {
+                return Err(());
+            }
+        } else if !positional_only && argument == OsStr::new("--skip") {
+            if conflict_policy.replace(ConflictPolicy::Skip).is_some() {
+                return Err(());
+            }
+        } else if !positional_only && argument == OsStr::new("--recursive") {
+            if recursive {
+                return Err(());
+            }
+            recursive = true;
+        } else if !positional_only && argument == OsStr::new("--follow-symlinks") {
+            if follow_symlinks {
+                return Err(());
+            }
+            follow_symlinks = true;
+        } else if !positional_only && argument == OsStr::new("--json") {
+            if json || jsonl {
+                return Err(());
+            }
+            json = true;
+        } else if !positional_only && argument == OsStr::new("--jsonl") {
+            if json || jsonl {
+                return Err(());
+            }
+            jsonl = true;
+        } else if !positional_only
+            && argument
+                .to_str()
+                .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else {
+            selections.push(InputSelection::Path(PathBuf::from(argument)));
+        }
+        index += 1;
+    }
+    let output_directory = output_directory.ok_or(())?;
+    if selections.is_empty() {
+        return Err(());
+    }
+    Ok(CopyBatchInvocation {
+        output_directory,
+        selections,
+        workspace,
+        recursive,
+        follow_symlinks,
+        conflict_policy: conflict_policy.unwrap_or(ConflictPolicy::Fail),
+        json,
+        jsonl,
+    })
+}
+
+fn history_conflict_policy(policy: ConflictPolicy) -> ConflictPolicyRecord {
+    match policy {
+        ConflictPolicy::Fail => ConflictPolicyRecord::Fail,
+        ConflictPolicy::Replace => ConflictPolicyRecord::Replace,
+        ConflictPolicy::Skip => ConflictPolicyRecord::Skip,
+        _ => ConflictPolicyRecord::Fail,
+    }
+}
+
+fn copy_batch_admission_input(
+    plan: &CopyBatchPlan,
+    mapped: &[ResolvedCopyBatchItem],
+    invocation_cwd: &Path,
+    workspace_selection: WorkspaceSelection,
+) -> AdmissionInput {
+    let snapshot = plan.snapshot();
+    let items = snapshot
+        .items()
+        .iter()
+        .zip(mapped)
+        .map(|(item, selection)| AdmissionItem {
+            item_key: item.item_key().to_owned(),
+            source: item.source().to_path_buf(),
+            destination: item.destination().map(Path::to_path_buf),
+            provenance: Some(copy_batch_selection_provenance(selection)),
+            split_qualification: None,
+            split_manifest_sha256: None,
+        })
+        .collect::<Vec<_>>();
+    let batch_intent = serde_json::json!({
+        "schema_version": 1,
+        "kind": "nscb.copy_batch_intent",
+        "plan": snapshot,
+        "selections": mapped
+            .iter()
+            .map(copy_batch_selection_provenance)
+            .collect::<Vec<_>>(),
+    });
+    AdmissionInput {
+        kind: JobKind::CopyThrough,
+        submission_kind: SubmissionKind::IndependentBatch,
+        invocation_cwd: invocation_cwd.to_path_buf(),
+        source: AdmissionSource::IndependentBatch,
+        destination: snapshot.destination_directory().to_path_buf(),
+        destination_selection: DestinationSelection::Explicit,
+        workspace: snapshot.workspace().to_path_buf(),
+        workspace_selection,
+        conflict_policy: history_conflict_policy(snapshot.conflict_policy()),
+        conflict_policy_provenance: match snapshot.conflict_policy() {
+            ConflictPolicy::Replace => ConflictPolicyProvenance::CliReplace,
+            ConflictPolicy::Skip => ConflictPolicyProvenance::CliSkip,
+            _ => ConflictPolicyProvenance::Default,
+        },
+        parent_conflict_policy: None,
+        parent_conflict_policy_provenance: None,
+        parent_job_id: None,
+        retry_scope: RetryScope::FailedItems,
+        required_providers: Vec::new(),
+        required_keys: Vec::new(),
+        items,
+        batch_intent: Some(batch_intent),
+    }
+}
+
+fn execute_copy_batch_prepared(
+    engine: &Engine,
+    prepared: PreparedCopyBatch,
+    cancellation: ScopedCancellation,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let machine_requested = prepared.json || prepared.jsonl;
+    let session = CopyBatchSession::new();
+    let consumer = if prepared.jsonl {
+        let event_capacity = prepared
+            .plan
+            .snapshot()
+            .items()
+            .len()
+            .saturating_mul(2)
+            .saturating_add(8);
+        match session.subscribe_events_with_capacity(event_capacity) {
+            Ok(consumer) => Some(consumer),
+            Err(code) => {
+                #[cfg(target_os = "macos")]
+                if let Some(reporting) = reporting {
+                    reporting.pre_admission_complete();
+                }
+                return emit_error(stdout, code.as_str(), exit_for_operation_failure(code));
+            }
+        }
+    } else {
+        None
+    };
+    let (history_job_id, _history_admission, mut batch_history_store) =
+        if let Some(history_input) = prepared.history_input {
+            let (pending, lease) = match prepare_copy_batch_history(history_input) {
+                Ok(history) => history,
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(reporting) = reporting {
+                        reporting.pre_admission_complete();
+                    }
+                    return emit_copy_history_error(error, machine_requested, stdout, stderr);
+                }
+            };
+            let admitted = match pending.commit() {
+                Ok(admitted) => admitted,
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(reporting) = reporting {
+                        reporting.pre_admission_complete();
+                    }
+                    return emit_copy_history_error(error, machine_requested, stdout, stderr);
+                }
+            };
+            let job_id = admitted.job_id.clone();
+            let store = match HistoryStore::open_default() {
+                Ok(store) => store,
+                Err(error) => {
+                    drop(admitted);
+                    drop(lease);
+                    return emit_copy_history_error(error, machine_requested, stdout, stderr);
+                }
+            };
+            if let Err(error) = store.begin_running(&job_id) {
+                drop(admitted);
+                drop(lease);
+                return emit_copy_history_error(error, machine_requested, stdout, stderr);
+            }
+            (Some(job_id), Some((admitted, lease)), Some(store))
+        } else {
+            (None, None, None)
+        };
+    let execution = if let (Some(job_id), Some(store)) =
+        (history_job_id.as_deref(), batch_history_store.as_ref())
+    {
+        engine.execute_copy_batch_with_checkpoint(
+            prepared.plan,
+            &session,
+            cancellation.handle().clone(),
+            |checkpoint| {
+                store
+                    .checkpoint_batch_item(job_id, &checkpoint)
+                    .map_err(|_| CopyBatchCheckpointError)
+            },
+        )
+    } else {
+        engine.execute_copy_batch_with_checkpoint(
+            prepared.plan,
+            &session,
+            cancellation.handle().clone(),
+            |_| Ok(()),
+        )
+    };
+    let history_error = match (history_job_id.as_deref(), batch_history_store.as_mut()) {
+        (Some(job_id), Some(store)) => match session.last_completion() {
+            Ok(Some(completion)) => store
+                .complete_batch(job_id, &completion, execution.failed_checkpoint())
+                .err(),
+            Ok(None) | Err(_) => Some(HistoryError::CompletionFailed),
+        },
+        _ => None,
+    };
+    drop(cancellation);
+    let result = execution.result();
+    let mut output_ok = true;
+    if let Some(consumer) = consumer {
+        output_ok &= write_copy_batch_events(&consumer, stdout);
+    }
+    if output_ok && machine_requested {
+        output_ok &=
+            write_copy_batch_completion(&session, stdout, history_job_id.as_deref(), history_error);
+    } else if output_ok && history_error.is_none() {
+        output_ok =
+            write_copy_batch_human_result(result, history_job_id.as_deref(), stdout, stderr);
+    }
+    if !machine_requested
+        && output_ok
+        && let Some(error) = history_error
+    {
+        let message = if error == HistoryError::CompletionFailed {
+            crate::localization::english::jobs_error(error)
+        } else {
+            crate::localization::english::copy_history_error(error.code())
+        };
+        output_ok = write_copy_record(stderr, message);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(reporting) = reporting {
+        reporting.job_complete();
+        if !output_ok || exit_for_copy_batch_result(result) == EXIT_INTERNAL {
+            reporting.fail();
+        }
+    }
+    if !output_ok || history_error.is_some() {
+        #[cfg(not(target_os = "macos"))]
+        if !output_ok {
+            let _ = write_copy_record(stderr, crate::localization::english::output_failure());
+        }
+        return EXIT_INTERNAL;
+    }
+    exit_for_copy_batch_result(result)
+}
+
+#[cfg(target_os = "macos")]
+fn run_copy_batch_with_control(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    reporting: Option<&ReportingControl>,
+) -> i32 {
+    run_copy_batch_impl(args, engine, standalone, stdout, stderr, reporting)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_copy_batch(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    run_copy_batch_impl(args, engine, standalone, stdout, stderr)
+}
+
+fn run_copy_batch_impl(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let invocation = match parse_copy_batch(args) {
+        Ok(invocation) => invocation,
+        Err(()) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            if machine_output_requested_before_delimiter(args) {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            return if write_copy_record(stderr, crate::localization::english::copy_batch_usage()) {
+                EXIT_USAGE
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let machine_requested = invocation.json || invocation.jsonl;
+    let cancellation = match scoped_cancellation() {
+        Ok(cancellation) => cancellation,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return if machine_requested {
+                emit_error(stdout, "signal_handler_failed", EXIT_INTERNAL)
+            } else {
+                let _ =
+                    write_copy_record(stderr, crate::localization::english::copy_signal_failure());
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let output_metadata = match std::fs::symlink_metadata(&invocation.output_directory) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => metadata,
+        _ => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            if machine_requested {
+                return emit_error(stdout, "output_directory_unavailable", EXIT_INPUT);
+            }
+            return if write_copy_record(
+                stderr,
+                crate::localization::english::copy_batch_output_directory_unavailable(),
+            ) {
+                EXIT_INPUT
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let _ = output_metadata;
+    let output_directory = match std::fs::canonicalize(&invocation.output_directory) {
+        Ok(path) => path,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            if machine_requested {
+                return emit_error(stdout, "output_directory_unavailable", EXIT_INPUT);
+            }
+            return if write_copy_record(
+                stderr,
+                crate::localization::english::copy_batch_output_directory_unavailable(),
+            ) {
+                EXIT_INPUT
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let invocation_cwd = match std::env::current_dir() {
+        Ok(path) => path,
+        Err(_) => {
+            return emit_copy_history_error(
+                HistoryError::DirectoryUnavailable,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    if let Err(exit) = validate_invocation_cwd(&invocation_cwd, machine_requested, stdout, stderr) {
+        return exit;
+    }
+    let mut resolution = InputResolutionRequest::new(&invocation_cwd)
+        .with_recursive(invocation.recursive)
+        .with_follow_symlinks(invocation.follow_symlinks);
+    for selection in invocation.selections {
+        resolution = resolution.with_selection(selection);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(reporting) = reporting {
+        reporting.begin_planning();
+    }
+    copy_batch_resolution_entry_for_cli();
+    let split_trust_store = LocalSplitTrustStore::from_environment();
+    let resolution_control =
+        InputResolutionControl::new().with_cancellation(cancellation.handle().clone());
+    let resolved = match engine.resolve_inputs_batch_with(
+        resolution,
+        InputResolutionCapabilities::new()
+            .with_split_trust_store(&split_trust_store)
+            .with_control(&resolution_control),
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            let exit = input_resolution_exit_code(error.code());
+            if machine_requested {
+                return emit_error(stdout, error.code().as_str(), exit);
+            }
+            return if write_copy_record(
+                stderr,
+                crate::localization::english::input_resolution_error(error.code()),
+            ) {
+                exit
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let workspace = invocation
+        .workspace
+        .as_deref()
+        .map(|path| anchored_retry_path(&invocation_cwd, path))
+        .unwrap_or_else(default_copy_workspace);
+    if !copy_batch_resolution_paths_are_json_representable(&resolved, &output_directory, &workspace)
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        return emit_unrepresentable_path_error(machine_requested, stdout, stderr);
+    }
+    let mut mapped = Vec::with_capacity(resolved.entries.len());
+    for entry in resolved.entries {
+        let (source, provenance, forced_failure, qualified_split, resolver_failure) = match entry {
+            nscb::InputResolutionBatchEntry::Resolved(input) => {
+                let source = if input.qualification.is_some() || input.segments.len() != 1 {
+                    input.logical_selection_path()
+                } else {
+                    input
+                        .segments
+                        .first()
+                        .map(|segment| segment.path.clone())
+                        .unwrap_or_else(|| input.provenance.selection_path.clone())
+                };
+                let qualified_split = input.qualification.is_some().then(|| input.clone());
+                let forced_failure = (input.qualification.is_some() || input.segments.len() != 1)
+                    .then_some(OperationFailureCode::SplitInputUnsupported);
+                (
+                    source,
+                    copy_batch_provenance(&input.provenance),
+                    forced_failure,
+                    qualified_split,
+                    None,
+                )
+            }
+            nscb::InputResolutionBatchEntry::Failed(failure) => {
+                let forced_failure = Some(match failure.code() {
+                    nscb::InputResolutionErrorCode::EmptySelection => {
+                        OperationFailureCode::EmptySelection
+                    }
+                    _ => OperationFailureCode::SourceUnavailable,
+                });
+                (
+                    failure.requested_path().to_path_buf(),
+                    copy_batch_failure_provenance(&failure),
+                    forced_failure,
+                    None,
+                    Some(failure),
+                )
+            }
+            _ => (
+                output_directory.clone(),
+                serde_json::json!({"source": "future_resolution_entry"}),
+                Some(OperationFailureCode::UnsupportedCapability),
+                None,
+                None,
+            ),
+        };
+        let destination = if forced_failure == Some(OperationFailureCode::EmptySelection) {
+            None
+        } else {
+            Some(
+                source
+                    .file_name()
+                    .map(|name| output_directory.join(name))
+                    .unwrap_or_else(|| output_directory.clone()),
+            )
+        };
+        mapped.push(ResolvedCopyBatchItem {
+            source,
+            destination,
+            provenance,
+            forced_failure,
+            qualified_split,
+            resolver_failure,
+        });
+    }
+    if machine_requested {
+        let mut paths = mapped
+            .iter()
+            .flat_map(|item| {
+                std::iter::once(item.source.as_path()).chain(item.destination.as_deref())
+            })
+            .collect::<Vec<_>>();
+        paths.push(output_directory.as_path());
+        paths.push(workspace.as_path());
+        if !paths_are_json_representable(paths) {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_error(stdout, "unrepresentable_path", EXIT_INPUT);
+        }
+    }
+    let mut request = if invocation.workspace.is_some() {
+        CopyBatchRequest::new(&output_directory, &workspace)
+    } else {
+        CopyBatchRequest::with_host_default_workspace(&output_directory, &workspace)
+    }
+    .with_conflict_policy(invocation.conflict_policy);
+    for item in &mapped {
+        request = if let Some(input) = item.qualified_split.clone() {
+            let Some(destination) = item.destination.as_deref() else {
+                return emit_error(stdout, "destination_unavailable", EXIT_INPUT);
+            };
+            request.with_qualified_split_input_unsupported(input, destination)
+        } else if item.forced_failure == Some(OperationFailureCode::EmptySelection) {
+            let Some(failure) = item.resolver_failure.clone() else {
+                return emit_error(stdout, "empty_selection", EXIT_INPUT);
+            };
+            match request.with_resolved_empty_selection_failure(failure) {
+                Ok(request) => request,
+                Err(failure) => {
+                    return emit_error(
+                        stdout,
+                        failure.code().as_str(),
+                        input_resolution_exit_code(failure.code()),
+                    );
+                }
+            }
+        } else if let Some(failure) = item.forced_failure {
+            let Some(destination) = item.destination.as_deref() else {
+                return emit_error(stdout, "destination_unavailable", EXIT_INPUT);
+            };
+            request.with_preflight_failure(&item.source, destination, failure)
+        } else {
+            let Some(destination) = item.destination.as_deref() else {
+                return emit_error(stdout, "destination_unavailable", EXIT_INPUT);
+            };
+            request.with_item(&item.source, destination)
+        };
+    }
+    let plan = match engine.plan_copy_batch(request) {
+        Ok(plan) => plan,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            let exit = exit_for_operation_failure(error.code());
+            if machine_requested {
+                return emit_error(stdout, error.code().as_str(), exit);
+            }
+            return if write_copy_record(
+                stderr,
+                crate::localization::english::copy_error(error.code()),
+            ) {
+                exit
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let workspace_selection = if invocation.workspace.is_some() {
+        WorkspaceSelection::Explicit
+    } else {
+        WorkspaceSelection::HostDefault
+    };
+    let history_input = standalone
+        .is_some()
+        .then(|| copy_batch_admission_input(&plan, &mapped, &invocation_cwd, workspace_selection));
+    execute_copy_batch_prepared(
+        engine,
+        PreparedCopyBatch {
+            plan,
+            history_input,
+            json: invocation.json,
+            jsonl: invocation.jsonl,
+        },
+        cancellation,
+        stdout,
+        stderr,
+        #[cfg(target_os = "macos")]
+        reporting,
+    )
+}
+
+fn copy_batch_provenance(provenance: &nscb::InputProvenance) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
+        "kind": COPY_BATCH_ITEM_PROVENANCE_KIND,
+        "selection_index": provenance.selection_index,
+        "source": provenance.source,
+        "selection_path": provenance.selection_path,
+        "base_directory": provenance.base_directory,
+        "input_list_entry_index": provenance.input_list_entry_index,
+        "input_list_entry_path": provenance.input_list_entry_path,
+        "discovered_directory": provenance.discovered_directory,
+        "discovered_relative_path": provenance.discovered_relative_path,
+    })
+}
+
+fn copy_batch_selection_provenance(selection: &ResolvedCopyBatchItem) -> serde_json::Value {
+    let mut provenance = selection.provenance.clone();
+    if let Some(input) = selection.qualified_split.as_ref()
+        && let Some(qualification) = input.qualification.as_ref()
+        && let Some(manifest_sha256) = input.split_manifest_sha256()
+    {
+        provenance["split_qualification"] = serde_json::json!({
+            "kind": qualification.kind,
+            "manifest_schema_version": qualification.manifest_schema_version,
+            "original_size_bytes": qualification.original_size_bytes,
+            "original_sha256": qualification.original_sha256.to_hex(),
+            "manifest_sha256": manifest_sha256.to_hex(),
+        });
+    }
+    provenance
+}
+
+fn copy_batch_failure_provenance(failure: &nscb::InputResolutionFailure) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": COPY_BATCH_ITEM_PROVENANCE_SCHEMA_VERSION,
+        "kind": COPY_BATCH_ITEM_PROVENANCE_KIND,
+        "selection_index": failure.selection_index(),
+        "source": failure.source(),
+        "selection_path": failure.selection_path(),
+        "base_directory": failure.base_directory(),
+        "input_list_entry_index": failure.input_list_entry_index(),
+        "input_list_entry_path": failure.input_list_entry_path(),
+        "discovered_directory": failure.discovered_directory(),
+        "discovered_relative_path": failure.discovered_relative_path(),
+        "requested_path": failure.requested_path(),
+        "failure_code": failure.code(),
+        "phase": "resolution",
+    })
+}
+
+fn write_copy_batch_events(consumer: &CopyBatchEventConsumer, stdout: &mut dyn Write) -> bool {
+    let mut ok = true;
+    let mut events = Vec::new();
+    while let Ok(event) = consumer.try_recv() {
+        events.push(event);
+    }
+    for event in events {
+        if matches!(event.event(), CopyBatchEventKind::Completed { .. }) {
+            continue;
+        }
+        ok &= write_json(
+            &CopyBatchJobEventDocument {
+                schema_version: 2,
+                kind: "job.event",
+                nscb_version: env!("CARGO_PKG_VERSION"),
+                submission_kind: "independent_batch",
+                sequence: event.sequence(),
+                snapshot: event.snapshot(),
+                event: event.event().clone(),
+            },
+            stdout,
+        );
+        ok &= stdout.flush().is_ok();
+    }
+    ok
+}
+
+fn write_copy_batch_completion(
+    session: &CopyBatchSession,
+    stdout: &mut dyn Write,
+    job_id: Option<&str>,
+    history_error: Option<HistoryError>,
+) -> bool {
+    let Ok(Some(completion)) = session.last_completion() else {
+        return false;
+    };
+    write_json(
+        &CopyBatchJobResultDocument {
+            schema_version: 2,
+            kind: "job.result",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            submission_kind: "independent_batch",
+            job_id,
+            history_error: history_error.map(HistoryError::code),
+            sequence: completion.sequence(),
+            snapshot: completion.snapshot(),
+            result: completion.result(),
+        },
+        stdout,
+    )
+}
+
+fn write_copy_batch_human_result(
+    result: &CopyBatchResult,
+    job_id: Option<&str>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> bool {
+    let message = crate::localization::english::copy_batch_human_result(result, job_id);
+    if result.state() == JobState::Succeeded {
+        write_copy_record(stdout, &message)
+    } else {
+        write_copy_record(stderr, &message)
+    }
+}
+
+fn exit_for_copy_batch_result(result: &CopyBatchResult) -> i32 {
+    let item_exit = result
+        .items()
+        .iter()
+        .filter_map(|item| item.failure().map(|failure| failure.code()))
+        .map(exit_for_operation_failure)
+        .max_by_key(|exit| batch_exit_precedence(*exit));
+    match result.state() {
+        JobState::Succeeded => EXIT_SUCCESS,
+        JobState::CompletedWithIssues if item_exit == Some(EXIT_INTERNAL) => EXIT_INTERNAL,
+        JobState::CompletedWithIssues => EXIT_COMPLETED_WITH_ISSUES,
+        JobState::Cancelled if item_exit == Some(EXIT_INTERNAL) => EXIT_INTERNAL,
+        JobState::Cancelled => EXIT_CANCELLED,
+        JobState::Failed => result
+            .failure()
+            .map(|failure| exit_for_operation_failure(failure.code()))
+            .into_iter()
+            .chain(item_exit)
+            .max_by_key(|exit| batch_exit_precedence(*exit))
+            .unwrap_or(EXIT_INTERNAL),
+        _ => EXIT_INTERNAL,
+    }
+}
+
+fn batch_exit_precedence(exit: i32) -> u8 {
+    match exit {
+        EXIT_INTERNAL => 4,
+        EXIT_CANCELLED => 3,
+        EXIT_CONFLICT => 2,
+        EXIT_INPUT => 1,
+        _ => 0,
     }
 }
 
@@ -2340,6 +3584,46 @@ fn paths_are_json_representable<'a>(paths: impl IntoIterator<Item = &'a Path>) -
     paths.into_iter().all(|path| path.to_str().is_some())
 }
 
+fn copy_batch_resolution_paths_are_json_representable(
+    resolved: &nscb::InputResolutionBatchResult,
+    output_directory: &Path,
+    workspace: &Path,
+) -> bool {
+    let mut paths = vec![output_directory, workspace];
+    for entry in &resolved.entries {
+        match entry {
+            nscb::InputResolutionBatchEntry::Resolved(input) => {
+                paths.extend(input.segments.iter().map(|segment| segment.path.as_path()));
+                paths.push(input.provenance.selection_path.as_path());
+                if let Some(path) = input.provenance.input_list_entry_path.as_deref() {
+                    paths.push(path);
+                }
+                if let Some(path) = input.provenance.discovered_directory.as_deref() {
+                    paths.push(path);
+                }
+                if let Some(path) = input.provenance.discovered_relative_path.as_deref() {
+                    paths.push(path);
+                }
+            }
+            nscb::InputResolutionBatchEntry::Failed(failure) => {
+                paths.push(failure.selection_path());
+                if let Some(path) = failure.input_list_entry_path() {
+                    paths.push(path);
+                }
+                if let Some(path) = failure.discovered_directory() {
+                    paths.push(path);
+                }
+                if let Some(path) = failure.discovered_relative_path() {
+                    paths.push(path);
+                }
+                paths.push(failure.requested_path());
+            }
+            _ => {}
+        }
+    }
+    paths_are_json_representable(paths)
+}
+
 fn prepare_copy_history(
     job: &ResolvedCopyJob,
     plan: &OperationPlan,
@@ -2347,6 +3631,17 @@ fn prepare_copy_history(
     let store = HistoryStore::open_default()?;
     store.reconcile_interrupted()?;
     let pending = store.begin_admission(job.admission_input(plan))?;
+    let lease = pending.acquire_lease()?;
+    debug_assert_eq!(lease.job_id(), pending.job_id());
+    Ok((pending, lease))
+}
+
+fn prepare_copy_batch_history(
+    input: AdmissionInput,
+) -> Result<(PendingAdmission, JobLease), HistoryError> {
+    let store = HistoryStore::open_default()?;
+    store.reconcile_interrupted()?;
+    let pending = store.begin_admission(input)?;
     let lease = pending.acquire_lease()?;
     debug_assert_eq!(lease.job_id(), pending.job_id());
     Ok((pending, lease))
@@ -2416,7 +3711,10 @@ fn exit_for_operation_failure(code: OperationFailureCode) -> i32 {
         OperationFailureCode::DestinationConflict | OperationFailureCode::DestinationChanged => {
             EXIT_CONFLICT
         }
-        OperationFailureCode::SourceUnavailable
+        OperationFailureCode::DuplicateInput
+        | OperationFailureCode::DestinationCollision
+        | OperationFailureCode::EmptySelection
+        | OperationFailureCode::SourceUnavailable
         | OperationFailureCode::SplitInputUnsupported
         | OperationFailureCode::SourceChanged
         | OperationFailureCode::StalePlan
@@ -2648,9 +3946,6 @@ fn run_copy_impl(
     stderr: &mut dyn Write,
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
 ) -> i32 {
-    let machine_requested = args
-        .iter()
-        .any(|argument| argument == OsStr::new("--json") || argument == OsStr::new("--jsonl"));
     let invocation = match parse_copy(args) {
         Ok(invocation) => invocation,
         Err(()) => {
@@ -2658,7 +3953,7 @@ fn run_copy_impl(
             if let Some(reporting) = reporting {
                 reporting.pre_admission_complete();
             }
-            if machine_requested {
+            if machine_output_requested_before_delimiter(args) {
                 return emit_error(stdout, "usage_error", EXIT_USAGE);
             }
             return if write_copy_record(stderr, crate::localization::english::copy_usage()) {
@@ -2668,6 +3963,7 @@ fn run_copy_impl(
             };
         }
     };
+    let machine_requested = invocation.json || invocation.jsonl;
     let (destination, destination_selection) = match invocation.destination {
         Some(destination) => (destination, DestinationSelection::Explicit),
         None => {
@@ -2755,7 +4051,11 @@ fn run_copy_impl(
         destination_selection,
         workspace,
         workspace_selection,
-        replace: invocation.replace,
+        conflict_policy: if invocation.replace {
+            ConflictPolicy::Replace
+        } else {
+            ConflictPolicy::Fail
+        },
         conflict_policy_provenance: if invocation.replace {
             ConflictPolicyProvenance::CliReplace
         } else {
@@ -2810,11 +4110,7 @@ fn execute_copy_job(
         &job.workspace,
         job.workspace_selection,
     );
-    let request = if job.replace {
-        request.with_conflict_policy(ConflictPolicy::Replace)
-    } else {
-        request
-    };
+    let request = request.with_conflict_policy(job.conflict_policy);
     let cancellation = match scoped_cancellation() {
         Ok(cancellation) => cancellation,
         Err(_) => {
@@ -3145,9 +4441,13 @@ type CopyPlanHandoffCheckpoint = Box<dyn FnOnce()>;
 type CopyPlanEntryCheckpoint = Box<dyn FnOnce()>;
 
 #[cfg(all(test, target_os = "macos"))]
+type CopyBatchResolutionEntryCheckpoint = Box<dyn FnOnce()>;
+
+#[cfg(all(test, target_os = "macos"))]
 thread_local! {
     static COPY_PLAN_HANDOFF_CHECKPOINT: std::cell::Cell<Option<CopyPlanHandoffCheckpoint>> = const { std::cell::Cell::new(None) };
     static COPY_PLAN_ENTRY_CHECKPOINT: std::cell::Cell<Option<CopyPlanEntryCheckpoint>> = const { std::cell::Cell::new(None) };
+    static COPY_BATCH_RESOLUTION_ENTRY_CHECKPOINT: std::cell::Cell<Option<CopyBatchResolutionEntryCheckpoint>> = const { std::cell::Cell::new(None) };
 }
 
 /// Runs synchronous copy planning before the CLI admits an operation.
@@ -3171,6 +4471,13 @@ fn plan_copy_through_for_cli<T>(planner: impl FnOnce() -> T) -> T {
         checkpoint();
     }
     plan
+}
+
+fn copy_batch_resolution_entry_for_cli() {
+    #[cfg(all(test, target_os = "macos"))]
+    if let Some(checkpoint) = COPY_BATCH_RESOLUTION_ENTRY_CHECKPOINT.take() {
+        checkpoint();
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -3243,6 +4550,10 @@ mod tests {
     use super::run;
     use super::run_input_resolution_with;
     use super::synthetic_fixtures::{self, TempInput};
+    use super::{
+        EXIT_CANCELLED, EXIT_CONFLICT, EXIT_INPUT, EXIT_INTERNAL, EXIT_SUCCESS,
+        batch_exit_precedence,
+    };
     use crate::localization::english;
     use nscb::{
         Engine, InputResolutionControl, LocalSplitTrustStore, Sha256Digest, SplitTrustReceipt,
@@ -3274,6 +4585,14 @@ mod tests {
             path.as_os_str().to_owned(),
             OsString::from("--json"),
         ]
+    }
+
+    #[test]
+    fn batch_exit_precedence_keeps_internal_failures_above_item_failures() {
+        assert!(batch_exit_precedence(EXIT_INTERNAL) > batch_exit_precedence(EXIT_CANCELLED));
+        assert!(batch_exit_precedence(EXIT_CANCELLED) > batch_exit_precedence(EXIT_CONFLICT));
+        assert!(batch_exit_precedence(EXIT_CONFLICT) > batch_exit_precedence(EXIT_INPUT));
+        assert!(batch_exit_precedence(EXIT_INPUT) > batch_exit_precedence(EXIT_SUCCESS));
     }
 
     #[test]
@@ -3609,10 +4928,16 @@ mod copy_cli_tests {
         scoped_cancellation, write_json,
     };
     #[cfg(target_os = "macos")]
-    use super::{exit_for_operation_result, write_human_copy_result};
+    use super::{
+        exit_for_copy_batch_result, exit_for_operation_result, write_copy_batch_human_result,
+        write_human_copy_result,
+    };
     use nscb::OperationFailureCode;
     #[cfg(target_os = "macos")]
-    use nscb::{CancellationHandle, CopyThroughRequest, JobState, OperationSession};
+    use nscb::{
+        CancellationHandle, CopyBatchCheckpointError, CopyBatchRequest, CopyBatchSession,
+        CopyThroughRequest, JobState, OperationSession,
+    };
     use std::ffi::OsString;
     use std::fs;
     #[cfg(target_os = "macos")]
@@ -3636,13 +4961,13 @@ mod copy_cli_tests {
                 .send(())
                 .expect("signal thread waits for the plan handoff");
             resume_receiver
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv()
                 .expect("signal thread releases the plan handoff");
         })));
 
         std::thread::spawn(move || {
             entered_receiver
-                .recv_timeout(std::time::Duration::from_secs(5))
+                .recv()
                 .expect("copy planner reaches the synchronized result handoff");
             signal_hook::low_level::raise(signal).expect("deliver signal during planning");
             resume_sender
@@ -3660,19 +4985,130 @@ mod copy_cli_tests {
                 .send(())
                 .expect("signal thread waits for CLI planning entry");
             resume_receiver
-                .recv_timeout(Duration::from_secs(5))
+                .recv()
                 .expect("signal thread releases CLI planning");
         })));
 
         std::thread::spawn(move || {
             entered_receiver
-                .recv_timeout(Duration::from_secs(5))
+                .recv()
                 .expect("CLI reaches the synchronous planning entry");
             signal_hook::low_level::raise(signal).expect("deliver signal while CLI guard is live");
             resume_sender
                 .send(())
                 .expect("CLI planning waits for signal delivery");
         })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn signal_at_copy_batch_resolution_entry(signal: i32) -> std::thread::JoinHandle<()> {
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (resume_sender, resume_receiver) = mpsc::channel();
+        super::COPY_BATCH_RESOLUTION_ENTRY_CHECKPOINT.set(Some(Box::new(move || {
+            entered_sender
+                .send(())
+                .expect("signal thread waits for batch resolution entry");
+            resume_receiver
+                .recv()
+                .expect("signal thread releases batch resolution");
+        })));
+
+        std::thread::spawn(move || {
+            entered_receiver
+                .recv()
+                .expect("copy batch reaches the synchronized resolution entry");
+            signal_hook::low_level::raise(signal).expect("deliver signal before batch resolution");
+            resume_sender
+                .send(())
+                .expect("batch resolution waits for signal delivery");
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copy_batch_cancellation_is_latched_before_resolution() {
+        const CHILD_SIGNAL: &str = "NSCB_TEST_COPY_BATCH_RESOLUTION_SIGNAL";
+        if let Some(signal) = std::env::var_os(CHILD_SIGNAL) {
+            let signal = signal
+                .to_string_lossy()
+                .parse::<i32>()
+                .expect("test signal number");
+            let root = tempfile::tempdir().expect("copy batch signal fixture");
+            let output = root.path().join("output");
+            let workspace = root.path().join("workspace");
+            let source = root.path().join("source.bin");
+            fs::create_dir(&output).expect("create output directory");
+            fs::create_dir(&workspace).expect("create workspace");
+            fs::write(&source, b"signal before batch resolution").expect("write source");
+            let signal_thread = signal_at_copy_batch_resolution_entry(signal);
+            let mut stdout = Vec::new();
+            let code = super::run_copy_batch_with_control(
+                &args(&[
+                    "copy-batch",
+                    "--output-dir",
+                    output.to_str().unwrap(),
+                    "--workspace",
+                    workspace.to_str().unwrap(),
+                    "--json",
+                    source.to_str().unwrap(),
+                ]),
+                &Engine::new(),
+                None,
+                &mut stdout,
+                &mut Vec::new(),
+                None,
+            );
+            signal_thread
+                .join()
+                .expect("deliver signal at batch resolution entry");
+            assert_eq!(code, 6);
+            let result: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+            assert_eq!(result["kind"], "error");
+            assert_eq!(result["error"]["code"], "split_resolution_cancelled");
+            assert!(!output.join("source.bin").exists());
+
+            let later_code = super::run_copy_batch_with_control(
+                &args(&[
+                    "copy-batch",
+                    "--output-dir",
+                    output.to_str().unwrap(),
+                    "--workspace",
+                    workspace.to_str().unwrap(),
+                    "--json",
+                    source.to_str().unwrap(),
+                ]),
+                &Engine::new(),
+                None,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                None,
+            );
+            assert_eq!(later_code, 0, "a signal cannot cancel a later invocation");
+            assert_eq!(
+                fs::read(output.join("source.bin")).unwrap(),
+                b"signal before batch resolution"
+            );
+            return;
+        }
+
+        for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cli::copy_cli_tests::copy_batch_cancellation_is_latched_before_resolution",
+                    "--nocapture",
+                ])
+                .env(CHILD_SIGNAL, signal.to_string())
+                .output()
+                .expect("run batch planning signal case in an isolated subprocess");
+            assert!(
+                output.status.success(),
+                "signal {signal}: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed; 0 failed"));
+        }
     }
 
     #[test]
@@ -4216,6 +5652,55 @@ mod copy_cli_tests {
         assert_eq!(fs::read(&source).unwrap(), bytes);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn copy_batch_human_failure_reports_job_and_aggregate_cause() {
+        let root = tempfile::tempdir().expect("batch fixture");
+        let output = root.path().join("output");
+        let workspace = root.path().join("workspace");
+        let source = root.path().join("source.bin");
+        let pending = root.path().join("pending.bin");
+        fs::create_dir(&output).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::write(&source, b"checkpoint diagnostic bytes").unwrap();
+        fs::write(&pending, b"not started after the checkpoint failure").unwrap();
+        let engine = Engine::new();
+        let plan = engine
+            .plan_copy_batch(
+                CopyBatchRequest::new(&output, &workspace)
+                    .with_item(&source, output.join("source.bin"))
+                    .with_item(&pending, output.join("pending.bin")),
+            )
+            .unwrap();
+        let session = CopyBatchSession::new();
+        let execution = engine.execute_copy_batch_with_checkpoint(
+            plan,
+            &session,
+            CancellationHandle::new(),
+            |_| Err(CopyBatchCheckpointError),
+        );
+        assert_eq!(exit_for_copy_batch_result(execution.result()), 7);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert!(write_copy_batch_human_result(
+            execution.result(),
+            Some("job-batch-test"),
+            &mut stdout,
+            &mut stderr,
+        ));
+
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            concat!(
+                "Copy batch failed: 2 items, 1 succeeded or skipped, 0 failed, 1 not started, 0 cancelled.\n",
+                "Job ID: job-batch-test.\n",
+                "Reason: The host could not durably record an item result.\n",
+            )
+        );
+    }
+
     #[test]
     fn operation_failure_exit_classes_are_stable() {
         assert_eq!(
@@ -4228,6 +5713,18 @@ mod copy_cli_tests {
         );
         assert_eq!(
             exit_for_operation_failure(OperationFailureCode::SourceUnavailable),
+            3
+        );
+        assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::EmptySelection),
+            3
+        );
+        assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::DuplicateInput),
+            3
+        );
+        assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::DestinationCollision),
             3
         );
         assert_eq!(

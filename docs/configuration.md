@@ -256,7 +256,7 @@ The embedded `Engine` library never opens this database.
 ```text
 nscb jobs list [--json]
 nscb jobs show <id> [--json]
-nscb jobs retry <id> [--replace] [--failed-items] [--json | --jsonl]
+nscb jobs retry <id> [--failed-items] [--replace | --skip] [--json | --jsonl]
 nscb jobs clear [--json]
 ```
 
@@ -299,27 +299,35 @@ inferring every non-active state is safe to remove.
 request, and plans again under current configuration and prerequisites. An
 explicit destination and workspace remain explicit. A configured or native
 implicit destination is resolved again from current configuration. The parent
-Job is never modified. The replacement policy defaults to refuse, even when the
-parent used replacement; `--replace` must be supplied again for the retry.
+Job is never modified. Conflict authority defaults to `fail`, even when the
+parent used replacement or skip. Fresh `--replace` or `--skip` authorization is
+required for either nondefault policy, and supplying both is a usage error.
 The original invocation directory is persisted so relative explicit paths are
 anchored to where the source Job was admitted. The retry record stores its own
 invocation directory while its resolved paths become stable inputs for any
 later retry.
 
-Retry accepts only a terminal `copy_through`/`single` Job with the `all` retry
-scope and recognized selection, policy, and invocation fields. Unsupported or
-malformed future records return `job_retry_ineligible` before a new plan or Job
-is created.
+Retry accepts only terminal records with recognized selection, policy, and
+invocation fields. A single Copy uses its `all` retry scope. An independent
+batch with `--failed-items` validates its tagged v4 intent and plan order, then
+selects only persisted item rows whose state is `failed`. It preserves each
+saved item key, source, destination, path base, and order without re-expanding
+directories or input lists. Prior successes and skipped items stay untouched.
+Unsupported, malformed, empty, or inconsistent failed-item selections return a
+typed pre-admission error before a new plan or Job is created.
 
 The retry stores its parent Job ID, parent conflict policy, and the parent's
 original policy provenance alongside the newly selected policy and provenance.
 A planning failure creates no retry Job and leaves the original record and
 published output unchanged.
 
-`--failed-items` is reserved for persisted independent-batch failures in the
-later batch-execution slice. This standalone copy version selects only records
-whose item state is actually `failed`, rejects unsupported or empty selections
-before admission, and does not fabricate a batch result.
+The retry plans the selected identities again. A source that disappeared or a
+destination that changed can fail that fresh item. The prior successful output,
+parent record, and all skipped destinations remain unchanged.
+
+A qualified Split failure keeps its logical selection and receipt evidence in
+history. Retrying it reports `split_input_unsupported` for that item; NSCB does
+not copy or expand the physical parts.
 
 ## Machine output and exit classes
 
@@ -337,7 +345,8 @@ exactly one newline-terminated versioned document to stdout:
 
 Success kinds are `config.path`, `config.show`, `config.set`, `config.reset`,
 and `keys.set`. Job history success kinds are `jobs.list`, `jobs.show`, and
-`jobs.clear`; retry emits the same `job.result` or `job.event` records as Copy.
+`jobs.clear`; retry emits the same `job.result` or `job.event` records as its
+single-Copy or batch parent.
 A handled non-success emits one document with `kind: "error"`
 and a sanitized `error.code`; it contains no TOML source, key value, raw
 operating-system error, or path unless a success result requires that path.
@@ -348,13 +357,24 @@ Exit class 2 covers invalid command usage and configuration errors. Exit class
 3 covers key validation, other input or prerequisite failures, and paths that
 cannot be represented. A startup configuration failure requested with
 `--jsonl` emits one versioned error document because no Copy job has been
-admitted yet. Exit class 7 is reserved for an internal failure writing the
-required result.
+admitted yet. Exit class 7 covers internal execution, persistence, and reporting
+failures. Exit class 8 applies when a batch has at least one `Copied` or
+`AlreadyUpToDate` item and at least one failed item. Skipped items do not count
+as actual successes. For a batch, `Succeeded` exits 0. `CompletedWithIssues`
+exits 8 unless an item has an internal failure, which exits 7. `Cancelled` exits
+6 unless an item has an internal failure, which exits 7. `Failed` uses the
+highest-ranked aggregate or item failure class: internal 7 > cancellation 6 >
+conflict 4 > input 3. Every current failure code selects one of the four exits.
+A failed batch with no recorded failure returns 7.
 Standalone Copy adds top-level `job_id` to terminal `job.result`. If durable
 completion persistence fails after filesystem execution, the same terminal
 record also carries `history_error`; the operation result and filesystem state
 remain authoritative. Existing Probe records and base Copy event semantics
 remain compatible.
+Copy-batch terminal and event documents add top-level `submission_kind:
+"independent_batch"`. The terminal record contains the aggregate state and
+ordered item evidence. A JSONL batch emits only one terminal record after item
+events. An all-skipped batch reports `succeeded` and exits 0.
 
 ## Schema migration and file safety
 
@@ -388,15 +408,56 @@ edit the same file.
 ### Job history migration
 
 Job history uses SQLite `user_version` and an NSCB application ID. A new
-database is created transactionally at schema version 3. A recognized version 1
+database is created transactionally at schema version 4. A recognized version 1
 database first receives a recovery copy at `jobs.sqlite3.v1.bak` and upgrades to
 version 2. The same open then creates `jobs.sqlite3.v2.bak` before adding the
-slot registry and Job lease claims in version 3. Each step validates a backup of
-its exact source version, and each schema change runs in one transaction. An
-existing recovery copy is accepted only when it is healthy, has the NSCB
-application ID and expected user version, and matches the source schema and
-every current Job column. Different or unsafe backups fail closed. A failed
-schema change rolls back and leaves the previous database readable.
+slot registry and Job lease claims in version 3. Before adding batch intent and
+per-item checkpoint tables in version 4, NSCB creates or verifies
+`jobs.sqlite3.v3.bak` against the committed v3 source. Verification runs SQLite
+integrity checks, confirms the NSCB application ID and v3 schema version, and
+compares the schema definitions and every table's rows with the source. If NSCB
+cannot create or verify the backup, migration stops before changing the schema.
+Each schema change runs in one transaction. If the v3-to-v4 schema transaction
+fails, it rolls back and leaves the v3 database readable; the verified backup
+remains a pre-migration snapshot for recovery. A binary that supports only v3
+cannot open a v4 database. Restoring the v3 snapshot is operator-managed and
+returns history to the snapshot state. The snapshot does not contain history
+written after its capture, so stop all history writers and preserve the current
+database and SQLite sidecars before replacing anything.
+
+If an old v3 binary writes to the restored database, the existing
+`jobs.sqlite3.v3.bak` remains from an earlier v3 state and no longer matches the
+current rows. A later v4 open compares the backup schemas and rows with the
+committed v3 source. It fails closed rather than overwrite history or claim that
+the stale backup protects the current state. To recover, preserve the stale
+backup under a distinct name, leave `jobs.sqlite3.v3.bak` absent, and start the
+v4 binary again. It creates and verifies a fresh v3 backup before changing the
+schema. Keep the stale backup and any displaced database as evidence; neither
+is safe to delete merely to make migration proceed.
+
+Version 4 keeps independent batch source intent in `batch_source_intents`;
+`jobs.source` continues to hold the filesystem source path for single-copy Jobs
+and is null for independent batches. New batch items use `schema_version: 1`
+with `kind: nscb.copy_batch_item_provenance`. A directory-discovered failure
+also stores `discovered_directory` and `discovered_relative_path`. When NSCB
+migrates v3 independently admitted batch rows, it writes explicit
+`nscb.legacy_unqualified_batch_sources` and
+`nscb.legacy_unqualified_copy_batch_item_provenance` markers. Those rows remain
+readable, but the markers do not establish child or Split identity and cannot
+authorize `jobs retry --failed-items`.
+
+Version 4 does not enforce at the SQLite layer that a
+`batch_item_checkpoints` row belongs to an `independent_batch` Job. The foreign
+key requires an existing Job/item pair, and NSCB writes checkpoints through the
+independent-batch execution path. The missing database-level submission-kind
+ownership check is an accepted v4 limitation deferred to Issue #68.
+
+History written by the earlier v4 implementation can contain regular batch
+item provenance without the version tags above. NSCB keeps those records
+available for inspection and preserves their stored evidence unchanged. It
+does not normalize the records or infer qualification from them.
+`jobs retry --failed-items` rejects them with
+`job_failed_items_unsupported`.
 
 Unknown newer schema versions, corrupt/non-database files, missing required
 tables, and unsafe file types fail with a typed Job-history error. NSCB does

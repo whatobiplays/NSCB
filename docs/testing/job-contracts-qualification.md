@@ -165,14 +165,15 @@ an established execution checkpoint without timing guesses:
 The observed exit is 6, exactly one `job.result` is present with state
 `cancelled`, a `cancellation_requested` event with `accepted: true` is present,
 the destination does not exist, the source bytes are unchanged, and stderr is
-empty. The reporting-deadline subprocess variant keeps stdout and stderr full
+empty. The blocked-pipe cancellation subprocess keeps stdout and stderr full
 and unread for 5.25 seconds while the source-lock checkpoint holds execution.
-The process remains alive and the destination remains absent during that hold.
-After SIGINT and lock release, it exits 7 within the shared reporting budget
-plus scheduling allowance, with the source unchanged and destination absent.
-The execution therefore remains cancellable before publication without a
-`SIGSTOP`/`SIGCONT` race, and reporting timeout does not become an execution
-timeout.
+The process remains alive and the destination remains absent during the hold.
+After SIGINT and lock release, a seven-second watchdog deadline fails the test
+if the process hangs; the test then checks exit 7, unchanged source bytes, and
+an absent destination. This proves cancellation before publication without a
+`SIGSTOP`/`SIGCONT` race. The watchdog is a hang guard, not a reporting-latency
+target. The separate reporter unit test verifies the five-second shared
+reporting budget and exit-7 precedence.
 
 The refused boundary is covered by the promoted-state unit test described
 above. Cancellation near the boundary is covered by both the accepted
@@ -219,29 +220,33 @@ one typed `error` record with no fictional Job sequence or snapshot. Event
 cardinality stays bounded for large input; progress does not add per-byte
 records.
 
-The executable stalled-pipe tests prefill actual OS pipes and keep their
-readers open and unread until process exit. They cover human, `--json`, and
-`--jsonl` with stdout alone blocked; all three modes with both streams blocked;
-and a human destination-conflict diagnostic with stderr alone blocked. Each
-process exits within the five-second report budget plus a two-second
-scheduling allowance after observed publication or pre-admission failure. The
-tests check source bytes and destination state, and the both-stream test checks
-that inherited descriptor flags are unchanged. A source-lock checkpoint test
-holds execution for longer than the reporting budget with both pipes blocked,
-then delivers SIGINT before publication and releases the lock. It verifies exit
-7, preserved source bytes, and no destination publication. Broken stdout after
-successful publication and after a source-change execution failure exits 7
-without changing the corresponding filesystem state. Broken stderr after a
-pre-admission destination conflict also exits 7 and preserves both files.
+The executable stalled-pipe tests prefill actual OS pipes and leave stdout and
+stderr unread while the copy runs. They cover human, `--json`, and `--jsonl`
+with stdout alone blocked; all three modes with both streams blocked; and a
+human destination-conflict diagnostic with stderr alone blocked. For the
+both-stream case, a read-only SQLite history poll waits for a committed
+terminal outcome. The test then calls `ChildGuard::wait_until` with a
+30-second deadline while stdout and stderr remain unread, and checks the exit
+status, inherited descriptor flags, source bytes, and destination state. The
+deadline fails the test and terminates a hung process; it is a hang guard, not
+a reporting-latency target. A source-lock checkpoint test holds execution while
+both pipes are blocked, sends SIGINT before publication, then releases the
+lock. It verifies exit 7, preserved source bytes, and no destination
+publication. Broken stdout after successful publication and after a
+source-change execution failure exits 7 without changing the corresponding
+filesystem state. Broken stderr after a pre-admission destination conflict also
+exits 7 and preserves both files.
 
-Reporter unit tests exercise bounded queue admission, write and flush failure,
-the exact shared deadline origin, late worker failure diagnostics, and dropping
-the session while a worker is blocked. The executable subprocess tests provide
-the process-shutdown evidence; the in-process stalled-writer unit test does
-not establish bounded process exit. A blocked pipe can prevent delivery of the
-terminal record or diagnostic even though the process exits at its reporting
-deadline. Exit 7 is therefore ambiguous about publication and must not trigger
-an automatic blind retry.
+The separate reporter unit tests in `src/cli_reporting.rs` cover bounded queue
+admission, write and flush failures, the five-second shared deadline and its
+origin at terminal completion, late worker acknowledgment taking exit-7
+precedence, and dropping the session while a worker is blocked. The executable
+subprocess tests provide process-shutdown evidence with bounded watchdog
+deadlines; those deadlines are not reporting-latency measurements. The
+in-process stalled-writer unit test does not establish bounded process exit. A
+blocked pipe can prevent delivery of the terminal record or diagnostic. Exit 7
+therefore does not establish whether publication completed and must not
+trigger an automatic blind retry.
 
 `copy_cli_tests::stalled_jsonl_writer_does_not_block_filesystem_execution` is
 an in-process unit test using a controllable Rust writer. It checks that the
@@ -359,10 +364,11 @@ historical evidence and are not rebound to the corrected source.
 - Retained artifacts require manual reconciliation; no automatic deletion is
   performed.
 - On the qualified macOS executable copy path, open non-consuming stdout or
-  stderr pipes do not hold normal process shutdown indefinitely. The five-second
-  shared reporting budget and exit-7 precedence are tested with the readers
-  kept open and unread. Other operating systems and sink drivers remain
-  unqualified.
+  stderr pipes do not hold normal process shutdown indefinitely. Subprocess
+  watchdog deadlines fail the test if shutdown hangs; they are not latency
+  measurements. The separate reporter unit tests verify the five-second shared
+  reporting budget and exit-7 precedence. Other operating systems and sink
+  drivers remain unqualified.
 - The qualification does not include product-review attestation unless a
   separate review evidence artifact exists for this run.
 
@@ -385,7 +391,8 @@ An earlier qualification run recorded 47 passing history unit tests and 22
 passing real-binary Job history tests. Those results are historical evidence
 for that run and are not the final counts.
 
-The final native macOS focused run reported no failures or ignored tests:
+The historical Issue #12 final native macOS focused run reported no failures
+or ignored tests:
 
 | Focused suite | Passed |
 | --- | ---: |
@@ -394,11 +401,41 @@ The final native macOS focused run reported no failures or ignored tests:
 | Configuration tests | 49 |
 | CLI subprocess tests | 29 |
 
-Current final-source evidence independently confirms 56 history tests and 23
-Job-history CLI tests on `src/standalone/history/tests.rs` SHA-256
+Historical Issue #12 final-source evidence independently confirms 56 history
+tests and 23 Job-history CLI tests on `src/standalone/history/tests.rs` SHA-256
 `b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`;
 the embedded boundary found no SQLite in the no-default graph, and formatter,
 content-policy, documentation-test, and diff checks also passed.
+These counts and source hash describe Issue #12. They do not describe the
+Issue #13 candidate.
+
+### Issue #13 published and reported evidence
+
+The published Linux evidence for Issue #13 is PR #67 workflow run
+`41508834577`. GitHub reports head
+`6531a3116eb50760535d6d35e843dd0118009569`, and both the `validate` and
+`content-policy-git` jobs succeeded. The workflow checked merge ref
+`4a9ac86c3d4c8ac9c647a2b7011c6a24de66323e`.
+
+A local macOS run was previously reported as 1,278 Rust tests passed, 8
+ignored, and 64 Python tests passed. No retained source-bound manifest is
+available here for those totals, so they remain reported rather than exact
+evidence for one Issue #13 working tree.
+
+A later local `RUST_TEST_THREADS=1 make all` run in the uncommitted Issue #13
+worktree reported 1,285 Rust tests passed, 0 failed, and 8 ignored, plus 64
+Python tests passed. Its log is
+`/tmp/nscb-issue13-logs.6CAGd7/make-all-final.log`, and its exit record is
+`/tmp/nscb-issue13-logs.6CAGd7/make-all-final.exit` (exit `0`). It provides
+real local test evidence but does not establish source-bound identity or
+supply the missing `repo_validate` artifact or formal review attestation.
+
+No source-bound focused test count and source hash, `repo_validate` Rust or
+Makefile artifact, or formal review attestation is established by these
+records. The successful jobs and reported local totals do not supply those
+missing artifacts.
+
+### Issue #12 historical rerun details
 
 An intermediate rerun of the filtered history suite observed 55 passed and 1
 failed:
@@ -434,9 +471,9 @@ The concrete historical CI failure was Linux x86_64 in GitHub Actions run
 migration test read an empty marker instead of ddl-applied. The subsequent
 20/20 exact-test and 5/5 complete-suite results are local Rust 1.98.1 candidate
 evidence with default test parallelism; they are not native Linux execution or
-a post-fix Linux CI result. A post-fix Linux CI run must be recorded only after
-this corrective commit is pushed. No post-fix Linux CI result exists at the
-current HEAD.
+Issue #12 post-fix Linux CI evidence. At the Issue #12 cutoff, no later Linux
+run had been recorded. Issue #13 run `41508834577` is separate evidence and
+does not retroactively qualify Issue #12.
 
 Post-fix evidence from Rust 1.98.1 records 20/20 passes for
 `standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries`
@@ -512,9 +549,9 @@ historical evidence. An earlier pinned Rust 1.98.1 Windows GNU all-target
 check also exited 0 before the corrected `src/standalone/history/tests.rs`;
 that result remains historical pre-correction evidence.
 
-A fresh final-source validation used Rust 1.98.1 with feature-enabled
-`x86_64-pc-windows-gnu` `cargo check --all-targets`, exited 0 in 42.09
-seconds, and is bound to `src/standalone/history/tests.rs` SHA-256
+A historical Issue #12 final-source validation used Rust 1.98.1 with
+feature-enabled `x86_64-pc-windows-gnu` `cargo check --all-targets`, exited 0
+in 42.09 seconds, and is bound to `src/standalone/history/tests.rs` SHA-256
 `b0aae9920fe1b0f549329d6738f2741e630d4e3a78a275192b516e04c32ec124`.
 Its log is
 `/tmp/nscb-issue12-final-evidence.6qMIs4/13-windows-gnu-all-targets.log`.
@@ -526,11 +563,11 @@ run's disposable target directory:
 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=<temporary-validation-directory> rustup run 1.98.1 cargo check --locked --all-targets --features standalone-job-history --target x86_64-pc-windows-gnu -vv
 ```
 
-The fresh run establishes compile-only success for the corrected current
-source's feature-enabled `x86_64-pc-windows-gnu` all-target build. The final
-canonical pass and this compile-only check support the prospective TAC-13
-result. Native Windows execution, ACL and lease behavior, crash recovery,
-retry behavior, and copy publication remain unqualified.
+This historical run establishes compile-only success for the corrected Issue
+#12 source's feature-enabled `x86_64-pc-windows-gnu` all-target build. It does
+not establish current Issue #13 compile-only success. Native Windows execution,
+ACL and lease behavior, crash recovery, retry behavior, and copy publication
+remain unqualified.
 
 The history unit evidence covers fresh schema initialization, SQLite application
 identity and user version, corruption and future-schema rejection, migration
@@ -551,8 +588,30 @@ live-owner preservation, concurrent processes, current-configuration retry,
 retry from a different working directory, malformed future retry records,
 parent conflict-policy provenance, noninheritance of replacement
 authorization, retry reporting failure with exit 7 and durable completion,
-failed-item rejection, JSONL completion failure with one terminal record, and
+exact failed-item selection, rejection of destinationless `empty_selection`
+failed-item retry with an unchanged Job listing and no admitted retry, JSONL
+completion failure with one terminal record, and
 configuration/key/cache/output/artifact-preserving clear.
+
+The Issue #13 test inventory covers all-skipped success, mixed success and
+failure, exact failed-item retry, fresh conflict authorization, contradictory
+options, single-copy retry with `skip`, destination collisions, shared resolver
+budgets, item-local preflight failures, ordered events, cancellation, checkpoint
+failure, execution-time destination revalidation, history migration and
+malformed intent. The failed-item cases also reject unsafe publication states,
+unresolved claims, malformed or future record shapes, ineligible prior states,
+destinationless `empty_selection` records, changed Split membership, and shared
+Split identities before admission.
+
+Directory-discovered failure coverage verifies that retry uses the persisted
+`discovered_directory` and `discovered_relative_path`, keeps the original item
+key, path base, destination, and selection order, records the retry working
+directory separately, and leaves the successful sibling output hash unchanged.
+A child added after the parent batch receives no retry output. Migration
+coverage includes finalized and pending v3 stores. Legacy batch rows remain
+readable with explicit unqualified item and source-intent markers, and
+failed-item retry rejects those rows. Corrupt v3 schemas fail closed, and a
+failed v3-to-v4 migration rolls back and retains its recovery copy.
 
 ### Historical TAC-6 cleanup and NDR-1 boundary
 
@@ -584,7 +643,10 @@ cannot establish operation-created identity, so check-then-unlink remains
 prohibited. Automatic artifact reclamation remains a separate follow-up and
 is not claimed by NDR-1.
 
-Native Linux and Windows history behavior remains unqualified. Portable tests
-cover path composition and schema rejection, but they do not establish native
-SQLite locking, file permissions, process-lifetime lease semantics, crash
-durability, or filesystem publication on those platforms.
+Linux repository CI is recorded by run `41508834577`. Native Linux and Windows
+history behavior beyond that run remains unqualified. The run does not supply
+source-bound focused counts or hashes, or a `repo_validate` attestation.
+Portable tests cover path composition and schema rejection, but they do not
+establish all native SQLite locking, file permissions, process-lifetime lease
+semantics, crash durability, or filesystem publication behavior on those
+platforms.

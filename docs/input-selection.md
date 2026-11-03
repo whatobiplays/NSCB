@@ -34,6 +34,12 @@ let result = Engine::new().resolve_inputs_with(request, capabilities)?;
 ```
 The capability is evaluated once per call. It adds no mutable Engine state and is not stored globally. Omitting the trust store preserves the existing Engine::new() unit-struct construction and ordinary resolution behavior.
 
+`InputResolutionControl::with_cancellation` binds the host's existing invocation cancellation handle. The resolver checks that shared flag before filesystem work, between directory entries, and while Split data is hashed. A requested cancellation rejects the whole call with `split_resolution_cancelled`.
+
+`Engine::resolve_inputs_batch` and `Engine::resolve_inputs_batch_with` return ordered `InputResolutionBatchEntry` values for independent copy planning. A resolved entry describes one logical input. A failed entry carries the caller selection index, input-list position when applicable, requested path, and stable failure code. An unavailable ordinary direct path, an unavailable ordinary path named by a readable list, an empty input list, and an empty selected directory are item-local. After a directory entry has been identified as an ordinary file, an item-local `InputUnavailable` during scanning or appending remains an ordered failed entry, and later sorted siblings are still resolved. Inability to complete directory enumeration, an unavailable or malformed input-list file, duplicate identity, uncertain or unsafe Split detection or qualification, cancellation, and resource or safety-limit failures reject the whole call.
+
+The standalone `copy-batch` command resolves through the configured local Split trust store. A successfully qualified Split stays one batch selection; because Split copy-through is not supported, that item then receives an item-local `split_input_unsupported` preflight failure while viable items can execute.
+
 Relative direct paths use the request's base directory. Relative paths inside an input list use the directory containing that list. The Engine does not consult the process working directory; a host must choose both bases through the request and list location.
 
 The request preserves selection order. Each `ResolvedInput` contains an ordered `segments` vector, `provenance`, and an optional `qualification`. A non-Split input has one segment and no qualification. A qualified canonical Split set has one segment per declared member and a `SplitQualification` that reports the evidence family, manifest schema version, original source size, and original source SHA-256. The non-exhaustive public result types allow future additive evidence without changing the version-1 representation. A segment record reports a canonical absolute path and the file size observed during resolution.
@@ -52,9 +58,19 @@ Explicit regular files are eligible regardless of filename extension. Directorie
 .nsp  .nsz  .nsx  .xci  .xcz  .nca  .ncz
 ```
 
-The extension filter applies only to directory discovery. Hidden matching files are included. Directory candidates are sorted by NFC-normalized, lowercased relative path; caller selections and entries within each list retain their supplied order. An empty request, empty list, empty directory result, or any unusable selected path is a typed failure rather than a successful empty batch.
+The extension filter applies only to directory discovery. Hidden matching files are included. Directory candidates are sorted by NFC-normalized, lowercased relative path; caller selections and entries within each list retain their supplied order. An empty request, empty list, empty directory result, or any unusable selected path is a typed failure rather than a successful empty batch. In batch resolution, an empty selected directory or empty input list remains item-local so another viable selection can proceed.
 
 Directory discovery is nonrecursive and skips discovered symlinks by default. `--recursive` enables recursive discovery. `--follow-symlinks` allows traversal through discovered symlinks; discovered directory symlinks are traversed only when recursion is also enabled. An explicitly selected directory symlink can be used as the discovery root with `--follow-symlinks` alone. Explicit regular-file symlinks are eligible selections. A canonical Split directory or numbered member reached through an intermediate symlinked path also requires `--follow-symlinks`, matching the directory alias policy. A symlink target reached during discovery must stay within the selected directory tree. Cycle back-edges are skipped. Reaching the same directory through another alias or selecting the same logical file more than once returns `duplicate_selection`.
+
+With `--follow-symlinks` but without recursion, a broken symlink with a
+discoverable ordinary filename is an item-local `input_unavailable` failure in
+batch resolution. Sorted viable siblings still resolve, while single-input
+resolution reports the failure. A Split-shaped broken name remains a global
+Split failure. With `--recursive`, every broken discovered symlink remains
+global because the missing target might have been a directory needed to prove
+traversal completeness. Failures after a target resolves, unsafe target
+escapes, duplicates, cancellation, and resource limits also reject the whole
+batch.
 
 ## JSON input-list v1
 
@@ -148,7 +164,7 @@ Hosts that back up a store should preserve the store root and sibling continuity
 
 `InputResolutionControl` is an optional host-owned, latest-value progress and cancellation handle. A newly constructed control reports input index 0, 0 completed bytes, and `total_bytes: None`, which means no Split input is active. While a Split set is hashed, the resolver publishes the current logical input index, total bytes read so far, and the declared source size as the expected total. The host may call `cancel()` from another thread. Cancellation is checked before and during bounded-buffer hashing and after qualification. A cancelled Split resolution returns `split_resolution_cancelled` and does not report a successful input.
 
-The resolver uses a 1 MiB hashing buffer and never concatenates segments into a temporary file. One request may traverse at most 100,000 directory entries, parse at most 4 MiB of input lists and 100,000 list entries, and resolve at most 100,000 physical segments. Split validation is additionally bounded by `InputResolutionCapabilities::with_max_split_validation_bytes`. The budget applies to the sum of validated source sizes across every Split input in one request; exceeding it returns `resource_limit_exceeded` without producing partial JSON success. The default budget covers the largest canonical FAT32 set (100 parts of 0xFFFF0000 bytes).
+The resolver uses a 1 MiB hashing buffer and never concatenates segments into a temporary file. One request may traverse at most 100,000 directory entries, parse at most 4 MiB of input lists and 100,000 list entries, and resolve at most 100,000 physical segments. Split validation is additionally bounded by `InputResolutionCapabilities::with_max_split_validation_bytes`. The budget applies to the sum of validated source sizes across every Split input in one request; exceeding it returns `resource_limit_exceeded` without producing partial JSON success. Batch resolution shares these counters across selections and charges an attempt even when it later produces an item-local failure. The default budget covers the largest canonical FAT32 set (100 parts of 0xFFFF0000 bytes).
 
 An opened handle is not an immutable snapshot. Resolution validates the bytes it actually read, but later effectful operations must repeat membership, identity, receipt, and digest validation or use a verified snapshot before publishing externally visible results.
 

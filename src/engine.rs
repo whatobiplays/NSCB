@@ -4,7 +4,9 @@ use crate::inspection::{
     InspectionPreflightStatus, InspectionRequest, InspectionResult,
 };
 use crate::operation::{
-    CopyThroughRequest, OperationError, OperationPlan, OperationResult, OperationSession,
+    CopyBatchCheckpointError, CopyBatchExecution, CopyBatchItemCheckpoint, CopyBatchPlan,
+    CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyThroughRequest, OperationError,
+    OperationPlan, OperationResult, OperationSession,
 };
 use crate::pfs0;
 use serde::Serialize;
@@ -48,6 +50,18 @@ impl Engine {
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_copy_through(request)
     }
+    /// Resolves independent regular files into one immutable sequential copy plan.
+    ///
+    /// The output directory must already exist. Planning performs no filesystem
+    /// mutation. Item-local preflight failures are retained only when at least
+    /// one other item is viable; duplicate identities, destination collisions,
+    /// unsafe paths, and shared capability failures reject the whole request.
+    pub fn plan_copy_batch(
+        &self,
+        request: CopyBatchRequest,
+    ) -> Result<CopyBatchPlan, OperationError> {
+        crate::operation::plan_copy_batch(request)
+    }
 
     /// Executes one plan using admission and cancellation state from `session`.
     ///
@@ -79,6 +93,54 @@ impl Engine {
         cancellation: CancellationHandle,
     ) -> OperationResult {
         crate::operation::execute_operation_with_cancellation(plan, session, &cancellation)
+    }
+    /// Executes one immutable copy batch without caller-supplied cancellation.
+    pub fn execute_copy_batch(
+        &self,
+        plan: CopyBatchPlan,
+        session: &CopyBatchSession,
+    ) -> CopyBatchResult {
+        let cancellation = CancellationHandle::new();
+        self.execute_copy_batch_with_checkpoint(plan, session, cancellation, |_| Ok(()))
+            .into_result()
+    }
+    /// Executes one immutable copy batch with caller-owned cancellation.
+    ///
+    /// Cancellation is latched on the caller-owned handle. Once cancellation
+    /// has been accepted, a later independent batch using the same handle is
+    /// also cancelled. Pass a fresh `CancellationHandle` for each independent
+    /// batch that should remain separately cancellable.
+    pub fn execute_copy_batch_with_cancellation(
+        &self,
+        plan: CopyBatchPlan,
+        session: &CopyBatchSession,
+        cancellation: CancellationHandle,
+    ) -> CopyBatchResult {
+        self.execute_copy_batch_with_checkpoint(plan, session, cancellation, |_| Ok(()))
+            .into_result()
+    }
+    /// Executes items sequentially and checkpoints each result before advancing.
+    ///
+    /// A checkpoint error stops execution before the next item. Completed item
+    /// evidence remains in the returned aggregate and session completion.
+    ///
+    /// Cancellation is latched on the caller-owned handle. An already-cancelled
+    /// handle remains cancelled for later calls. Pass a fresh
+    /// `CancellationHandle` for each independent batch that should remain
+    /// separately cancellable.
+    pub fn execute_copy_batch_with_checkpoint(
+        &self,
+        plan: CopyBatchPlan,
+        session: &CopyBatchSession,
+        cancellation: CancellationHandle,
+        checkpoint: impl FnMut(CopyBatchItemCheckpoint) -> Result<(), CopyBatchCheckpointError>,
+    ) -> CopyBatchExecution {
+        crate::operation::execute_copy_batch_with_checkpoint_and_cancellation(
+            plan,
+            session,
+            cancellation,
+            checkpoint,
+        )
     }
 
     /// Validates request and provider prerequisites without launching a helper.
@@ -250,5 +312,39 @@ mod tests {
         let request = InspectionRequest::nca("/missing/input.nca", "/missing/prod.keys");
         let error = Engine::inspect(&Engine, request, &host).unwrap_err();
         assert_ne!(error.code(), InspectionErrorCode::ProviderExecutionBusy);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn copy_batch_capabilities_fail_closed_on_unqualified_platforms() {
+        use crate::{
+            CancellationHandle, CopyBatchRequest, CopyBatchSession, JobState, OperationFailureCode,
+        };
+
+        let planning_error = match Engine::new().plan_copy_batch(
+            CopyBatchRequest::new("/missing-output", "/missing-workspace")
+                .with_source("/missing-source"),
+        ) {
+            Ok(_) => panic!("batch copy planning is qualified only on macOS"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            planning_error.code(),
+            OperationFailureCode::UnsupportedCapability
+        );
+
+        let session = CopyBatchSession::new();
+        let execution = Engine::new().execute_copy_batch_with_checkpoint(
+            crate::operation::unsupported_copy_batch_plan_for_test(),
+            &session,
+            CancellationHandle::new(),
+            |_| Ok(()),
+        );
+        assert_eq!(execution.result().state(), JobState::Failed);
+        assert_eq!(
+            execution.result().failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::UnsupportedCapability)
+        );
+        assert!(!session.is_busy());
     }
 }

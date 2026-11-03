@@ -2,10 +2,10 @@
 
 use crate::standalone::history::{HistoryError, JobDetail, JobItem, JobSummary};
 use nscb::{
-    ContainerProbeErrorCode, InputResolutionErrorCode, InputResolutionResult, InspectionErrorCode,
-    JobState, NcaContentType, NcaDistribution, NcaInspection, OperationFailureCode,
-    OperationOutcome, OperationResult, VerificationErrorCode, VerificationLimitation,
-    VerificationProfile, VerificationResult,
+    ContainerProbeErrorCode, CopyBatchItemState, CopyBatchResult, InputResolutionErrorCode,
+    InputResolutionResult, InspectionErrorCode, JobState, NcaContentType, NcaDistribution,
+    NcaInspection, OperationFailureCode, OperationOutcome, OperationResult, VerificationErrorCode,
+    VerificationLimitation, VerificationProfile, VerificationResult,
 };
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -91,7 +91,18 @@ fn verification_messages() -> &'static VerificationMessages {
 #[derive(Deserialize)]
 struct CopyMessages {
     usage: String,
+    batch_usage: String,
+    batch_output_directory_unavailable: String,
+    batch_item_singular: String,
+    batch_item_plural: String,
+    batch_succeeded: String,
+    batch_completed_with_issues: String,
+    batch_cancelled: String,
+    batch_failed: String,
+    batch_job_id: String,
+    batch_failure: String,
     succeeded_copied: String,
+    succeeded_skipped: String,
     succeeded_already_up_to_date: String,
     cancelled: String,
     failed: String,
@@ -119,6 +130,8 @@ struct HistoryMessages {
     show: String,
     show_item: String,
     terminal_not_recorded: String,
+    independent_batch_source: String,
+    not_assigned: String,
     clear_result: String,
     unknown_state: String,
     states: HashMap<String, String>,
@@ -136,6 +149,102 @@ fn history_messages() -> &'static HistoryMessages {
 
 pub(crate) fn copy_usage() -> &'static str {
     &copy_messages().usage
+}
+
+pub(crate) fn copy_batch_usage() -> &'static str {
+    &copy_messages().batch_usage
+}
+
+pub(crate) fn copy_batch_output_directory_unavailable() -> &'static str {
+    &copy_messages().batch_output_directory_unavailable
+}
+
+pub(crate) fn copy_batch_result(result: &CopyBatchResult) -> String {
+    let succeeded = result
+        .items()
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.state(),
+                CopyBatchItemState::Succeeded | CopyBatchItemState::Skipped
+            )
+        })
+        .count();
+    let failed = result
+        .items()
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.state(),
+                CopyBatchItemState::PreflightFailed
+                    | CopyBatchItemState::Failed
+                    | CopyBatchItemState::Uncertain
+            )
+        })
+        .count();
+    let cancelled = result
+        .items()
+        .iter()
+        .filter(|item| item.state() == CopyBatchItemState::Cancelled)
+        .count();
+    let not_started = result
+        .items()
+        .iter()
+        .filter(|item| item.state() == CopyBatchItemState::NotStarted)
+        .count();
+    let messages = copy_messages();
+    let template = match result.state() {
+        JobState::Succeeded => &messages.batch_succeeded,
+        JobState::CompletedWithIssues => &messages.batch_completed_with_issues,
+        JobState::Cancelled => &messages.batch_cancelled,
+        _ => &messages.batch_failed,
+    };
+    let total_items = result.items().len();
+    let total = total_items.to_string();
+    let item_label = copy_batch_item_label(total_items, messages);
+    let succeeded = succeeded.to_string();
+    let failed = failed.to_string();
+    let not_started = not_started.to_string();
+    let cancelled = cancelled.to_string();
+    interpolate(
+        template,
+        &[
+            ("total", total.as_str()),
+            ("item_label", item_label),
+            ("succeeded", succeeded.as_str()),
+            ("failed", failed.as_str()),
+            ("not_started", not_started.as_str()),
+            ("cancelled", cancelled.as_str()),
+        ],
+    )
+}
+
+fn copy_batch_item_label(total_items: usize, messages: &CopyMessages) -> &str {
+    if total_items == 1 {
+        &messages.batch_item_singular
+    } else {
+        &messages.batch_item_plural
+    }
+}
+
+pub(crate) fn copy_batch_human_result(result: &CopyBatchResult, job_id: Option<&str>) -> String {
+    let messages = copy_messages();
+    let mut output = copy_batch_result(result);
+    if let Some(job_id) = job_id {
+        output.push('\n');
+        output.push_str(&messages.batch_job_id.replace("{job_id}", job_id));
+    }
+    if result.state() == JobState::Failed
+        && let Some(failure) = result.failure()
+    {
+        output.push('\n');
+        output.push_str(
+            &messages
+                .batch_failure
+                .replace("{reason}", copy_error(failure.code())),
+        );
+    }
+    output
 }
 
 pub(crate) fn jobs_usage() -> &'static str {
@@ -182,7 +291,12 @@ pub(crate) fn jobs_show(job: &JobDetail) -> String {
             ("state", state),
             ("admitted_at", &job.admitted_at),
             ("terminal_at", terminal),
-            ("source", &job.source),
+            (
+                "source",
+                job.source
+                    .as_deref()
+                    .unwrap_or(&messages.independent_batch_source),
+            ),
             ("destination", &job.destination),
             ("workspace", &job.workspace),
         ],
@@ -191,13 +305,19 @@ pub(crate) fn jobs_show(job: &JobDetail) -> String {
 
 /// Formats one human Job-history item without exposing its stored state token.
 pub(crate) fn jobs_show_item(item: &JobItem) -> String {
+    let messages = history_messages();
     interpolate(
-        &history_messages().show_item,
+        &messages.show_item,
         &[
             ("item_key", &item.item_key),
             ("state", history_state_label(&item.state)),
             ("source", &item.source),
-            ("destination", &item.destination),
+            (
+                "destination",
+                item.destination
+                    .as_deref()
+                    .unwrap_or(&messages.not_assigned),
+            ),
         ],
     )
 }
@@ -273,6 +393,7 @@ pub(crate) fn copy_result(result: &OperationResult) -> String {
             Some(OperationOutcome::AlreadyUpToDate) => {
                 messages.succeeded_already_up_to_date.clone()
             }
+            Some(OperationOutcome::Skipped) => messages.succeeded_skipped.clone(),
             _ => messages.succeeded_copied.clone(),
         },
         JobState::Cancelled => messages.cancelled.clone(),
@@ -697,7 +818,10 @@ pub(crate) fn config_error(code: &str) -> &str {
 mod tests {
     use super::{error_message, success, usage};
     use crate::standalone::history::HistoryError;
-    use nscb::{ContainerProbeErrorCode as Code, InputResolutionErrorCode as InputCode};
+    use nscb::{
+        ContainerProbeErrorCode as Code, InputResolutionErrorCode as InputCode,
+        OperationFailureCode,
+    };
 
     #[test]
     fn interpolation_scans_only_the_original_template() {
@@ -725,6 +849,45 @@ mod tests {
             super::copy_error_message("future_unknown_code"),
             "An unrecognized operation failure occurred."
         );
+    }
+
+    #[test]
+    fn copy_resource_localizes_every_public_operation_failure_code() {
+        let codes = [
+            OperationFailureCode::EmptyBatch,
+            OperationFailureCode::EmptySelection,
+            OperationFailureCode::DuplicateInput,
+            OperationFailureCode::DestinationCollision,
+            OperationFailureCode::SourceUnavailable,
+            OperationFailureCode::SplitInputUnsupported,
+            OperationFailureCode::SourceChanged,
+            OperationFailureCode::StalePlan,
+            OperationFailureCode::WorkspaceUnavailable,
+            OperationFailureCode::DestinationUnavailable,
+            OperationFailureCode::DestinationConflict,
+            OperationFailureCode::DestinationChanged,
+            OperationFailureCode::UnsafePath,
+            OperationFailureCode::UnsupportedCapability,
+            OperationFailureCode::InsufficientStorage,
+            OperationFailureCode::Busy,
+            OperationFailureCode::EventConsumerUnavailable,
+            OperationFailureCode::SessionUnavailable,
+            OperationFailureCode::Cancelled,
+            OperationFailureCode::WriteFailed,
+            OperationFailureCode::ValidationFailed,
+            OperationFailureCode::PublicationFailed,
+            OperationFailureCode::PublicationUncertain,
+            OperationFailureCode::CleanupIncomplete,
+            OperationFailureCode::CheckpointFailed,
+        ];
+        for code in codes {
+            let message = super::copy_error(code);
+            assert_ne!(
+                message,
+                super::copy_error_message("future_unknown_code"),
+                "missing English copy error for {code}"
+            );
+        }
     }
 
     #[test]
@@ -770,6 +933,44 @@ mod tests {
             super::copy_history_error("job_history_unavailable"),
             "The standalone Job history could not be updated. The reported operation result and filesystem evidence remain unchanged; inspect them before retrying."
         );
+        let messages = super::history_messages();
+        assert_eq!(
+            messages.independent_batch_source,
+            "Independent batch (item sources below)"
+        );
+        assert_eq!(messages.not_assigned, "Not assigned");
+    }
+
+    #[test]
+    fn history_resource_labels_cover_every_persisted_job_and_item_state() {
+        let states = [
+            ("admitted", "Admitted"),
+            ("running", "Running"),
+            ("planned", "Planned"),
+            ("succeeded", "Succeeded"),
+            ("completed_with_issues", "Completed with issues"),
+            ("failed", "Failed"),
+            ("skipped", "Skipped"),
+            ("uncertain", "Uncertain"),
+            ("cancelled", "Cancelled"),
+            ("interrupted", "Interrupted"),
+            ("not_started", "Not started"),
+        ];
+
+        for (state, expected) in states {
+            assert_eq!(
+                super::history_state_label(state),
+                expected,
+                "missing or incorrect human label for persisted state {state}"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_batch_item_labels_come_from_localization_resources() {
+        let messages = super::copy_messages();
+        assert_eq!(super::copy_batch_item_label(1, messages), "item");
+        assert_eq!(super::copy_batch_item_label(2, messages), "items");
     }
 
     #[test]

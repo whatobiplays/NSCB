@@ -7,6 +7,11 @@ operation is supported only on macOS when its required filesystem operations
 are available. Linux, Windows, network filesystems, and unqualified filesystem
 configurations are outside this version's qualification.
 
+Independent copy batches reuse this copy core for each planned item and execute
+the items sequentially. Batch admission adds identity, key, and destination
+name checks across items. It does not weaken any single-item source,
+destination, workspace, locking, validation, promotion, or artifact rule.
+
 ## Planning and destination policy
 
 `Engine::plan_copy_through(CopyThroughRequest)` reads the source and destination
@@ -34,6 +39,13 @@ The serialized inspection snapshot carries `kind`, `nscb_version`, the source
 evidence, explicit workspace, destination baseline, policy, and planned
 artifact paths. It cannot reconstruct or replay the in-memory plan. A stale
 plan must be planned again by the caller.
+
+For a batch, planning requires an existing output directory and records a
+directory identity that execution revalidates. It rejects duplicate source
+identities, stable-key duplicates, hard-link aliases, and destination names
+that collide after case or Unicode normalization. Output basenames are derived
+from the selected source names before admission. Planning does not create the
+output directory, workspace, staging entry, lock marker, or destination.
 
 `ConflictPolicy::Fail` is the default and refuses to overwrite a different
 existing destination. If the destination already matches the planned source,
@@ -232,6 +244,12 @@ staging by the copy loop. It is zero for `AlreadyUpToDate` and for failures or
 cancellation before copying, and it can equal `total_bytes()` after a later
 verification or publication failure. Copy completion therefore does not claim
 verification or publication success.
+
+`CopyBatchSession` owns one sequential batch admission and exposes aggregate
+item progress plus one event consumer. Each item still uses its own operation
+session and the same parent-directory publication lock. A failed typed
+checkpoint stops the next item from starting. Recovering a completed batch item
+from durable history never grants that item another publication attempt.
 
 `OperationSession::subscribe_events()` claims one logical ordered event consumer
 for the next execution. Events carry execution-local sequence numbers and do
