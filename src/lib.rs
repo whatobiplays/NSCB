@@ -16,6 +16,7 @@ mod file_identity;
 mod input_resolution;
 mod inspection;
 mod key_file;
+#[cfg(any(target_os = "macos", test))]
 mod multi_content_format;
 mod nca;
 mod operation;

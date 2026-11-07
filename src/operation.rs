@@ -18,6 +18,7 @@ use crate::input_resolution::{ResolvedInput, SplitQualification};
 use crate::inspection::CancellationHandle;
 #[cfg(target_os = "macos")]
 use crate::multi_content_format::FormatError;
+#[cfg(target_os = "macos")]
 use crate::multi_content_format::{ComponentGroup, ProgramMember};
 use crate::sha256::Sha256Digest;
 #[cfg(target_os = "macos")]
@@ -1191,6 +1192,7 @@ pub struct OperationPlan {
     backup_name: Option<OsString>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     published_recovery_name: Option<OsString>,
+    #[cfg(target_os = "macos")]
     multi_content: Option<MultiContentPlan>,
 }
 
@@ -2049,6 +2051,7 @@ struct FileEvidence {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
 struct ContentSourceSet {
     files: Vec<ResolvedFile>,
     evidence: Vec<FileEvidence>,
@@ -2059,6 +2062,7 @@ struct ContentSourceSet {
 }
 
 #[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
 struct ContentOutputEvidence {
     name: Option<OsString>,
     program_id: Option<u64>,
@@ -2068,12 +2072,14 @@ struct ContentOutputEvidence {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(target_os = "macos")]
 struct OutputDirectoryEvidence {
     identity: FileIdentity,
     manifest_sha256: Sha256Digest,
 }
 
 #[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
 enum MultiContentPlan {
     Build(ContentSourceSet),
     Split {
@@ -2083,7 +2089,9 @@ enum MultiContentPlan {
     },
 }
 
+#[cfg(target_os = "macos")]
 const MAX_MULTI_CONTENT_SOURCES: usize = 65_536;
+#[cfg(target_os = "macos")]
 const MAX_MULTI_CONTENT_MEMBERS: usize = 65_536;
 
 #[cfg(target_os = "macos")]
@@ -3455,6 +3463,7 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
         stage_file_name,
         backup_name,
         published_recovery_name,
+        #[cfg(target_os = "macos")]
         multi_content: None,
     })
 }
