@@ -560,6 +560,13 @@ fn run_with_control(
         }
     }
 
+    if args.first().is_some_and(|argument| {
+        argument == OsStr::new("multi-content-build")
+            || argument == OsStr::new("multi-content-split")
+    }) {
+        return run_multi_content_command(args, engine, stdout, stderr);
+    }
+
     if args
         .first()
         .is_some_and(|argument| argument == OsStr::new("inspect"))
@@ -650,6 +657,313 @@ fn run_with_control(
                 code
             }
         }
+    }
+}
+
+enum MultiContentInvocation {
+    Build {
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        workspace: PathBuf,
+        conflict_policy: ConflictPolicy,
+        json: bool,
+        jsonl: bool,
+    },
+    Split {
+        source: PathBuf,
+        destination_directory: PathBuf,
+        workspace: PathBuf,
+        conflict_policy: ConflictPolicy,
+        json: bool,
+        jsonl: bool,
+    },
+}
+
+#[derive(Serialize)]
+struct MultiContentJobDocument<'a> {
+    schema_version: u8,
+    kind: &'static str,
+    nscb_version: &'static str,
+    plan: &'a nscb::OperationPlanSnapshot,
+    session: OperationSessionSnapshot,
+    result: &'a OperationResult,
+}
+
+#[derive(Serialize)]
+struct MultiContentEventDocument<'a> {
+    schema_version: u8,
+    kind: &'static str,
+    nscb_version: &'static str,
+    sequence: u64,
+    snapshot: OperationSessionSnapshot,
+    #[serde(flatten)]
+    event: &'a OperationEventKind,
+}
+
+fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvocation, ()> {
+    let command = args.first().and_then(|value| value.to_str()).ok_or(())?;
+    let is_build = command == "multi-content-build";
+    if !is_build && command != "multi-content-split" {
+        return Err(());
+    }
+
+    let mut sources = Vec::new();
+    let mut destination = None;
+    let mut destination_directory = None;
+    let mut workspace = None;
+    let mut conflict_policy = ConflictPolicy::Fail;
+    let mut conflict_policy_seen = false;
+    let mut json = false;
+    let mut jsonl = false;
+    let mut index = 1;
+    while index < args.len() {
+        let option = args[index].to_str().ok_or(())?;
+        index += 1;
+        match option {
+            "--source" | "--output" | "--output-directory" | "--workspace"
+            | "--conflict-policy" => {
+                let value = args.get(index).ok_or(())?;
+                if value.is_empty() {
+                    return Err(());
+                }
+                index += 1;
+                match option {
+                    "--source" => sources.push(PathBuf::from(value)),
+                    "--output" if is_build && destination.is_none() => {
+                        destination = Some(PathBuf::from(value));
+                    }
+                    "--output-directory" if !is_build && destination_directory.is_none() => {
+                        destination_directory = Some(PathBuf::from(value));
+                    }
+                    "--workspace" if workspace.is_none() => {
+                        workspace = Some(PathBuf::from(value));
+                    }
+                    "--conflict-policy" if !conflict_policy_seen => {
+                        conflict_policy_seen = true;
+                        conflict_policy = match value.to_str().ok_or(())? {
+                            "fail" => ConflictPolicy::Fail,
+                            "replace" => ConflictPolicy::Replace,
+                            "skip" => ConflictPolicy::Skip,
+                            _ => return Err(()),
+                        };
+                    }
+                    _ => return Err(()),
+                }
+            }
+            "--json" if !json && !jsonl => json = true,
+            "--jsonl" if !json && !jsonl => jsonl = true,
+            _ => return Err(()),
+        }
+    }
+
+    let workspace = workspace.ok_or(())?;
+    if is_build {
+        if sources.is_empty() || destination_directory.is_some() {
+            return Err(());
+        }
+        Ok(MultiContentInvocation::Build {
+            sources,
+            destination: destination.ok_or(())?,
+            workspace,
+            conflict_policy,
+            json,
+            jsonl,
+        })
+    } else {
+        if sources.len() != 1 || destination.is_some() {
+            return Err(());
+        }
+        Ok(MultiContentInvocation::Split {
+            source: sources.remove(0),
+            destination_directory: destination_directory.ok_or(())?,
+            workspace,
+            conflict_policy,
+            json,
+            jsonl,
+        })
+    }
+}
+
+fn run_multi_content_command(
+    args: &[OsString],
+    engine: &Engine,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let invocation = match parse_multi_content_invocation(args) {
+        Ok(invocation) => invocation,
+        Err(()) => {
+            if machine_output_requested_before_delimiter(args) {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            let _ = writeln!(stderr, "{}", multi_content_usage(args));
+            return EXIT_USAGE;
+        }
+    };
+    let (plan, json, jsonl, verb) = match invocation {
+        MultiContentInvocation::Build {
+            sources,
+            destination,
+            workspace,
+            conflict_policy,
+            json,
+            jsonl,
+        } => (
+            engine.plan_multi_content_build(
+                nscb::MultiContentBuildRequest::new(sources, destination, workspace)
+                    .with_conflict_policy(conflict_policy),
+            ),
+            json,
+            jsonl,
+            "build",
+        ),
+        MultiContentInvocation::Split {
+            source,
+            destination_directory,
+            workspace,
+            conflict_policy,
+            json,
+            jsonl,
+        } => (
+            engine.plan_multi_content_split(
+                nscb::MultiContentSplitRequest::new(source, destination_directory, workspace)
+                    .with_conflict_policy(conflict_policy),
+            ),
+            json,
+            jsonl,
+            "split",
+        ),
+    };
+    let machine_requested = json || jsonl;
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            if machine_requested {
+                return emit_error(
+                    stdout,
+                    error.code().as_str(),
+                    exit_for_operation_failure(error.code()),
+                );
+            }
+            let _ = writeln!(stderr, "multi-content {verb} failed: {}", error.code());
+            return exit_for_operation_failure(error.code());
+        }
+    };
+    let snapshot = plan.snapshot().clone();
+    if machine_requested && serde_json::to_value(&snapshot).is_err() {
+        return emit_error(stdout, "unrepresentable_path", EXIT_INPUT);
+    }
+    let cancellation = match scoped_cancellation() {
+        Ok(cancellation) => cancellation,
+        Err(_) => {
+            if machine_requested {
+                return emit_error(stdout, "signal_handler_failed", EXIT_INTERNAL);
+            }
+            let _ = writeln!(
+                stderr,
+                "multi-content {verb} could not install signal handlers"
+            );
+            return EXIT_INTERNAL;
+        }
+    };
+    let session = OperationSession::new();
+    let consumer = if jsonl {
+        match session.subscribe_events() {
+            Ok(consumer) => Some(consumer),
+            Err(code) => {
+                return emit_error(stdout, code.as_str(), exit_for_operation_failure(code));
+            }
+        }
+    } else {
+        None
+    };
+    let result = if let Some(consumer) = consumer {
+        let execution_session = session.clone();
+        let execution_cancellation = cancellation.handle().clone();
+        let worker = match spawn_copy_worker(move || CopyWorkerOutput {
+            result: Some(Engine::new().execute_operation_with_cancellation(
+                plan,
+                &execution_session,
+                execution_cancellation,
+            )),
+            history_error: None,
+        }) {
+            Ok(worker) => worker,
+            Err(_) => return emit_error(stdout, "execution_worker_start_failed", EXIT_INTERNAL),
+        };
+        let output_ok = stream_multi_content_events(&consumer, stdout, &worker);
+        let worker_output = match worker.join() {
+            Ok(output) => output,
+            Err(_) => return emit_error(stdout, "execution_worker_failed", EXIT_INTERNAL),
+        };
+        if !output_ok {
+            return report_output_failure(stderr);
+        }
+        let Some(result) = worker_output.result else {
+            return emit_error(stdout, "execution_worker_failed", EXIT_INTERNAL);
+        };
+        result
+    } else {
+        engine.execute_operation_with_cancellation(plan, &session, cancellation.handle().clone())
+    };
+
+    if machine_requested {
+        let completion = match session.last_completion() {
+            Ok(Some(completion)) => completion,
+            _ => return emit_error(stdout, "session_unavailable", EXIT_INTERNAL),
+        };
+        let document = MultiContentJobDocument {
+            schema_version: 1,
+            kind: "multi_content.job_result",
+            nscb_version: env!("CARGO_PKG_VERSION"),
+            plan: &snapshot,
+            session: completion.snapshot(),
+            result: &result,
+        };
+        if !write_json(&document, stdout) {
+            return report_output_failure(stderr);
+        }
+    } else if result.state() == JobState::Succeeded {
+        let outcome = match result.outcome() {
+            Some(nscb::OperationOutcome::Built) => "built",
+            Some(nscb::OperationOutcome::Split) => "split",
+            Some(nscb::OperationOutcome::AlreadyUpToDate) => "already up to date",
+            Some(nscb::OperationOutcome::Skipped) => "skipped",
+            _ => "completed",
+        };
+        if writeln!(
+            stdout,
+            "multi-content {verb} {outcome}: {}",
+            snapshot.destination().display()
+        )
+        .is_err()
+        {
+            return report_output_failure(stderr);
+        }
+    } else if let Some(failure) = result.failure() {
+        let _ = writeln!(stderr, "multi-content {verb} failed: {}", failure.code());
+    }
+
+    match result.state() {
+        JobState::Succeeded => EXIT_SUCCESS,
+        JobState::Cancelled => EXIT_CANCELLED,
+        JobState::CompletedWithIssues => EXIT_COMPLETED_WITH_ISSUES,
+        JobState::Failed => result
+            .failure()
+            .map(|failure| exit_for_operation_failure(failure.code()))
+            .unwrap_or(EXIT_INTERNAL),
+        _ => EXIT_INTERNAL,
+    }
+}
+
+fn multi_content_usage(args: &[OsString]) -> &'static str {
+    if args
+        .first()
+        .is_some_and(|value| value == OsStr::new("multi-content-build"))
+    {
+        "usage: multi-content-build --source PACKAGE [--source PACKAGE...] --output PACKAGE --workspace DIR [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+    } else {
+        "usage: multi-content-split --source PACKAGE --output-directory DIR --workspace DIR [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     }
 }
 
@@ -3722,7 +4036,13 @@ fn exit_for_operation_failure(code: OperationFailureCode) -> i32 {
         | OperationFailureCode::DestinationUnavailable
         | OperationFailureCode::UnsafePath
         | OperationFailureCode::UnsupportedCapability
-        | OperationFailureCode::InsufficientStorage => EXIT_INPUT,
+        | OperationFailureCode::InsufficientStorage
+        | OperationFailureCode::DuplicateContentMember
+        | OperationFailureCode::InvalidContentPackage
+        | OperationFailureCode::UnsupportedContentProfile
+        | OperationFailureCode::AmbiguousContentGrouping
+        | OperationFailureCode::InsufficientContentEvidence
+        | OperationFailureCode::ResourceLimitExceeded => EXIT_INPUT,
         OperationFailureCode::Cancelled => EXIT_CANCELLED,
         _ => EXIT_INTERNAL,
     }
@@ -3769,6 +4089,46 @@ struct JobResultDocument<'a> {
 struct CopyWorkerOutput {
     result: Option<OperationResult>,
     history_error: Option<HistoryError>,
+}
+
+fn stream_multi_content_events(
+    consumer: &OperationEventConsumer,
+    stdout: &mut dyn Write,
+    worker: &std::thread::JoinHandle<CopyWorkerOutput>,
+) -> bool {
+    let mut output_ok = true;
+    let mut write_event = |event: nscb::OperationEvent| {
+        write_json(
+            &MultiContentEventDocument {
+                schema_version: 1,
+                kind: "job.event",
+                nscb_version: env!("CARGO_PKG_VERSION"),
+                sequence: event.sequence(),
+                snapshot: event.snapshot(),
+                event: event.event(),
+            },
+            stdout,
+        ) && stdout.flush().is_ok()
+    };
+    loop {
+        let event = match consumer.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !worker.is_finished() {
+                    continue;
+                }
+                match consumer.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if output_ok {
+            output_ok = write_event(event);
+        }
+    }
+    output_ok
 }
 
 #[derive(Debug, Default)]

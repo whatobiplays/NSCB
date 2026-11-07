@@ -16,6 +16,10 @@ use crate::input_resolution::{
 };
 use crate::input_resolution::{ResolvedInput, SplitQualification};
 use crate::inspection::CancellationHandle;
+#[cfg(target_os = "macos")]
+use crate::multi_content_format::FormatError;
+#[cfg(target_os = "macos")]
+use crate::multi_content_format::{ComponentGroup, ProgramMember};
 use crate::sha256::Sha256Digest;
 #[cfg(target_os = "macos")]
 use crate::split_resolution::{directory_has_canonical_member, has_adjacent_sidecar};
@@ -24,6 +28,8 @@ use fs2::FileExt as _;
 use serde::Serialize;
 #[cfg(target_os = "macos")]
 use sha2::{Digest as _, Sha256};
+#[cfg(target_os = "macos")]
+use std::collections::HashSet;
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
 #[cfg(target_os = "macos")]
@@ -250,6 +256,79 @@ impl CopyThroughRequest {
     }
 }
 
+/// Describes a request to combine structurally supported PFS0 content packages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiContentBuildRequest {
+    sources: Vec<PathBuf>,
+    destination: PathBuf,
+    workspace: PathBuf,
+    conflict_policy: ConflictPolicy,
+}
+
+impl MultiContentBuildRequest {
+    /// Creates a Build request from one or more source package paths.
+    ///
+    /// Every package member must match the readable plaintext Program NCA
+    /// profile supported by the current operation. The output is a newly
+    /// composed PFS0 package; it is not an NSP authenticity or reconstruction
+    /// claim.
+    pub fn new(
+        sources: impl IntoIterator<Item = impl Into<PathBuf>>,
+        destination: impl Into<PathBuf>,
+        workspace: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            sources: sources.into_iter().map(Into::into).collect(),
+            destination: destination.into(),
+            workspace: workspace.into(),
+            conflict_policy: ConflictPolicy::Fail,
+        }
+    }
+
+    /// Selects how an existing output is handled.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
+    }
+}
+
+/// Describes a request to split a multi-Program PFS0 package into component packages.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MultiContentSplitRequest {
+    source: PathBuf,
+    destination_directory: PathBuf,
+    workspace: PathBuf,
+    conflict_policy: ConflictPolicy,
+}
+
+impl MultiContentSplitRequest {
+    /// Creates a Split request whose destination is one published directory.
+    ///
+    /// Each exact ProgramId group is written as a deterministic PFS0 package
+    /// inside the directory. The directory is staged and published as one
+    /// operation unit.
+    pub fn new(
+        source: impl Into<PathBuf>,
+        destination_directory: impl Into<PathBuf>,
+        workspace: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            destination_directory: destination_directory.into(),
+            workspace: workspace.into(),
+            conflict_policy: ConflictPolicy::Fail,
+        }
+    }
+
+    /// Selects how an existing output directory is handled.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
+    }
+}
+
 /// The terminal state of a synchronous operation job.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,6 +355,23 @@ pub enum OperationOutcome {
     AlreadyUpToDate,
     /// An existing destination was deliberately left unchanged by `skip`.
     Skipped,
+    /// A structurally validated multi-content package was built and published.
+    Built,
+    /// Component packages were split and published as one directory.
+    Split,
+}
+
+/// Stable identity of the operation represented by an immutable plan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OperationKind {
+    /// Byte-preserving copy through.
+    CopyThrough,
+    /// Deterministic composition of supported PFS0 Program content.
+    MultiContentBuild,
+    /// Separation of a supported package by byte-derived ProgramId.
+    MultiContentSplit,
 }
 
 /// A stable category for planning, execution, and publication failures.
@@ -289,6 +385,18 @@ pub enum OperationFailureCode {
     EmptySelection,
     /// Two independent items resolve the same logical input identity.
     DuplicateInput,
+    /// A PFS0 package contains duplicate ProgramId/content-index identity.
+    DuplicateContentMember,
+    /// A package contains malformed or insufficiently validated content bytes.
+    InvalidContentPackage,
+    /// A package uses a content profile that this operation does not support.
+    UnsupportedContentProfile,
+    /// Package member ownership cannot be established from supported byte evidence.
+    AmbiguousContentGrouping,
+    /// The inputs do not establish at least two distinct logical ProgramId groups.
+    InsufficientContentEvidence,
+    /// A bounded parser or operation metadata limit was exceeded.
+    ResourceLimitExceeded,
     /// Two independent items map to colliding destination identities.
     DestinationCollision,
     /// The source path is missing, unreadable, or not a regular file.
@@ -347,6 +455,12 @@ impl OperationFailureCode {
             Self::EmptyBatch => "empty_batch",
             Self::EmptySelection => "empty_selection",
             Self::DuplicateInput => "duplicate_input",
+            Self::DuplicateContentMember => "duplicate_content_member",
+            Self::InvalidContentPackage => "invalid_content_package",
+            Self::UnsupportedContentProfile => "unsupported_content_profile",
+            Self::AmbiguousContentGrouping => "ambiguous_content_grouping",
+            Self::InsufficientContentEvidence => "insufficient_content_evidence",
+            Self::ResourceLimitExceeded => "resource_limit_exceeded",
             Self::DestinationCollision => "destination_collision",
             Self::SourceUnavailable => "source_unavailable",
             Self::SplitInputUnsupported => "split_input_unsupported",
@@ -783,6 +897,61 @@ impl PlannedSource {
     }
 }
 
+/// One exact ProgramId group resolved by a multi-content plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlannedContentGroup {
+    program_id: u64,
+    members: Vec<PlannedContentMember>,
+}
+
+impl PlannedContentGroup {
+    /// Returns the ProgramId parsed from each member's supported NCA header.
+    pub const fn program_id(&self) -> u64 {
+        self.program_id
+    }
+
+    /// Returns the number of validated Program NCA members in this group.
+    pub const fn member_count(&self) -> usize {
+        self.members.len()
+    }
+
+    /// Returns the byte-derived NCA member evidence assigned to this group.
+    pub fn members(&self) -> &[PlannedContentMember] {
+        &self.members
+    }
+}
+
+/// One structurally validated NCA member captured by a multi-content plan.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlannedContentMember {
+    source_path: PathBuf,
+    content_index: u32,
+    size: u64,
+    sha256: Sha256Digest,
+}
+
+impl PlannedContentMember {
+    /// Returns the canonical source package path containing the member.
+    pub fn source_path(&self) -> &Path {
+        &self.source_path
+    }
+
+    /// Returns the content index parsed from the NCA header bytes.
+    pub const fn content_index(&self) -> u32 {
+        self.content_index
+    }
+
+    /// Returns the member size observed during planning.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Returns the SHA-256 digest observed from the complete member bytes.
+    pub const fn sha256(&self) -> Sha256Digest {
+        self.sha256
+    }
+}
+
 /// The destination state that execution must revalidate before publication.
 ///
 /// Downstream code should include a wildcard arm when matching this enum so
@@ -812,6 +981,13 @@ pub enum DestinationBaseline {
         size: u64,
         /// SHA-256 digest of destination bytes observed during planning.
         sha256: Sha256Digest,
+    },
+    /// A multi-content Split destination directory existed during planning.
+    ExistingDirectory {
+        /// Opaque digest of the destination directory filesystem identity.
+        identity: Sha256Digest,
+        /// SHA-256 digest of its sorted direct-child names and file evidence.
+        manifest_sha256: Sha256Digest,
     },
 }
 
@@ -864,13 +1040,21 @@ pub enum PlannedEffect {
 /// A public, read-only view of the decisions captured by an operation plan.
 ///
 /// This snapshot is serializable for inspection, but it cannot be deserialized
-/// into an executable plan. Execution accepts only the in-memory plan produced
-/// by `Engine::plan_copy_through`.
+/// into an executable plan. Execution accepts only the in-memory plan returned
+/// by an `Engine` planning method.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct OperationPlanSnapshot {
     kind: &'static str,
+    #[serde(skip_serializing_if = "is_copy_through")]
+    operation_kind: OperationKind,
     nscb_version: &'static str,
     source: PlannedSource,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    sources: Vec<PlannedSource>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    content_groups: Vec<PlannedContentGroup>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    output_paths: Vec<PathBuf>,
     destination: PathBuf,
     workspace: PathBuf,
     staging_strategy: StagingStrategy,
@@ -884,10 +1068,19 @@ pub struct OperationPlanSnapshot {
     planned_artifacts: Vec<PlannedArtifact>,
 }
 
+fn is_copy_through(kind: &OperationKind) -> bool {
+    *kind == OperationKind::CopyThrough
+}
+
 impl OperationPlanSnapshot {
     /// Returns the serialized kind identifying this inspection snapshot.
     pub const fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    /// Returns the typed operation identity captured by the plan.
+    pub const fn operation_kind(&self) -> OperationKind {
+        self.operation_kind
     }
 
     /// Returns the NSCB package version that produced this snapshot.
@@ -898,6 +1091,21 @@ impl OperationPlanSnapshot {
     /// Returns the complete source identity and content evidence captured by planning.
     pub const fn source(&self) -> &PlannedSource {
         &self.source
+    }
+
+    /// Returns every input package captured by the plan in deterministic order.
+    pub fn sources(&self) -> &[PlannedSource] {
+        &self.sources
+    }
+
+    /// Returns the ProgramId groups and member counts resolved from input bytes.
+    pub fn content_groups(&self) -> &[PlannedContentGroup] {
+        &self.content_groups
+    }
+
+    /// Returns the output package paths planned for the operation.
+    pub fn output_paths(&self) -> &[PathBuf] {
+        &self.output_paths
     }
 
     /// Returns the canonical destination path that execution will publish to.
@@ -984,6 +1192,8 @@ pub struct OperationPlan {
     backup_name: Option<OsString>,
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     published_recovery_name: Option<OsString>,
+    #[cfg(target_os = "macos")]
+    multi_content: Option<MultiContentPlan>,
 }
 
 impl OperationPlan {
@@ -1840,6 +2050,1125 @@ struct FileEvidence {
     sha256: Sha256Digest,
 }
 
+#[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
+struct ContentSourceSet {
+    files: Vec<ResolvedFile>,
+    evidence: Vec<FileEvidence>,
+    groups: Vec<ComponentGroup>,
+    members: Vec<ProgramMember>,
+    outputs: Vec<ContentOutputEvidence>,
+    total_member_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
+struct ContentOutputEvidence {
+    name: Option<OsString>,
+    program_id: Option<u64>,
+    members: Vec<ProgramMember>,
+    length: u64,
+    sha256: Sha256Digest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(target_os = "macos")]
+struct OutputDirectoryEvidence {
+    identity: FileIdentity,
+    manifest_sha256: Sha256Digest,
+}
+
+#[derive(Clone, Debug)]
+#[cfg(target_os = "macos")]
+enum MultiContentPlan {
+    Build(ContentSourceSet),
+    Split {
+        source: ContentSourceSet,
+        destination_baseline: Option<OutputDirectoryEvidence>,
+        staged_directory_name: Option<OsString>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+const MAX_MULTI_CONTENT_SOURCES: usize = 65_536;
+#[cfg(target_os = "macos")]
+const MAX_MULTI_CONTENT_MEMBERS: usize = 65_536;
+
+#[cfg(target_os = "macos")]
+struct ContentDigestWriter {
+    digest: Sha256,
+    length: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl ContentDigestWriter {
+    fn new() -> Self {
+        Self {
+            digest: Sha256::new(),
+            length: 0,
+        }
+    }
+
+    fn finish(self) -> ContentOutputEvidence {
+        ContentOutputEvidence {
+            name: None,
+            program_id: None,
+            members: Vec::new(),
+            length: self.length,
+            sha256: Sha256Digest::from_bytes(self.digest.finalize().into()),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Write for ContentDigestWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let length = u64::try_from(bytes.len())
+            .map_err(|_| io::Error::other("PFS0 output length exceeds the supported range"))?;
+        self.length = self
+            .length
+            .checked_add(length)
+            .ok_or_else(|| io::Error::other("PFS0 output length exceeds the supported range"))?;
+        self.digest.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Plans one deterministic PFS0 from packages grouped by their NCA Program IDs.
+pub(crate) fn plan_multi_content_build(
+    request: MultiContentBuildRequest,
+) -> Result<OperationPlan, OperationError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        plan_multi_content_build_unix(request)
+    }
+}
+
+/// Plans one package per Program ID and publishes the packages as one directory.
+pub(crate) fn plan_multi_content_split(
+    request: MultiContentSplitRequest,
+) -> Result<OperationPlan, OperationError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        plan_multi_content_split_unix(request)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_content_format_error(error: FormatError) -> OperationFailureCode {
+    match error {
+        FormatError::SourceUnavailable => OperationFailureCode::SourceUnavailable,
+        FormatError::InvalidPackage => OperationFailureCode::InvalidContentPackage,
+        FormatError::UnsupportedProfile => OperationFailureCode::UnsupportedContentProfile,
+        FormatError::DuplicateMember => OperationFailureCode::DuplicateContentMember,
+        FormatError::AmbiguousGrouping => OperationFailureCode::AmbiguousContentGrouping,
+        FormatError::ResourceLimit => OperationFailureCode::ResourceLimitExceeded,
+        FormatError::OutputUnavailable => OperationFailureCode::WriteFailed,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, OperationError> {
+    if paths.is_empty() {
+        return Err(OperationError::new(OperationFailureCode::EmptySelection));
+    }
+    if paths.len() > MAX_MULTI_CONTENT_SOURCES {
+        return Err(OperationError::new(
+            OperationFailureCode::ResourceLimitExceeded,
+        ));
+    }
+
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(paths.len())
+        .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    let mut evidence = Vec::new();
+    evidence
+        .try_reserve_exact(paths.len())
+        .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    let mut members = Vec::new();
+    let mut identities = Vec::new();
+    identities
+        .try_reserve_exact(paths.len())
+        .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    let mut member_identities = HashSet::new();
+
+    for path in paths {
+        let mut resolved = resolve_file(path, OperationFailureCode::SourceUnavailable)?;
+        let parent = open_directory(&resolved.parent)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        let mut source = open_file_at(&parent, &resolved.name)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        let baseline = inspect_file(&mut source)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        if identities.contains(&baseline.identity) {
+            return Err(OperationError::new(OperationFailureCode::DuplicateInput));
+        }
+
+        let canonical_path = fs::canonicalize(&resolved.path)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        let canonical_parent = canonical_path
+            .parent()
+            .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+        let canonical_name = canonical_path
+            .file_name()
+            .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+        let canonical_name = canonical_name.to_os_string();
+        if canonical_parent != resolved.parent {
+            return Err(OperationError::new(OperationFailureCode::StalePlan));
+        }
+        resolved.path = canonical_path;
+        resolved.name = canonical_name;
+
+        let package = crate::multi_content_format::inspect_package(&resolved.path)
+            .map_err(|error| OperationError::new(map_content_format_error(error)))?;
+        verify_file_evidence(&mut source, &baseline)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+        validate_file_route(&resolved, None).map_err(OperationError::new)?;
+        if package.members.len() > MAX_MULTI_CONTENT_MEMBERS.saturating_sub(members.len()) {
+            return Err(OperationError::new(
+                OperationFailureCode::ResourceLimitExceeded,
+            ));
+        }
+        member_identities
+            .try_reserve(package.members.len())
+            .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+        members
+            .try_reserve(package.members.len())
+            .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+        for member in package.members {
+            if !member_identities.insert((member.program_id, member.content_index)) {
+                return Err(OperationError::new(
+                    OperationFailureCode::DuplicateContentMember,
+                ));
+            }
+            members.push(member);
+        }
+        identities.push(baseline.identity);
+        evidence.push(baseline);
+        files.push(resolved);
+    }
+
+    let mut order = (0..files.len()).collect::<Vec<_>>();
+    order.sort_by(|left, right| files[*left].path.cmp(&files[*right].path));
+    let files = order
+        .iter()
+        .map(|index| files[*index].clone())
+        .collect::<Vec<_>>();
+    let evidence = order
+        .iter()
+        .map(|index| evidence[*index].clone())
+        .collect::<Vec<_>>();
+    if files.windows(2).any(|pair| pair[0].path == pair[1].path) {
+        return Err(OperationError::new(OperationFailureCode::DuplicateInput));
+    }
+    members.sort_by_key(|member| (member.program_id, member.content_index));
+
+    let mut groups: Vec<ComponentGroup> = Vec::new();
+    groups
+        .try_reserve_exact(members.len())
+        .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    for member in &members {
+        if let Some(group) = groups
+            .last_mut()
+            .filter(|group| group.program_id == member.program_id)
+        {
+            group
+                .members
+                .try_reserve(1)
+                .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+            group.members.push(member.clone());
+        } else {
+            let mut group_members = Vec::new();
+            group_members
+                .try_reserve_exact(1)
+                .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+            group_members.push(member.clone());
+            groups.push(ComponentGroup {
+                program_id: member.program_id,
+                members: group_members,
+            });
+        }
+    }
+    if groups.len() < 2 {
+        return Err(OperationError::new(
+            OperationFailureCode::InsufficientContentEvidence,
+        ));
+    }
+
+    let total_member_bytes = members
+        .iter()
+        .try_fold(0_u64, |total, member| total.checked_add(member.size));
+    let total_member_bytes = total_member_bytes
+        .ok_or_else(|| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    Ok(ContentSourceSet {
+        files,
+        evidence,
+        groups,
+        members,
+        outputs: Vec::new(),
+        total_member_bytes,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn plan_content_output(
+    members: &[ProgramMember],
+    name: Option<OsString>,
+    program_id: Option<u64>,
+) -> Result<ContentOutputEvidence, OperationError> {
+    let mut writer = ContentDigestWriter::new();
+    crate::multi_content_format::write_pfs0(&mut writer, members, |_| Ok(()))
+        .map_err(|error| OperationError::new(map_content_format_error(error)))?;
+    let mut output = writer.finish();
+    output.name = name;
+    output.program_id = program_id;
+    output.members = members.to_vec();
+    output
+        .members
+        .sort_by_key(|member| (member.program_id, member.content_index));
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_content_groups(source: &ContentSourceSet) -> Vec<PlannedContentGroup> {
+    source
+        .groups
+        .iter()
+        .map(|group| PlannedContentGroup {
+            program_id: group.program_id,
+            members: group
+                .members
+                .iter()
+                .map(|member| PlannedContentMember {
+                    source_path: member.source_path.clone(),
+                    content_index: member.content_index,
+                    size: member.size,
+                    sha256: member.sha256,
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_content_sources(source: &ContentSourceSet) -> Vec<PlannedSource> {
+    source
+        .files
+        .iter()
+        .zip(&source.evidence)
+        .map(|(file, evidence)| PlannedSource {
+            path: file.path.clone(),
+            identity: evidence.identity.fingerprint(),
+            size: evidence.snapshot.len,
+            sha256: evidence.sha256,
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+struct MultiContentPlanEnvironment {
+    destination: ResolvedFile,
+    workspace: ResolvedDirectory,
+    workspace_identity: FileIdentity,
+    staging_strategy: StagingStrategy,
+    destination_lock_path: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_multi_content_environment(
+    destination_path: &Path,
+    workspace_path: &Path,
+) -> Result<MultiContentPlanEnvironment, OperationError> {
+    let destination = resolve_destination_file(destination_path)?;
+    let requested_workspace = resolve_directory(workspace_path)?;
+    if is_filesystem_root(destination.anchor()) || is_filesystem_root(&requested_workspace.path) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let destination_directory = open_directory(destination.anchor())
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationUnavailable))?;
+    let destination_identity = required_identity(&destination_directory)
+        .map_err(|_| OperationError::new(OperationFailureCode::UnsupportedCapability))?;
+    if !qualified_local_apfs_volume(&destination_directory) {
+        return Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ));
+    }
+
+    let workspace_anchor = requested_workspace
+        .identity
+        .map(|_| requested_workspace.path.as_path())
+        .or(requested_workspace.creation_parent.as_deref())
+        .ok_or_else(|| OperationError::new(OperationFailureCode::WorkspaceUnavailable))?;
+    let workspace_directory = open_directory(workspace_anchor)
+        .map_err(|_| OperationError::new(OperationFailureCode::WorkspaceUnavailable))?;
+    let workspace_identity = required_identity(&workspace_directory)
+        .map_err(|_| OperationError::new(OperationFailureCode::UnsupportedCapability))?;
+    if !qualified_local_apfs_volume(&workspace_directory)
+        || !workspace_identity.same_filesystem_as(destination_identity)
+    {
+        return Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ));
+    }
+    require_directory_writable(&workspace_directory).map_err(OperationError::new)?;
+
+    let (workspace, staging_strategy) = select_staging_workspace(
+        WorkspaceSelection::Explicit,
+        requested_workspace,
+        true,
+        destination.anchor(),
+        destination_identity,
+    )
+    .map_err(OperationError::new)?;
+    let expected_workspace_identity = workspace
+        .identity
+        .or(workspace.creation_parent_identity)
+        .ok_or_else(|| OperationError::new(OperationFailureCode::WorkspaceUnavailable))?;
+    if expected_workspace_identity != workspace_identity
+        || destination.parent_identity != destination_identity
+    {
+        return Err(OperationError::new(OperationFailureCode::StalePlan));
+    }
+    validate_file_route(&destination, None).map_err(OperationError::new)?;
+    validate_directory_route(&workspace, None).map_err(OperationError::new)?;
+
+    let lock_name = destination_lock_name(&destination.path);
+    if lock_name == destination.name {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    Ok(MultiContentPlanEnvironment {
+        destination_lock_path: destination.parent.join(lock_name),
+        destination,
+        workspace,
+        workspace_identity,
+        staging_strategy,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_content_sources_for_plan(source: &ContentSourceSet) -> Result<(), OperationError> {
+    for (resolved, expected) in source.files.iter().zip(&source.evidence) {
+        validate_file_route(resolved, None).map_err(OperationError::new)?;
+        let directory = open_directory(&resolved.parent)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        let mut file = open_file_at(&directory, &resolved.name)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+        verify_file_evidence(&mut file, expected)
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_content_sources_with_checkpoint(
+    source: &ContentSourceSet,
+    session: &OperationSession,
+    mut checkpoint: impl FnMut(),
+) -> Result<(), OperationFailureCode> {
+    for (resolved, expected) in source.files.iter().zip(&source.evidence) {
+        check_cancelled(session)?;
+        validate_file_route(resolved, None).map_err(|_| OperationFailureCode::StalePlan)?;
+        let directory =
+            open_directory(&resolved.parent).map_err(|_| OperationFailureCode::SourceChanged)?;
+        let mut file = open_file_at(&directory, &resolved.name)
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+        verify_file_evidence_with_fallible_checkpoint(&mut file, expected, || {
+            checkpoint();
+            check_cancelled(session)
+        })
+        .map_err(|error| match error {
+            OperationFailureCode::Cancelled => OperationFailureCode::Cancelled,
+            _ => OperationFailureCode::SourceChanged,
+        })?;
+        validate_file_route(resolved, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_content_sources_for_execution(
+    source: &ContentSourceSet,
+    mut checkpoint: impl FnMut(),
+) -> Result<(), OperationFailureCode> {
+    for (resolved, expected) in source.files.iter().zip(&source.evidence) {
+        validate_file_route(resolved, None).map_err(|_| OperationFailureCode::StalePlan)?;
+        let directory =
+            open_directory(&resolved.parent).map_err(|_| OperationFailureCode::SourceChanged)?;
+        let mut file = open_file_at(&directory, &resolved.name)
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+        verify_file_evidence_with_checkpoint(&mut file, expected, &mut checkpoint)
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+        validate_file_route(resolved, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_output_directory(
+    parent_path: &Path,
+    name: &OsStr,
+    output_path: &Path,
+) -> Result<Option<OutputDirectoryEvidence>, OperationFailureCode> {
+    let parent =
+        open_directory(parent_path).map_err(|_| OperationFailureCode::DestinationUnavailable)?;
+    inspect_output_directory_at(&parent, name, output_path)
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_output_directory_at(
+    parent: &File,
+    name: &OsStr,
+    output_path: &Path,
+) -> Result<Option<OutputDirectoryEvidence>, OperationFailureCode> {
+    let directory = match open_directory_at(parent, name) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match fs::symlink_metadata(output_path) {
+                Err(path_error) if path_error.kind() == io::ErrorKind::NotFound => return Ok(None),
+                _ => return Err(OperationFailureCode::DestinationChanged),
+            }
+        }
+        Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(OperationFailureCode::UnsafePath);
+        }
+        Err(_) => return Err(OperationFailureCode::DestinationUnavailable),
+    };
+    let identity =
+        handle_identity(&directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
+    let manifest_sha256 = directory_manifest(output_path, &directory)?;
+    let current =
+        open_directory_at(parent, name).map_err(|_| OperationFailureCode::DestinationChanged)?;
+    if handle_identity(&current) != Some(identity) {
+        return Err(OperationFailureCode::DestinationChanged);
+    }
+    Ok(Some(OutputDirectoryEvidence {
+        identity,
+        manifest_sha256,
+    }))
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_multi_content_directory_baseline(
+    plan: &OperationPlan,
+    destination_directory: &File,
+) -> Result<(), OperationFailureCode> {
+    let expected = match plan.multi_content.as_ref() {
+        Some(MultiContentPlan::Split {
+            destination_baseline,
+            ..
+        }) => destination_baseline,
+        _ => return Err(OperationFailureCode::StalePlan),
+    };
+    let observed = inspect_output_directory_at(
+        destination_directory,
+        &plan.destination.name,
+        &plan.destination.path,
+    )?;
+    if &observed == expected {
+        Ok(())
+    } else {
+        Err(OperationFailureCode::DestinationChanged)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn directory_manifest(path: &Path, directory: &File) -> Result<Sha256Digest, OperationFailureCode> {
+    let identity = handle_identity(directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
+    let mut digest = Sha256::new();
+    let mut count = 0_usize;
+    hash_directory_contents(path, directory, 0, &mut count, &mut digest)?;
+    if path_identity(path) != Some(identity) {
+        return Err(OperationFailureCode::DestinationChanged);
+    }
+    Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
+#[cfg(target_os = "macos")]
+fn hash_directory_contents(
+    path: &Path,
+    directory: &File,
+    depth: usize,
+    count: &mut usize,
+    digest: &mut Sha256,
+) -> Result<(), OperationFailureCode> {
+    const MAX_DIRECTORY_ENTRIES: usize = 65_536;
+    const MAX_DIRECTORY_DEPTH: usize = 64;
+    if depth > MAX_DIRECTORY_DEPTH {
+        return Err(OperationFailureCode::ResourceLimitExceeded);
+    }
+    let identity = handle_identity(directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path).map_err(|_| OperationFailureCode::DestinationChanged)? {
+        let entry = entry.map_err(|_| OperationFailureCode::DestinationChanged)?;
+        entries
+            .try_reserve(1)
+            .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+        entries.push((entry.file_name(), entry.path()));
+        *count = count
+            .checked_add(1)
+            .ok_or(OperationFailureCode::ResourceLimitExceeded)?;
+        if *count > MAX_DIRECTORY_ENTRIES {
+            return Err(OperationFailureCode::ResourceLimitExceeded);
+        }
+    }
+    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for (name, entry_path) in entries {
+        let name_bytes = name.as_bytes();
+        let name_length = u64::try_from(name_bytes.len())
+            .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+        digest.update(name_length.to_le_bytes());
+        digest.update(name_bytes);
+        let metadata = fs::symlink_metadata(&entry_path)
+            .map_err(|_| OperationFailureCode::DestinationChanged)?;
+        if metadata.file_type().is_symlink() {
+            return Err(OperationFailureCode::UnsafePath);
+        }
+        if metadata.is_dir() {
+            digest.update(*b"D");
+            let child = open_directory_at(directory, &name)
+                .map_err(|_| OperationFailureCode::DestinationChanged)?;
+            let child_identity =
+                handle_identity(&child).ok_or(OperationFailureCode::UnsupportedCapability)?;
+            digest.update(child_identity.device().to_le_bytes());
+            digest.update(child_identity.inode().to_le_bytes());
+            hash_directory_contents(&entry_path, &child, depth + 1, count, digest)?;
+            if open_directory_at(directory, &name)
+                .ok()
+                .and_then(|observed| handle_identity(&observed))
+                != Some(child_identity)
+            {
+                return Err(OperationFailureCode::DestinationChanged);
+            }
+        } else if metadata.is_file() {
+            digest.update(*b"F");
+            let mut file = open_file_at(directory, &name)
+                .map_err(|_| OperationFailureCode::DestinationChanged)?;
+            let evidence =
+                inspect_file(&mut file).map_err(|_| OperationFailureCode::DestinationChanged)?;
+            digest.update(evidence.identity.device().to_le_bytes());
+            digest.update(evidence.identity.inode().to_le_bytes());
+            digest.update(evidence.snapshot.len.to_le_bytes());
+            digest.update(evidence.sha256.as_bytes());
+            if open_file_at(directory, &name)
+                .ok()
+                .and_then(|observed| handle_identity(&observed))
+                != Some(evidence.identity)
+            {
+                return Err(OperationFailureCode::DestinationChanged);
+            }
+        } else {
+            return Err(OperationFailureCode::UnsafePath);
+        }
+    }
+    if handle_identity(directory) != Some(identity) || path_identity(path) != Some(identity) {
+        return Err(OperationFailureCode::DestinationChanged);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn directory_matches_content_outputs(
+    path: &Path,
+    baseline: &OutputDirectoryEvidence,
+    outputs: &[ContentOutputEvidence],
+) -> Result<bool, OperationError> {
+    let directory = open_directory(path)
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationChanged))?;
+    if handle_identity(&directory) != Some(baseline.identity)
+        || directory_manifest(path, &directory).map_err(OperationError::new)?
+            != baseline.manifest_sha256
+    {
+        return Err(OperationError::new(
+            OperationFailureCode::DestinationChanged,
+        ));
+    }
+    let mut names = HashSet::new();
+    names
+        .try_reserve(outputs.len())
+        .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    for output in outputs {
+        let name = output
+            .name
+            .as_ref()
+            .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+        names.insert(name.clone());
+        let mut file = match open_file_at(&directory, name) {
+            Ok(file) => file,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::IsADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(_) => {
+                return Err(OperationError::new(
+                    OperationFailureCode::DestinationChanged,
+                ));
+            }
+        };
+        let evidence = inspect_file(&mut file)
+            .map_err(|_| OperationError::new(OperationFailureCode::DestinationChanged))?;
+        if evidence.snapshot.len != output.length || evidence.sha256 != output.sha256 {
+            return Ok(false);
+        }
+    }
+    let entries = fs::read_dir(path)
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationChanged))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|_| OperationError::new(OperationFailureCode::DestinationChanged))?;
+        if !names.remove(&entry.file_name()) {
+            return Ok(false);
+        }
+    }
+    Ok(names.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn plan_multi_content_build_unix(
+    request: MultiContentBuildRequest,
+) -> Result<OperationPlan, OperationError> {
+    let mut source = resolve_content_sources(&request.sources)?;
+    source
+        .outputs
+        .push(plan_content_output(&source.members, None, None)?);
+    verify_content_sources_for_plan(&source)?;
+    let output = source
+        .outputs
+        .first()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    let environment = resolve_multi_content_environment(&request.destination, &request.workspace)?;
+    let destination = environment.destination;
+
+    match fs::symlink_metadata(&destination.path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(OperationError::new(OperationFailureCode::UnsafePath));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(OperationError::new(
+                OperationFailureCode::DestinationUnavailable,
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => {
+            return Err(OperationError::new(
+                OperationFailureCode::DestinationUnavailable,
+            ));
+        }
+        _ => {}
+    }
+    let destination_directory = open_directory(destination.anchor())
+        .map_err(|_| OperationError::new(OperationFailureCode::DestinationUnavailable))?;
+    let destination_baseline = if destination.creation_parent.is_some() {
+        None
+    } else {
+        inspect_destination(&destination_directory, &destination.name)
+            .map_err(OperationError::new)?
+    };
+    if source
+        .files
+        .iter()
+        .zip(&source.evidence)
+        .any(|(file, evidence)| {
+            file.path == destination.path
+                || destination_baseline
+                    .as_ref()
+                    .is_some_and(|baseline| baseline.identity == evidence.identity)
+        })
+    {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+
+    let already_up_to_date = destination_baseline.as_ref().is_some_and(|baseline| {
+        baseline.snapshot.len == output.length && baseline.sha256 == output.sha256
+    });
+    let destination_state = match &destination_baseline {
+        Some(baseline) => DestinationBaseline::Existing {
+            identity: baseline.identity.fingerprint(),
+            size: baseline.snapshot.len,
+            sha256: baseline.sha256,
+        },
+        None => DestinationBaseline::Absent,
+    };
+    let known_conflict = destination_baseline.is_some()
+        && request.conflict_policy == ConflictPolicy::Fail
+        && !already_up_to_date;
+    let skipped = destination_baseline.is_some()
+        && request.conflict_policy == ConflictPolicy::Skip
+        && !already_up_to_date;
+    let mut effects = vec![PlannedEffect::ReadSource];
+    let mut planned_artifacts = Vec::new();
+    let mut stage_directory_name = None;
+    let mut stage_file_name = None;
+    let mut backup_name = None;
+    let mut published_recovery_name = None;
+    let lock_name = environment
+        .destination_lock_path
+        .file_name()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+    if source.files.iter().any(|file| {
+        file.path == environment.destination_lock_path
+            || (file.parent == destination.parent && file.name == lock_name)
+    }) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+
+    if !known_conflict && !skipped && !already_up_to_date {
+        effects.push(PlannedEffect::CoordinateDestination);
+        if environment.workspace.identity.is_none() {
+            effects.push(PlannedEffect::CreateWorkspaceDirectory);
+            planned_artifacts.push(PlannedArtifact {
+                role: OperationArtifactRole::WorkspaceDirectory,
+                path: environment.workspace.path.clone(),
+                expected_length: None,
+                expected_sha256: None,
+            });
+        }
+        let planned_stage_directory = planned_artifact_name(
+            &environment.workspace.path,
+            "stage-area",
+            environment.workspace.identity.is_some(),
+        )
+        .map_err(OperationError::new)?;
+        let stage_directory_path = environment.workspace.path.join(&planned_stage_directory);
+        let planned_stage_file = planned_artifact_name(&stage_directory_path, "stage", false)
+            .map_err(OperationError::new)?;
+        planned_artifacts.push(PlannedArtifact {
+            role: OperationArtifactRole::PrivateStagingDirectory,
+            path: stage_directory_path.clone(),
+            expected_length: None,
+            expected_sha256: None,
+        });
+        planned_artifacts.push(PlannedArtifact {
+            role: OperationArtifactRole::StagedOutput,
+            path: stage_directory_path.join(&planned_stage_file),
+            expected_length: Some(output.length),
+            expected_sha256: Some(output.sha256),
+        });
+        planned_artifacts.push(PlannedArtifact {
+            role: OperationArtifactRole::PublishedDestination,
+            path: destination.path.clone(),
+            expected_length: Some(output.length),
+            expected_sha256: Some(output.sha256),
+        });
+        stage_directory_name = Some(planned_stage_directory);
+        stage_file_name = Some(planned_stage_file);
+        effects.push(PlannedEffect::CreatePrivateStagingDirectory);
+        effects.push(PlannedEffect::CreateStagingFile);
+        match (&destination_baseline, request.conflict_policy) {
+            (Some(existing), ConflictPolicy::Replace) => {
+                let recovery_name =
+                    planned_artifact_name(&stage_directory_path, "published-output", false)
+                        .map_err(OperationError::new)?;
+                planned_artifacts.push(PlannedArtifact {
+                    role: OperationArtifactRole::StagedOutput,
+                    path: stage_directory_path.join(&recovery_name),
+                    expected_length: Some(output.length),
+                    expected_sha256: Some(output.sha256),
+                });
+                published_recovery_name = Some(recovery_name);
+                let planned_backup = planned_artifact_name(&stage_directory_path, "backup", false)
+                    .map_err(OperationError::new)?;
+                planned_artifacts.push(PlannedArtifact {
+                    role: OperationArtifactRole::DestinationBackup,
+                    path: stage_directory_path.join(&planned_backup),
+                    expected_length: Some(existing.snapshot.len),
+                    expected_sha256: Some(existing.sha256),
+                });
+                backup_name = Some(planned_backup);
+                effects.push(PlannedEffect::CreateDestinationBackup);
+                effects.push(PlannedEffect::ReplaceDestination);
+            }
+            (None, _) => {
+                if destination.creation_parent.is_some() {
+                    effects.push(PlannedEffect::CreateDestinationParent);
+                }
+                effects.push(PlannedEffect::CreateDestination);
+            }
+            _ => {}
+        }
+    }
+
+    let sources = snapshot_content_sources(&source);
+    let planned_source = sources
+        .first()
+        .cloned()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::EmptySelection))?;
+    let snapshot = OperationPlanSnapshot {
+        kind: "operation_plan",
+        operation_kind: OperationKind::MultiContentBuild,
+        nscb_version: env!("CARGO_PKG_VERSION"),
+        source: planned_source,
+        sources,
+        content_groups: snapshot_content_groups(&source),
+        output_paths: vec![destination.path.clone()],
+        destination: destination.path.clone(),
+        workspace: environment.workspace.path.clone(),
+        staging_strategy: environment.staging_strategy,
+        staging_parent_identity: environment.workspace_identity.fingerprint(),
+        destination_lock_path: environment.destination_lock_path,
+        conflict_policy: request.conflict_policy,
+        destination_baseline: destination_state,
+        required_providers: Vec::new(),
+        required_keys: Vec::new(),
+        effects,
+        planned_artifacts,
+    };
+    Ok(OperationPlan {
+        snapshot,
+        source: source.files[0].clone(),
+        source_baseline: source.evidence[0].clone(),
+        workspace: environment.workspace,
+        destination,
+        destination_baseline,
+        already_up_to_date,
+        skipped,
+        stage_directory_name,
+        stage_file_name,
+        backup_name,
+        published_recovery_name,
+        multi_content: Some(MultiContentPlan::Build(source)),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn plan_multi_content_split_unix(
+    request: MultiContentSplitRequest,
+) -> Result<OperationPlan, OperationError> {
+    let mut source = resolve_content_sources(std::slice::from_ref(&request.source))?;
+    let mut outputs = Vec::new();
+    outputs
+        .try_reserve_exact(source.groups.len())
+        .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    for group in &source.groups {
+        let name = OsString::from(format!("{:016X}.pfs0", group.program_id));
+        outputs.push(plan_content_output(
+            &group.members,
+            Some(name),
+            Some(group.program_id),
+        )?);
+    }
+    source.outputs = outputs;
+    verify_content_sources_for_plan(&source)?;
+    let environment =
+        resolve_multi_content_environment(&request.destination_directory, &request.workspace)?;
+    let destination = environment.destination;
+
+    let destination_baseline = if destination.creation_parent.is_some() {
+        None
+    } else {
+        inspect_output_directory(&destination.parent, &destination.name, &destination.path)
+            .map_err(OperationError::new)?
+    };
+    if destination_baseline.as_ref().is_some_and(|baseline| {
+        source
+            .files
+            .iter()
+            .any(|file| file.path.starts_with(&destination.path))
+            || environment.workspace.path.starts_with(&destination.path)
+            || source
+                .evidence
+                .iter()
+                .any(|evidence| evidence.identity == baseline.identity)
+    }) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let already_up_to_date = match &destination_baseline {
+        Some(baseline) => {
+            directory_matches_content_outputs(&destination.path, baseline, &source.outputs)?
+        }
+        None => false,
+    };
+    let destination_state = match &destination_baseline {
+        Some(baseline) => DestinationBaseline::ExistingDirectory {
+            identity: baseline.identity.fingerprint(),
+            manifest_sha256: baseline.manifest_sha256,
+        },
+        None => DestinationBaseline::Absent,
+    };
+    let known_conflict = destination_baseline.is_some()
+        && request.conflict_policy == ConflictPolicy::Fail
+        && !already_up_to_date;
+    let skipped = destination_baseline.is_some()
+        && request.conflict_policy == ConflictPolicy::Skip
+        && !already_up_to_date;
+    let mut effects = vec![PlannedEffect::ReadSource];
+    let mut planned_artifacts = Vec::new();
+    let mut stage_directory_name = None;
+    let mut staged_directory_name = None;
+    let lock_name = environment
+        .destination_lock_path
+        .file_name()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+    if source.files.iter().any(|file| {
+        file.path == environment.destination_lock_path
+            || (file.parent == destination.parent && file.name == lock_name)
+    }) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+
+    if !known_conflict && !skipped && !already_up_to_date {
+        effects.push(PlannedEffect::CoordinateDestination);
+        if environment.workspace.identity.is_none() {
+            effects.push(PlannedEffect::CreateWorkspaceDirectory);
+            planned_artifacts.push(PlannedArtifact {
+                role: OperationArtifactRole::WorkspaceDirectory,
+                path: environment.workspace.path.clone(),
+                expected_length: None,
+                expected_sha256: None,
+            });
+        }
+        let planned_stage_directory = planned_artifact_name(
+            &environment.workspace.path,
+            "stage-area",
+            environment.workspace.identity.is_some(),
+        )
+        .map_err(OperationError::new)?;
+        let stage_directory_path = environment.workspace.path.join(&planned_stage_directory);
+        let planned_output_directory =
+            planned_artifact_name(&stage_directory_path, "split-output", false)
+                .map_err(OperationError::new)?;
+        let output_directory_path = stage_directory_path.join(&planned_output_directory);
+        planned_artifacts.push(PlannedArtifact {
+            role: OperationArtifactRole::PrivateStagingDirectory,
+            path: stage_directory_path,
+            expected_length: None,
+            expected_sha256: None,
+        });
+        planned_artifacts.push(PlannedArtifact {
+            role: OperationArtifactRole::StagedOutput,
+            path: output_directory_path.clone(),
+            expected_length: None,
+            expected_sha256: None,
+        });
+        for output in &source.outputs {
+            let name = output
+                .name
+                .as_ref()
+                .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+            planned_artifacts.push(PlannedArtifact {
+                role: OperationArtifactRole::StagedOutput,
+                path: output_directory_path.join(name),
+                expected_length: Some(output.length),
+                expected_sha256: Some(output.sha256),
+            });
+            planned_artifacts.push(PlannedArtifact {
+                role: OperationArtifactRole::PublishedDestination,
+                path: destination.path.join(name),
+                expected_length: Some(output.length),
+                expected_sha256: Some(output.sha256),
+            });
+        }
+        planned_artifacts.push(PlannedArtifact {
+            role: OperationArtifactRole::PublishedDestination,
+            path: destination.path.clone(),
+            expected_length: None,
+            expected_sha256: None,
+        });
+        stage_directory_name = Some(planned_stage_directory);
+        staged_directory_name = Some(planned_output_directory.clone());
+        effects.push(PlannedEffect::CreatePrivateStagingDirectory);
+        effects.push(PlannedEffect::CreateStagingFile);
+        match (&destination_baseline, request.conflict_policy) {
+            (Some(existing), ConflictPolicy::Replace) => {
+                planned_artifacts.push(PlannedArtifact {
+                    role: OperationArtifactRole::DisplacedDestination,
+                    path: output_directory_path,
+                    expected_length: None,
+                    expected_sha256: Some(existing.manifest_sha256),
+                });
+                effects.push(PlannedEffect::ReplaceDestination);
+            }
+            (None, _) => {
+                if destination.creation_parent.is_some() {
+                    effects.push(PlannedEffect::CreateDestinationParent);
+                }
+                effects.push(PlannedEffect::CreateDestination);
+            }
+            _ => {}
+        }
+    }
+
+    let sources = snapshot_content_sources(&source);
+    let planned_source = sources
+        .first()
+        .cloned()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::EmptySelection))?;
+    let output_paths = source
+        .outputs
+        .iter()
+        .map(|output| {
+            output
+                .name
+                .as_ref()
+                .map(|name| destination.path.join(name))
+                .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let snapshot = OperationPlanSnapshot {
+        kind: "operation_plan",
+        operation_kind: OperationKind::MultiContentSplit,
+        nscb_version: env!("CARGO_PKG_VERSION"),
+        source: planned_source,
+        sources,
+        content_groups: snapshot_content_groups(&source),
+        output_paths,
+        destination: destination.path.clone(),
+        workspace: environment.workspace.path.clone(),
+        staging_strategy: environment.staging_strategy,
+        staging_parent_identity: environment.workspace_identity.fingerprint(),
+        destination_lock_path: environment.destination_lock_path,
+        conflict_policy: request.conflict_policy,
+        destination_baseline: destination_state,
+        required_providers: Vec::new(),
+        required_keys: Vec::new(),
+        effects,
+        planned_artifacts,
+    };
+    Ok(OperationPlan {
+        snapshot,
+        source: source.files[0].clone(),
+        source_baseline: source.evidence[0].clone(),
+        workspace: environment.workspace,
+        destination,
+        destination_baseline: None,
+        already_up_to_date,
+        skipped,
+        stage_directory_name,
+        stage_file_name: None,
+        backup_name: None,
+        published_recovery_name: None,
+        multi_content: Some(MultiContentPlan::Split {
+            source,
+            destination_baseline,
+            staged_directory_name,
+        }),
+    })
+}
+
 /// Resolves a copy-through request into an immutable, inspectable plan.
 pub(crate) fn plan_copy_through(
     request: CopyThroughRequest,
@@ -2097,6 +3426,7 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
 
     let snapshot = OperationPlanSnapshot {
         kind: "operation_plan",
+        operation_kind: OperationKind::CopyThrough,
         nscb_version: env!("CARGO_PKG_VERSION"),
         source: PlannedSource {
             path: source.path.clone(),
@@ -2104,6 +3434,9 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
             size: source_baseline.snapshot.len,
             sha256: source_baseline.sha256,
         },
+        sources: Vec::new(),
+        content_groups: Vec::new(),
+        output_paths: Vec::new(),
         destination: destination.path.clone(),
         workspace: workspace.path.clone(),
         staging_strategy,
@@ -2130,6 +3463,8 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
         stage_file_name,
         backup_name,
         published_recovery_name,
+        #[cfg(target_os = "macos")]
+        multi_content: None,
     })
 }
 
@@ -2608,6 +3943,34 @@ fn hard_link_at(
 }
 
 #[cfg(target_os = "macos")]
+fn rename_exclusive_at(
+    from_directory: &File,
+    from: &OsStr,
+    to_directory: &File,
+    to: &OsStr,
+) -> io::Result<()> {
+    let from = c_name(from)?;
+    let to = c_name(to)?;
+    // SAFETY: both descriptors refer to open directories and both names are
+    // single path components. RENAME_EXCL moves the staged entry only when the
+    // destination name is still absent.
+    let result = unsafe {
+        libc::renameatx_np(
+            from_directory.as_raw_fd(),
+            from.as_ptr(),
+            to_directory.as_raw_fd(),
+            to.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn rename_swap_at(
     from_directory: &File,
     from: &OsStr,
@@ -2748,7 +4111,19 @@ fn inspect_file_with_checkpoint(
 fn inspect_file_with_length_and_checkpoint(
     file: &mut File,
     planned_length: u64,
-    checkpoint: impl FnMut(),
+    mut checkpoint: impl FnMut(),
+) -> Result<FileEvidence, OperationFailureCode> {
+    inspect_file_with_length_and_fallible_checkpoint(file, planned_length, || {
+        checkpoint();
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_file_with_length_and_fallible_checkpoint(
+    file: &mut File,
+    planned_length: u64,
+    checkpoint: impl FnMut() -> Result<(), OperationFailureCode>,
 ) -> Result<FileEvidence, OperationFailureCode> {
     let metadata = file
         .metadata()
@@ -2762,7 +4137,7 @@ fn inspect_file_with_length_and_checkpoint(
     let identity = handle_identity(file).ok_or(OperationFailureCode::UnsupportedCapability)?;
     let before = file_snapshot(&metadata, Some(identity));
     let (read_size, sha256) =
-        hash_open_file_with_length_and_checkpoint(file, planned_length, checkpoint)?;
+        hash_open_file_with_length_and_fallible_checkpoint(file, planned_length, checkpoint)?;
     let metadata_after = file
         .metadata()
         .map_err(|_| OperationFailureCode::SourceChanged)?;
@@ -2780,10 +4155,10 @@ fn inspect_file_with_length_and_checkpoint(
 }
 
 #[cfg(target_os = "macos")]
-fn hash_open_file_with_length_and_checkpoint(
+fn hash_open_file_with_length_and_fallible_checkpoint(
     file: &mut File,
     planned_length: u64,
-    mut checkpoint: impl FnMut(),
+    mut checkpoint: impl FnMut() -> Result<(), OperationFailureCode>,
 ) -> Result<(u64, Sha256Digest), OperationFailureCode> {
     file.seek(SeekFrom::Start(0))
         .map_err(|_| OperationFailureCode::SourceUnavailable)?;
@@ -2801,7 +4176,7 @@ fn hash_open_file_with_length_and_checkpoint(
         }
         hasher.update(&buffer[..chunk]);
         remaining -= chunk as u64;
-        checkpoint();
+        checkpoint()?;
     }
     let mut probe = [0_u8; 1];
     match file.read(&mut probe) {
@@ -2882,10 +4257,22 @@ fn files_equal_with_checkpoint(
 fn verify_file_evidence_with_checkpoint(
     file: &mut File,
     expected: &FileEvidence,
-    checkpoint: impl FnMut(),
+    mut checkpoint: impl FnMut(),
+) -> Result<(), OperationFailureCode> {
+    verify_file_evidence_with_fallible_checkpoint(file, expected, || {
+        checkpoint();
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_file_evidence_with_fallible_checkpoint(
+    file: &mut File,
+    expected: &FileEvidence,
+    checkpoint: impl FnMut() -> Result<(), OperationFailureCode>,
 ) -> Result<(), OperationFailureCode> {
     let observed =
-        inspect_file_with_length_and_checkpoint(file, expected.snapshot.len, checkpoint)?;
+        inspect_file_with_length_and_fallible_checkpoint(file, expected.snapshot.len, checkpoint)?;
     if observed == *expected {
         Ok(())
     } else {
@@ -3055,9 +4442,17 @@ pub(crate) fn execute_operation(
 
     #[cfg(target_os = "macos")]
     {
-        let planned_length = plan.source_baseline.snapshot.len;
+        let fallback_length = plan.source_baseline.snapshot.len;
+        let build_members = match &plan.multi_content {
+            Some(MultiContentPlan::Build(source)) => Some(source.members.clone()),
+            _ => None,
+        };
         execute_with_producer(plan, session, move |source, stage, session| {
-            copy_source_to_stage_with_length(source, stage, planned_length, session)
+            if let Some(members) = &build_members {
+                write_multi_content_package(members, stage, session)
+            } else {
+                copy_source_to_stage_with_length(source, stage, fallback_length, session)
+            }
         })
     }
 }
@@ -3083,12 +4478,20 @@ pub(crate) fn execute_operation_with_cancellation(
     }
     #[cfg(target_os = "macos")]
     {
-        let planned_length = plan.source_baseline.snapshot.len;
+        let fallback_length = plan.source_baseline.snapshot.len;
+        let build_members = match &plan.multi_content {
+            Some(MultiContentPlan::Build(source)) => Some(source.members.clone()),
+            _ => None,
+        };
         execute_with_producer_with_cancellation(
             plan,
             session,
             move |source, stage, session| {
-                copy_source_to_stage_with_length(source, stage, planned_length, session)
+                if let Some(members) = &build_members {
+                    write_multi_content_package(members, stage, session)
+                } else {
+                    copy_source_to_stage_with_length(source, stage, fallback_length, session)
+                }
             },
             Some(cancellation),
         )
@@ -3178,8 +4581,16 @@ where
     H: FnMut(ExecutionCheckpoint),
 {
     let mut milestones = vec![OperationMilestone::Planned];
-    let admission =
-        session.admit_with_cancellation(cancellation, Some(plan.source_baseline.snapshot.len));
+    let total_bytes = plan
+        .multi_content
+        .as_ref()
+        .map(|multi_content| match multi_content {
+            MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. } => {
+                source.total_member_bytes
+            }
+        })
+        .unwrap_or(plan.source_baseline.snapshot.len);
+    let admission = session.admit_with_cancellation(cancellation, Some(total_bytes));
     let mut admission = match admission {
         Ok(admission) => admission,
         Err(code) => return failed_result(milestones, code, false),
@@ -3189,6 +4600,7 @@ where
 
     let mut artifacts = Vec::new();
     let mut cleanup_artifact_retained = false;
+    let mut additional_source_locks = Vec::new();
     let mut destination_parent_identity = plan
         .destination
         .creation_parent
@@ -3203,6 +4615,7 @@ where
             artifacts: &mut artifacts,
             cleanup_artifact_retained: &mut cleanup_artifact_retained,
             source_lock: &mut source_lock,
+            additional_source_locks: &mut additional_source_locks,
             destination_parent_identity: &mut destination_parent_identity,
         };
         execute_unix(&plan, session, producer, &mut outputs, &mut checkpoint)
@@ -3213,6 +4626,10 @@ where
         && !artifacts
             .iter()
             .any(|artifact| artifact.role == OperationArtifactRole::PublishedDestination)
+        && !matches!(
+            plan.multi_content.as_ref(),
+            Some(MultiContentPlan::Split { .. })
+        )
     {
         match capture_current_destination_competitor(
             &plan,
@@ -3312,6 +4729,7 @@ where
     };
     admission.finish(&result);
     drop(source_lock);
+    drop(additional_source_locks);
     result
 }
 
@@ -3379,10 +4797,18 @@ fn check_storage_capacity(
     } else {
         None
     };
+    let staged_length = match plan.multi_content.as_ref() {
+        Some(MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. }) => source
+            .outputs
+            .iter()
+            .try_fold(0_u64, |total, output| total.checked_add(output.length))
+            .ok_or(OperationFailureCode::ResourceLimitExceeded)?,
+        None => plan.source_baseline.snapshot.len,
+    };
     let available = available_space_on_open_directory(workspace_directory)?;
     ensure_storage_capacity(
         available,
-        plan.source_baseline.snapshot.len,
+        staged_length,
         backup_length,
         MINIMUM_FREE_SPACE_RESERVE,
     )
@@ -3414,7 +4840,103 @@ struct ExecutionOutputs<'a> {
     artifacts: &'a mut Vec<OwnedArtifact>,
     cleanup_artifact_retained: &'a mut bool,
     source_lock: &'a mut Option<SourceLockGuard>,
+    additional_source_locks: &'a mut Vec<SourceLockGuard>,
     destination_parent_identity: &'a mut Option<FileIdentity>,
+}
+
+#[cfg(target_os = "macos")]
+fn multi_content_build_output(plan: &OperationPlan) -> Option<&ContentOutputEvidence> {
+    match plan.multi_content.as_ref()? {
+        MultiContentPlan::Build(source) => source.outputs.first(),
+        MultiContentPlan::Split { .. } => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn planned_staged_output(plan: &OperationPlan) -> (u64, Sha256Digest) {
+    multi_content_build_output(plan)
+        .map(|output| (output.length, output.sha256))
+        .unwrap_or((
+            plan.source_baseline.snapshot.len,
+            plan.source_baseline.sha256,
+        ))
+}
+
+#[cfg(target_os = "macos")]
+fn content_members_match(expected: &[ProgramMember], observed: &[ProgramMember]) -> bool {
+    expected.len() == observed.len()
+        && expected.iter().zip(observed).all(|(expected, observed)| {
+            expected.program_id == observed.program_id
+                && expected.content_index == observed.content_index
+                && expected.size == observed.size
+                && expected.sha256 == observed.sha256
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn validate_staged_content_package(
+    path: &Path,
+    expected: &ContentOutputEvidence,
+) -> Result<(), OperationFailureCode> {
+    let package = crate::multi_content_format::inspect_package(path)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if content_members_match(&expected.members, &package.members) {
+        Ok(())
+    } else {
+        Err(OperationFailureCode::ValidationFailed)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn validate_content_output_directory(
+    path: &Path,
+    directory: &File,
+    outputs: &[ContentOutputEvidence],
+    session: &OperationSession,
+) -> Result<OutputDirectoryEvidence, OperationFailureCode> {
+    let identity = handle_identity(directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
+    if path_identity(path) != Some(identity) {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    let mut expected_names = HashSet::new();
+    expected_names
+        .try_reserve(outputs.len())
+        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+    for output in outputs {
+        check_cancelled(session)?;
+        let name = output
+            .name
+            .as_ref()
+            .ok_or(OperationFailureCode::StalePlan)?;
+        if !expected_names.insert(name.clone()) {
+            return Err(OperationFailureCode::DestinationCollision);
+        }
+        let mut file =
+            open_file_at(directory, name).map_err(|_| OperationFailureCode::ValidationFailed)?;
+        let evidence =
+            inspect_file(&mut file).map_err(|_| OperationFailureCode::ValidationFailed)?;
+        if evidence.snapshot.len != output.length || evidence.sha256 != output.sha256 {
+            return Err(OperationFailureCode::ValidationFailed);
+        }
+        validate_staged_content_package(&path.join(name), output)?;
+        verify_file_evidence(&mut file, &evidence)
+            .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    }
+    for entry in fs::read_dir(path).map_err(|_| OperationFailureCode::ValidationFailed)? {
+        let entry = entry.map_err(|_| OperationFailureCode::ValidationFailed)?;
+        if !expected_names.remove(&entry.file_name()) {
+            return Err(OperationFailureCode::ValidationFailed);
+        }
+    }
+    if !expected_names.is_empty() || path_identity(path) != Some(identity) {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    let manifest_sha256 =
+        directory_manifest(path, directory).map_err(|_| OperationFailureCode::ValidationFailed)?;
+    Ok(OutputDirectoryEvidence {
+        identity,
+        manifest_sha256,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -3428,10 +4950,14 @@ fn execute_unix<P>(
 where
     P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
 {
+    if matches!(&plan.multi_content, Some(MultiContentPlan::Split { .. })) {
+        return execute_multi_content_split_unix(plan, session, outputs, checkpoint);
+    }
     let milestones = &mut *outputs.milestones;
     let artifacts = &mut *outputs.artifacts;
     let cleanup_artifact_retained = &mut *outputs.cleanup_artifact_retained;
     let source_lock = &mut *outputs.source_lock;
+    let additional_source_locks = &mut *outputs.additional_source_locks;
     let destination_parent_identity = &mut *outputs.destination_parent_identity;
     check_cancelled(session)?;
     validate_file_route(&plan.source, None).map_err(|_| OperationFailureCode::StalePlan)?;
@@ -3485,6 +5011,13 @@ where
         session,
         checkpoint,
     )?;
+    if let Some(MultiContentPlan::Build(source_set)) = plan.multi_content.as_ref() {
+        for (resolved, evidence) in source_set.files.iter().zip(&source_set.evidence).skip(1) {
+            additional_source_locks.push(acquire_content_source_lock(
+                resolved, evidence, session, checkpoint,
+            )?);
+        }
+    }
     let source_file = &mut source_guard.file;
     verify_file_evidence(source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
@@ -3578,6 +5111,39 @@ where
         && !plan.already_up_to_date
     {
         return Err(OperationFailureCode::DestinationConflict);
+    }
+
+    if plan.already_up_to_date && multi_content_build_output(plan).is_some() {
+        verify_source_entry(plan, &source_directory)?;
+        validate_plan_routes(
+            plan,
+            workspace_runtime_identity,
+            Some(destination_parent_identity),
+        )?;
+        let mut current_destination = open_file_at(&destination_directory, &plan.destination.name)
+            .map_err(|_| OperationFailureCode::DestinationChanged)?;
+        let expected_destination = plan
+            .destination_baseline
+            .as_ref()
+            .ok_or(OperationFailureCode::DestinationChanged)?;
+        verify_destination_evidence(&mut current_destination, expected_destination)?;
+        let (expected_length, expected_sha256) = planned_staged_output(plan);
+        if expected_destination.snapshot.len != expected_length
+            || expected_destination.sha256 != expected_sha256
+        {
+            return Err(OperationFailureCode::DestinationChanged);
+        }
+        check_cancelled(session)?;
+        checkpoint(ExecutionCheckpoint::BeforeCompletion);
+        if !session
+            .begin_completion()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?
+        {
+            return Err(OperationFailureCode::Cancelled);
+        }
+        milestones.push(OperationMilestone::Validated);
+        session.record_milestone(OperationMilestone::Validated);
+        return Ok(OperationOutcome::AlreadyUpToDate);
     }
 
     if plan.already_up_to_date {
@@ -3736,8 +5302,9 @@ where
     }
     if let Err(producer_failure) = produced {
         if let Ok(observed) = &stage_after_production {
-            let stage_matches_plan = observed.snapshot.len == plan.source_baseline.snapshot.len
-                && observed.sha256 == plan.source_baseline.sha256;
+            let (expected_length, expected_sha256) = planned_staged_output(plan);
+            let stage_matches_plan =
+                observed.snapshot.len == expected_length && observed.sha256 == expected_sha256;
             if !stage_matches_plan
                 && !matches!(
                     producer_failure,
@@ -3751,8 +5318,9 @@ where
     }
     let stage_after_production =
         stage_after_production.map_err(|_| OperationFailureCode::ValidationFailed)?;
-    if stage_after_production.snapshot.len != plan.source_baseline.snapshot.len
-        || stage_after_production.sha256 != plan.source_baseline.sha256
+    let (expected_stage_length, expected_stage_sha256) = planned_staged_output(plan);
+    if stage_after_production.snapshot.len != expected_stage_length
+        || stage_after_production.sha256 != expected_stage_sha256
     {
         return Err(OperationFailureCode::ValidationFailed);
     }
@@ -3761,35 +5329,36 @@ where
         .map_err(|_| OperationFailureCode::WriteFailed)?;
     check_cancelled(session)?;
 
-    verify_file_evidence_with_checkpoint(source_file, &plan.source_baseline, || {
-        checkpoint(ExecutionCheckpoint::SourceEvidenceReadChunk);
-    })
-    .map_err(|_| OperationFailureCode::SourceChanged)?;
+    verify_source_entry_during_execution_with_checkpoint(plan, &source_directory, session, || {
+        checkpoint(ExecutionCheckpoint::SourceEvidenceReadChunk)
+    })?;
     let mut staged =
         inspect_file(&mut stage_file).map_err(|_| OperationFailureCode::ValidationFailed)?;
-    if staged.snapshot.len != plan.source_baseline.snapshot.len
-        || staged.sha256 != plan.source_baseline.sha256
+    if staged.snapshot.len != expected_stage_length || staged.sha256 != expected_stage_sha256 {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    if multi_content_build_output(plan).is_none()
+        && !files_equal_with_checkpoint(
+            source_file,
+            &mut stage_file,
+            plan.source_baseline.snapshot.len,
+            OperationFailureCode::SourceChanged,
+            OperationFailureCode::ValidationFailed,
+            || check_cancelled(session),
+        )?
     {
         return Err(OperationFailureCode::ValidationFailed);
     }
-    if !files_equal_with_checkpoint(
-        source_file,
-        &mut stage_file,
-        plan.source_baseline.snapshot.len,
-        OperationFailureCode::SourceChanged,
-        OperationFailureCode::ValidationFailed,
-        || check_cancelled(session),
-    )? {
-        return Err(OperationFailureCode::ValidationFailed);
-    }
-    verify_file_evidence(source_file, &plan.source_baseline)
-        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    verify_source_entry(plan, &source_directory)?;
     staged = inspect_file(&mut stage_file).map_err(|_| OperationFailureCode::ValidationFailed)?;
-    if staged.snapshot.len != plan.source_baseline.snapshot.len
-        || staged.sha256 != plan.source_baseline.sha256
+    if staged.snapshot.len != expected_stage_length
+        || staged.sha256 != expected_stage_sha256
         || staged.identity != stage_identity
     {
         return Err(OperationFailureCode::ValidationFailed);
+    }
+    if let Some(expected) = multi_content_build_output(plan) {
+        validate_staged_content_package(&stage_directory_path.join(&stage_name), expected)?;
     }
     update_artifact_evidence(
         artifacts,
@@ -3887,7 +5456,539 @@ where
     if let Some(milestone) = milestones.last().copied() {
         session.record_milestone(milestone);
     }
-    Ok(result)
+    if multi_content_build_output(plan).is_some() && result == OperationOutcome::Copied {
+        Ok(OperationOutcome::Built)
+    } else {
+        Ok(result)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn execute_multi_content_split_unix(
+    plan: &OperationPlan,
+    session: &OperationSession,
+    outputs: &mut ExecutionOutputs<'_>,
+    checkpoint: &mut impl FnMut(ExecutionCheckpoint),
+) -> Result<OperationOutcome, OperationFailureCode> {
+    let MultiContentPlan::Split {
+        source,
+        destination_baseline,
+        staged_directory_name,
+    } = plan
+        .multi_content
+        .as_ref()
+        .ok_or(OperationFailureCode::StalePlan)?
+    else {
+        return Err(OperationFailureCode::StalePlan);
+    };
+    let milestones = &mut *outputs.milestones;
+    let artifacts = &mut *outputs.artifacts;
+    let cleanup_artifact_retained = &mut *outputs.cleanup_artifact_retained;
+    let source_lock = &mut *outputs.source_lock;
+    let additional_source_locks = &mut *outputs.additional_source_locks;
+    let destination_parent_identity = &mut *outputs.destination_parent_identity;
+
+    check_cancelled(session)?;
+    validate_file_route(&plan.destination, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    validate_directory_route(&plan.workspace, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    for file in &source.files {
+        validate_file_route(file, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    }
+
+    let destination_anchor = open_directory(plan.destination.anchor())
+        .map_err(|_| OperationFailureCode::DestinationUnavailable)?;
+    verify_directory_identity(&destination_anchor, plan.destination.parent_identity)?;
+    let workspace_anchor_path = plan
+        .workspace
+        .identity
+        .map(|_| plan.workspace.path.as_path())
+        .or(plan.workspace.creation_parent.as_deref())
+        .ok_or(OperationFailureCode::WorkspaceUnavailable)?;
+    let mut workspace_directory = open_directory(workspace_anchor_path)
+        .map_err(|_| OperationFailureCode::WorkspaceUnavailable)?;
+    let workspace_anchor_identity = plan
+        .workspace
+        .identity
+        .or(plan.workspace.creation_parent_identity)
+        .ok_or(OperationFailureCode::WorkspaceUnavailable)?;
+    verify_directory_identity(&workspace_directory, workspace_anchor_identity)?;
+    if !qualified_local_apfs_volume(&destination_anchor)
+        || !qualified_local_apfs_volume(&workspace_directory)
+        || !handle_identity(&workspace_directory)
+            .zip(handle_identity(&destination_anchor))
+            .is_some_and(|(workspace, destination)| workspace.same_filesystem_as(destination))
+    {
+        return Err(OperationFailureCode::UnsupportedCapability);
+    }
+    require_directory_writable(&workspace_directory)?;
+
+    if source_lock.is_none() {
+        let first_file = source
+            .files
+            .first()
+            .ok_or(OperationFailureCode::StalePlan)?;
+        let first_evidence = source
+            .evidence
+            .first()
+            .ok_or(OperationFailureCode::StalePlan)?;
+        *source_lock = Some(acquire_content_source_lock(
+            first_file,
+            first_evidence,
+            session,
+            checkpoint,
+        )?);
+        for (file, evidence) in source.files.iter().zip(&source.evidence).skip(1) {
+            additional_source_locks.push(acquire_content_source_lock(
+                file, evidence, session, checkpoint,
+            )?);
+        }
+    }
+    verify_content_sources_with_checkpoint(source, session, || {
+        checkpoint(ExecutionCheckpoint::SourceEvidenceReadChunk);
+    })?;
+
+    let mut destination_directory = destination_anchor;
+    if plan.destination.creation_parent.is_some() {
+        validate_file_route(&plan.destination, None)
+            .map_err(|_| OperationFailureCode::StalePlan)?;
+        let parent_name = plan
+            .destination
+            .parent
+            .file_name()
+            .ok_or(OperationFailureCode::UnsafePath)?;
+        match make_directory_at(&destination_directory, parent_name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(OperationFailureCode::StalePlan);
+            }
+            Err(_) => return Err(OperationFailureCode::DestinationUnavailable),
+        }
+        destination_directory = open_directory_at(&destination_directory, parent_name)
+            .map_err(|_| OperationFailureCode::DestinationUnavailable)?;
+        let identity = handle_identity(&destination_directory)
+            .ok_or(OperationFailureCode::UnsupportedCapability)?;
+        if !qualified_local_apfs_volume(&destination_directory)
+            || !handle_identity(&workspace_directory)
+                .is_some_and(|workspace| workspace.same_filesystem_as(identity))
+        {
+            return Err(OperationFailureCode::UnsupportedCapability);
+        }
+        require_directory_writable(&destination_directory)
+            .map_err(|_| OperationFailureCode::DestinationUnavailable)?;
+        *destination_parent_identity = Some(identity);
+    }
+    let destination_parent_identity =
+        destination_parent_identity.ok_or(OperationFailureCode::DestinationUnavailable)?;
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::StalePlan)?;
+    ensure_multi_content_directory_baseline(plan, &destination_directory)?;
+
+    let lock_name = plan
+        .snapshot
+        .destination_lock_path
+        .file_name()
+        .ok_or(OperationFailureCode::UnsafePath)?
+        .to_os_string();
+    if lock_name == plan.destination.name
+        || source
+            .files
+            .iter()
+            .any(|file| file.parent == plan.destination.parent && file.name == lock_name)
+    {
+        return Err(OperationFailureCode::UnsafePath);
+    }
+    let first_evidence = source
+        .evidence
+        .first()
+        .ok_or(OperationFailureCode::StalePlan)?;
+    let destination_lock = acquire_destination_lock(
+        &destination_directory,
+        &lock_name,
+        &plan.destination.parent,
+        first_evidence,
+        None,
+        session,
+        checkpoint,
+    )?;
+    if source
+        .evidence
+        .iter()
+        .any(|evidence| evidence.identity == destination_lock.marker_identity)
+    {
+        return Err(OperationFailureCode::UnsafePath);
+    }
+    validate_destination_lock(
+        &destination_lock,
+        &destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
+    validate_directory_route(&plan.workspace, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    verify_content_sources_with_checkpoint(source, session, || {
+        checkpoint(ExecutionCheckpoint::SourceEvidenceReadChunk);
+    })?;
+    ensure_multi_content_directory_baseline(plan, &destination_directory)?;
+
+    if plan.snapshot.conflict_policy == ConflictPolicy::Fail
+        && destination_baseline.is_some()
+        && !plan.already_up_to_date
+    {
+        return Err(OperationFailureCode::DestinationConflict);
+    }
+    if plan.skipped {
+        verify_content_sources_with_checkpoint(source, session, || {
+            checkpoint(ExecutionCheckpoint::SourceEvidenceReadChunk);
+        })?;
+        return Ok(OperationOutcome::Skipped);
+    }
+    if plan.already_up_to_date {
+        let expected = destination_baseline
+            .as_ref()
+            .ok_or(OperationFailureCode::DestinationChanged)?;
+        let observed = inspect_output_directory_at(
+            &destination_directory,
+            &plan.destination.name,
+            &plan.destination.path,
+        )?
+        .ok_or(OperationFailureCode::DestinationChanged)?;
+        if &observed != expected
+            || !directory_matches_content_outputs(&plan.destination.path, expected, &source.outputs)
+                .map_err(|error| error.code())?
+        {
+            return Err(OperationFailureCode::DestinationChanged);
+        }
+        check_cancelled(session)?;
+        if !session
+            .begin_completion()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?
+        {
+            return Err(OperationFailureCode::Cancelled);
+        }
+        milestones.push(OperationMilestone::Validated);
+        session.record_milestone(OperationMilestone::Validated);
+        return Ok(OperationOutcome::AlreadyUpToDate);
+    }
+
+    check_cancelled(session)?;
+    require_directory_writable(&workspace_directory)?;
+    check_storage_capacity(&workspace_directory, plan)?;
+    let mut workspace_runtime_identity = plan.workspace.identity;
+    if workspace_runtime_identity.is_none() {
+        let workspace_name = plan
+            .workspace
+            .path
+            .file_name()
+            .ok_or(OperationFailureCode::UnsafePath)?;
+        let parent_handle = workspace_directory
+            .try_clone()
+            .map_err(|_| OperationFailureCode::WriteFailed)?;
+        match make_directory_at(&workspace_directory, workspace_name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(OperationFailureCode::StalePlan);
+            }
+            Err(_) => return Err(OperationFailureCode::WorkspaceUnavailable),
+        }
+        let created = open_directory_at(&workspace_directory, workspace_name).ok();
+        let created_identity = created.as_ref().and_then(handle_identity);
+        let parent_identity = handle_identity(&workspace_directory);
+        let id = next_artifact_id(artifacts);
+        let parent_artifact_id =
+            parent_artifact_id_for_path(artifacts, workspace_anchor_path, parent_identity);
+        artifacts.push(OwnedArtifact {
+            id,
+            parent_artifact_id,
+            relative_name: PathBuf::from(workspace_name),
+            parent_identity,
+            directory: parent_handle,
+            name: workspace_name.to_os_string(),
+            path: plan.workspace.path.clone(),
+            identity: created_identity,
+            kind: OwnedArtifactKind::Directory,
+            role: OperationArtifactRole::WorkspaceDirectory,
+            length: None,
+            sha256: None,
+            path_identity: created_identity,
+            path_length: None,
+            keep: created_identity.is_none(),
+        });
+        workspace_directory = created.ok_or(OperationFailureCode::UnsupportedCapability)?;
+        workspace_runtime_identity =
+            Some(created_identity.ok_or(OperationFailureCode::UnsupportedCapability)?);
+        validate_directory_route(&plan.workspace, workspace_runtime_identity)?;
+    }
+
+    let stage_directory_name = plan
+        .stage_directory_name
+        .as_deref()
+        .ok_or(OperationFailureCode::StalePlan)?;
+    let staged_directory_name = staged_directory_name
+        .as_deref()
+        .ok_or(OperationFailureCode::StalePlan)?;
+    let stage_directory_path = plan.workspace.path.join(stage_directory_name);
+    let stage_directory = create_private_stage_directory(
+        &workspace_directory,
+        &plan.workspace.path,
+        stage_directory_name,
+        artifacts,
+        cleanup_artifact_retained,
+    )?;
+    let staged_directory_path = stage_directory_path.join(staged_directory_name);
+    let staged_directory = create_private_stage_directory(
+        &stage_directory,
+        &stage_directory_path,
+        staged_directory_name,
+        artifacts,
+        cleanup_artifact_retained,
+    )?;
+    let staged_root_artifact_id = artifacts
+        .last()
+        .map(|artifact| artifact.id)
+        .ok_or(OperationFailureCode::UnsupportedCapability)?;
+    if let Some(artifact) = artifacts.last_mut() {
+        artifact.role = OperationArtifactRole::StagedOutput;
+    }
+
+    let mut completed = 0_u64;
+    for output in &source.outputs {
+        check_cancelled(session)?;
+        let name = output
+            .name
+            .as_ref()
+            .ok_or(OperationFailureCode::StalePlan)?;
+        let (mut staged_file, identity) = create_artifact(
+            &staged_directory,
+            &staged_directory_path,
+            name,
+            OperationArtifactRole::StagedOutput,
+            artifacts,
+            cleanup_artifact_retained,
+        )?;
+        write_multi_content_package_with_progress(
+            &output.members,
+            &mut staged_file,
+            session,
+            &mut completed,
+        )?;
+        staged_file
+            .sync_all()
+            .map_err(|_| OperationFailureCode::WriteFailed)?;
+        let staged_evidence =
+            inspect_file(&mut staged_file).map_err(|_| OperationFailureCode::ValidationFailed)?;
+        if staged_evidence.identity != identity
+            || staged_evidence.snapshot.len != output.length
+            || staged_evidence.sha256 != output.sha256
+        {
+            return Err(OperationFailureCode::ValidationFailed);
+        }
+        validate_staged_content_package(&staged_directory_path.join(name), output)?;
+        verify_file_evidence(&mut staged_file, &staged_evidence)
+            .map_err(|_| OperationFailureCode::ValidationFailed)?;
+        update_artifact_evidence(
+            artifacts,
+            name,
+            Some(identity),
+            OperationArtifactRole::StagedOutput,
+            Some(staged_evidence.snapshot.len),
+            Some(staged_evidence.sha256),
+        );
+    }
+    let staged_output_evidence = validate_content_output_directory(
+        &staged_directory_path,
+        &staged_directory,
+        &source.outputs,
+        session,
+    )?;
+    if let Some(artifact) = artifacts
+        .iter_mut()
+        .find(|artifact| artifact.id == staged_root_artifact_id)
+    {
+        artifact.sha256 = Some(staged_output_evidence.manifest_sha256);
+    }
+    milestones.push(OperationMilestone::Validated);
+    session.record_milestone(OperationMilestone::Validated);
+
+    check_cancelled(session)?;
+    validate_directory_route(&plan.workspace, workspace_runtime_identity)?;
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::StalePlan)?;
+    verify_content_sources_with_checkpoint(source, session, || {
+        checkpoint(ExecutionCheckpoint::SourceEvidenceReadChunk);
+    })?;
+    ensure_multi_content_directory_baseline(plan, &destination_directory)?;
+    validate_destination_lock(
+        &destination_lock,
+        &destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
+    let current_stage_area = open_directory(&stage_directory_path)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if handle_identity(&current_stage_area) != handle_identity(&stage_directory) {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    let current_staged_directory = open_directory_at(&stage_directory, staged_directory_name)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if handle_identity(&current_staged_directory) != Some(staged_output_evidence.identity) {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    let final_staged_evidence = validate_content_output_directory(
+        &staged_directory_path,
+        &current_staged_directory,
+        &source.outputs,
+        session,
+    )?;
+    if final_staged_evidence != staged_output_evidence {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+
+    checkpoint(ExecutionCheckpoint::BeforePromotion);
+    if !session
+        .begin_promotion()
+        .map_err(|_| OperationFailureCode::SessionUnavailable)?
+    {
+        return Err(OperationFailureCode::Cancelled);
+    }
+    let replacing =
+        destination_baseline.is_some() && plan.snapshot.conflict_policy == ConflictPolicy::Replace;
+    if replacing {
+        qualify_rename_swap(&destination_directory)?;
+    }
+    let promotion = if replacing {
+        rename_swap_at(
+            &stage_directory,
+            staged_directory_name,
+            &destination_directory,
+            &plan.destination.name,
+        )
+    } else {
+        rename_exclusive_at(
+            &stage_directory,
+            staged_directory_name,
+            &destination_directory,
+            &plan.destination.name,
+        )
+    };
+    if promotion.is_ok() {
+        milestones.push(OperationMilestone::Published);
+        session.record_milestone(OperationMilestone::Published);
+    }
+    let finish_promotion = session.finish_promotion();
+    if finish_promotion.is_err() {
+        return Err(if promotion.is_ok() {
+            OperationFailureCode::PublicationUncertain
+        } else {
+            OperationFailureCode::SessionUnavailable
+        });
+    }
+    if let Err(error) = promotion {
+        return Err(if replacing {
+            if ensure_multi_content_directory_baseline(plan, &destination_directory).is_err() {
+                OperationFailureCode::DestinationChanged
+            } else if is_unsupported_rename_error(&error) || is_unsupported_capability_error(&error)
+            {
+                OperationFailureCode::UnsupportedCapability
+            } else {
+                OperationFailureCode::PublicationFailed
+            }
+        } else if no_clobber_link_error_code(&error).is_some() {
+            no_clobber_link_error_code(&error).unwrap_or(OperationFailureCode::DestinationChanged)
+        } else if is_unsupported_rename_error(&error) || is_unsupported_capability_error(&error) {
+            OperationFailureCode::UnsupportedCapability
+        } else {
+            OperationFailureCode::PublicationFailed
+        });
+    }
+
+    let displaced = if replacing {
+        inspect_output_directory_at(
+            &stage_directory,
+            staged_directory_name,
+            &staged_directory_path,
+        )?
+    } else {
+        None
+    };
+    if replacing {
+        let artifact = artifacts
+            .iter_mut()
+            .find(|artifact| artifact.id == staged_root_artifact_id)
+            .ok_or(OperationFailureCode::PublicationUncertain)?;
+        artifact.role = OperationArtifactRole::DisplacedDestination;
+        artifact.keep = true;
+        if let Some(displaced) = &displaced {
+            artifact.identity = Some(displaced.identity);
+            artifact.path_identity = Some(displaced.identity);
+            artifact.sha256 = Some(displaced.manifest_sha256);
+        } else {
+            artifact.identity = destination_baseline
+                .as_ref()
+                .map(|evidence| evidence.identity);
+            artifact.sha256 = destination_baseline
+                .as_ref()
+                .map(|evidence| evidence.manifest_sha256);
+        }
+    } else {
+        artifacts.retain(|artifact| artifact.id != staged_root_artifact_id);
+    }
+
+    let published_directory = open_directory_at(&destination_directory, &plan.destination.name)
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    let published_identity =
+        handle_identity(&published_directory).ok_or(OperationFailureCode::PublicationUncertain)?;
+    let published_root_id = record_published_content_directory(
+        plan,
+        &destination_directory,
+        published_identity,
+        staged_output_evidence.manifest_sha256,
+        artifacts,
+    )?;
+    for artifact in artifacts.iter_mut().filter(|artifact| {
+        artifact.kind == OwnedArtifactKind::File
+            && artifact.parent_artifact_id == Some(staged_root_artifact_id)
+    }) {
+        artifact.role = OperationArtifactRole::PublishedDestination;
+        artifact.path = plan.destination.path.join(&artifact.name);
+        artifact.parent_artifact_id = Some(published_root_id);
+        artifact.keep = true;
+    }
+
+    if let Some(displaced) = &displaced {
+        if destination_baseline.as_ref() != Some(displaced) {
+            *cleanup_artifact_retained = true;
+            return Err(OperationFailureCode::DestinationChanged);
+        }
+    } else if replacing {
+        *cleanup_artifact_retained = true;
+        return Err(OperationFailureCode::PublicationUncertain);
+    }
+
+    let final_published_evidence = validate_content_output_directory(
+        &plan.destination.path,
+        &published_directory,
+        &source.outputs,
+        session,
+    )
+    .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    if final_published_evidence.identity != published_identity
+        || final_published_evidence.manifest_sha256 != staged_output_evidence.manifest_sha256
+    {
+        return Err(OperationFailureCode::PublicationUncertain);
+    }
+    verify_content_sources_with_checkpoint(source, session, || {
+        checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
+    })
+    .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    ensure_published_content_directory_route(
+        plan,
+        destination_parent_identity,
+        published_identity,
+        staged_output_evidence.manifest_sha256,
+    )?;
+    session.record_milestone(OperationMilestone::Validated);
+    Ok(OperationOutcome::Split)
 }
 
 #[cfg(target_os = "macos")]
@@ -4035,6 +6136,45 @@ fn check_cancelled(session: &OperationSession) -> Result<(), OperationFailureCod
     } else {
         Ok(())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn write_multi_content_package(
+    members: &[ProgramMember],
+    stage: &mut File,
+    session: &OperationSession,
+) -> Result<(), OperationFailureCode> {
+    let mut completed = 0_u64;
+    write_multi_content_package_with_progress(members, stage, session, &mut completed)
+}
+
+#[cfg(target_os = "macos")]
+fn write_multi_content_package_with_progress(
+    members: &[ProgramMember],
+    stage: &mut File,
+    session: &OperationSession,
+    completed: &mut u64,
+) -> Result<(), OperationFailureCode> {
+    stage
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| OperationFailureCode::WriteFailed)?;
+    let mut cancellation_observed = false;
+    crate::multi_content_format::write_pfs0(stage, members, |written| {
+        cancellation_observed |= check_cancelled(session).is_err();
+        if cancellation_observed {
+            return Err(FormatError::OutputUnavailable);
+        }
+        *completed = completed
+            .checked_add(written)
+            .ok_or(FormatError::ResourceLimit)?;
+        session.record_progress(*completed);
+        Ok(())
+    })
+    .map_err(|error| match error {
+        FormatError::SourceUnavailable => OperationFailureCode::SourceChanged,
+        FormatError::OutputUnavailable if cancellation_observed => OperationFailureCode::Cancelled,
+        other => map_content_format_error(other),
+    })
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -4225,6 +6365,47 @@ fn acquire_source_lock(
     }
     verify_file_evidence(&mut current_source, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_content_source_lock(
+    source: &ResolvedFile,
+    expected: &FileEvidence,
+    session: &OperationSession,
+    checkpoint: &mut impl FnMut(ExecutionCheckpoint),
+) -> Result<SourceLockGuard, OperationFailureCode> {
+    validate_file_route(source, None).map_err(|_| OperationFailureCode::StalePlan)?;
+    let directory =
+        open_directory(&source.parent).map_err(|_| OperationFailureCode::SourceChanged)?;
+    let file =
+        open_file_at(&directory, &source.name).map_err(|_| OperationFailureCode::SourceChanged)?;
+    if handle_identity(&file) != Some(expected.identity) {
+        return Err(OperationFailureCode::SourceChanged);
+    }
+    let guard = SourceLockGuard { file };
+    loop {
+        check_cancelled(session)?;
+        match fs2::FileExt::try_lock_shared(&guard.file) {
+            Ok(()) => break,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                checkpoint(ExecutionCheckpoint::SourceLockWait);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(error) if is_unsupported_capability_error(&error) => {
+                return Err(OperationFailureCode::UnsupportedCapability);
+            }
+            Err(_) => return Err(OperationFailureCode::SourceUnavailable),
+        }
+    }
+    checkpoint(ExecutionCheckpoint::SourceLockAcquired);
+    let mut current =
+        open_file_at(&directory, &source.name).map_err(|_| OperationFailureCode::SourceChanged)?;
+    if handle_identity(&current) != Some(expected.identity) {
+        return Err(OperationFailureCode::SourceChanged);
+    }
+    verify_file_evidence(&mut current, expected)
+        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    Ok(guard)
 }
 
 #[cfg(target_os = "macos")]
@@ -4885,6 +7066,20 @@ fn artifact_inventory_with_checkpoint(
             .identity
             .zip(current_entry_identity)
             .is_some_and(|(recorded, observed)| recorded == observed);
+        let refreshed_directory_manifest = if artifact.kind == OwnedArtifactKind::Directory
+            && matches!(
+                artifact.role,
+                OperationArtifactRole::DisplacedDestination
+                    | OperationArtifactRole::PublishedDestination
+            )
+            && identity_matches
+        {
+            current_entry
+                .as_ref()
+                .map(|entry| directory_manifest(&artifact.path, entry))
+        } else {
+            None
+        };
         let refreshed_content = if artifact.kind == OwnedArtifactKind::File && identity_matches {
             current_entry.as_mut().map(|entry| {
                 let current_length =
@@ -4973,7 +7168,22 @@ fn artifact_inventory_with_checkpoint(
         } else {
             match artifact.role {
                 OperationArtifactRole::DisplacedDestination => {
-                    if !identity_matches || current_entry_length.is_none() {
+                    if artifact.kind == OwnedArtifactKind::Directory {
+                        if !identity_matches {
+                            Some(OperationFailureCode::PublicationUncertain)
+                        } else {
+                            match refreshed_directory_manifest.as_ref() {
+                                Some(Ok(manifest)) if Some(*manifest) == artifact.sha256 => None,
+                                Some(Ok(_)) => Some(OperationFailureCode::DestinationChanged),
+                                Some(Err(OperationFailureCode::DestinationChanged)) => {
+                                    Some(OperationFailureCode::DestinationChanged)
+                                }
+                                Some(Err(_)) | None => {
+                                    Some(OperationFailureCode::PublicationUncertain)
+                                }
+                            }
+                        }
+                    } else if !identity_matches || current_entry_length.is_none() {
                         Some(OperationFailureCode::PublicationUncertain)
                     } else if current_entry_length != artifact.length {
                         Some(OperationFailureCode::DestinationChanged)
@@ -4992,12 +7202,23 @@ fn artifact_inventory_with_checkpoint(
                     }
                 }
                 OperationArtifactRole::PublishedDestination => {
-                    let planned_output_still_matches = identity_matches
-                        && current_entry_length == artifact.length
-                        && matches!(
-                            refreshed_content.as_ref(),
-                            Some(Ok(evidence)) if Some(evidence.sha256) == artifact.sha256
-                        );
+                    let planned_output_still_matches = match artifact.kind {
+                        OwnedArtifactKind::File => {
+                            identity_matches
+                                && current_entry_length == artifact.length
+                                && matches!(
+                                    refreshed_content.as_ref(),
+                                    Some(Ok(evidence)) if Some(evidence.sha256) == artifact.sha256
+                                )
+                        }
+                        OwnedArtifactKind::Directory => {
+                            identity_matches
+                                && matches!(
+                                    refreshed_directory_manifest.as_ref(),
+                                    Some(Ok(manifest)) if Some(*manifest) == artifact.sha256
+                                )
+                        }
+                    };
                     (!planned_output_still_matches)
                         .then_some(OperationFailureCode::PublicationUncertain)
                 }
@@ -5027,7 +7248,13 @@ fn artifact_inventory_with_checkpoint(
                 refreshed_identity_alias.unwrap_or((None, None))
             }
         } else {
-            (None, None)
+            (
+                None,
+                refreshed_directory_manifest
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .copied(),
+            )
         };
         operation_artifacts.push(OperationArtifact {
             artifact_id: artifact.id,
@@ -5424,6 +7651,78 @@ fn register_published_destination(
         path_length: Some(staged.snapshot.len),
         keep: true,
     });
+}
+
+#[cfg(target_os = "macos")]
+fn record_published_content_directory(
+    plan: &OperationPlan,
+    destination_directory: &File,
+    expected_identity: FileIdentity,
+    expected_manifest: Sha256Digest,
+    artifacts: &mut Vec<OwnedArtifact>,
+) -> Result<u64, OperationFailureCode> {
+    let directory = open_directory_at(destination_directory, &plan.destination.name)
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    let identity = handle_identity(&directory).ok_or(OperationFailureCode::PublicationUncertain)?;
+    let manifest = directory_manifest(&plan.destination.path, &directory).ok();
+    let published = identity == expected_identity && manifest == Some(expected_manifest);
+    let parent_identity = handle_identity(destination_directory);
+    let id = next_artifact_id(artifacts);
+    let parent_artifact_id =
+        parent_artifact_id_for_path(artifacts, &plan.destination.parent, parent_identity);
+    artifacts.push(OwnedArtifact {
+        id,
+        parent_artifact_id,
+        relative_name: PathBuf::from(&plan.destination.name),
+        parent_identity,
+        directory: destination_directory
+            .try_clone()
+            .map_err(|_| OperationFailureCode::PublicationUncertain)?,
+        name: plan.destination.name.clone(),
+        path: plan.destination.path.clone(),
+        identity: Some(identity),
+        kind: OwnedArtifactKind::Directory,
+        role: if published {
+            OperationArtifactRole::PublishedDestination
+        } else {
+            OperationArtifactRole::UncertainEntry
+        },
+        length: None,
+        sha256: manifest,
+        path_identity: Some(identity),
+        path_length: None,
+        keep: true,
+    });
+    if published {
+        Ok(id)
+    } else {
+        Err(OperationFailureCode::PublicationUncertain)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ensure_published_content_directory_route(
+    plan: &OperationPlan,
+    destination_parent_identity: FileIdentity,
+    expected_identity: FileIdentity,
+    expected_manifest: Sha256Digest,
+) -> Result<(), OperationFailureCode> {
+    validate_file_route(&plan.destination, Some(destination_parent_identity))
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    let parent = open_directory(&plan.destination.parent)
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    verify_directory_identity(&parent, destination_parent_identity)
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    let directory = open_directory_at(&parent, &plan.destination.name)
+        .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+    if handle_identity(&directory) != Some(expected_identity)
+        || directory_manifest(&plan.destination.path, &directory)
+            .map_err(|_| OperationFailureCode::PublicationUncertain)?
+            != expected_manifest
+    {
+        return Err(OperationFailureCode::PublicationUncertain);
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -6204,13 +8503,35 @@ fn verify_source_entry(
 fn verify_source_entry_with_checkpoint(
     plan: &OperationPlan,
     source_directory: &File,
-    checkpoint: impl FnMut(),
+    mut checkpoint: impl FnMut(),
 ) -> Result<(), OperationFailureCode> {
+    if let Some(multi_content) = plan.multi_content.as_ref() {
+        let source = match multi_content {
+            MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. } => source,
+        };
+        return verify_content_sources_for_execution(source, &mut checkpoint);
+    }
     validate_file_route(&plan.source, None).map_err(|_| OperationFailureCode::StalePlan)?;
     let mut source = open_file_at(source_directory, &plan.source.name)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
     verify_file_evidence_with_checkpoint(&mut source, &plan.source_baseline, checkpoint)
         .map_err(|_| OperationFailureCode::SourceChanged)
+}
+
+#[cfg(target_os = "macos")]
+fn verify_source_entry_during_execution_with_checkpoint(
+    plan: &OperationPlan,
+    source_directory: &File,
+    session: &OperationSession,
+    checkpoint: impl FnMut(),
+) -> Result<(), OperationFailureCode> {
+    let Some(multi_content) = plan.multi_content.as_ref() else {
+        return verify_source_entry_with_checkpoint(plan, source_directory, checkpoint);
+    };
+    let source = match multi_content {
+        MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. } => source,
+    };
+    verify_content_sources_with_checkpoint(source, session, checkpoint)
 }
 
 #[cfg(target_os = "macos")]
@@ -8359,6 +10680,32 @@ mod tests {
     fn plan(source: &Path, destination: &Path, workspace: &Path) -> OperationPlan {
         plan_copy_through(CopyThroughRequest::new(source, destination, workspace))
             .expect("create operation plan")
+    }
+
+    #[test]
+    fn cancellation_stops_source_hashing_after_the_current_chunk() {
+        let root = tempfile::tempdir().expect("create cancellation fixture");
+        let source = root.path().join("source.bin");
+        let bytes = vec![0x5a; IO_BUFFER_SIZE * 3];
+        fs::write(&source, &bytes).expect("write source fixture");
+
+        let mut expected_file = File::open(&source).expect("open expected source");
+        let expected = inspect_file_with_checkpoint(&mut expected_file, || {})
+            .expect("inspect expected source");
+        let mut file = File::open(&source).expect("open source for verification");
+        let mut checkpoint_count = 0;
+
+        let result = verify_file_evidence_with_fallible_checkpoint(&mut file, &expected, || {
+            checkpoint_count += 1;
+            Err(OperationFailureCode::Cancelled)
+        });
+
+        assert_eq!(result, Err(OperationFailureCode::Cancelled));
+        assert_eq!(checkpoint_count, 1);
+        assert_eq!(
+            file.stream_position().expect("read source position"),
+            IO_BUFFER_SIZE as u64
+        );
     }
 
     /// Holds inherited descriptors until the parent signals the release socket.
