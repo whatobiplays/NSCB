@@ -1,13 +1,14 @@
 //! Runtime-neutral Rust facade for bounded Probe, Recognition,
-//! input-resolution, qualified Inspection, and safe copy-through operations.
+//! input-resolution, qualified Inspection, safe copy-through, and the supported
+//! structural multi-content Build/Split profile.
 //!
 //! Container Probe validates outer PFS0 framing without reading payloads.
 //! Recognition examines bounded structural metadata and reports positive families,
 //! uncertainty, and package/card structural eligibility without execution authority.
 //! Neither operation establishes title identity, authenticity, or Verification.
-//! Copy-through plans are immutable in-memory capabilities and publish only
-//! independently validated bytes through the host filesystem's atomic rename
-//! or link operations.
+//! Copy-through and multi-content operations plan immutable in-memory
+//! capabilities. They publish only independently checked output bytes through
+//! the host filesystem's qualified atomic rename or link operations.
 
 mod engine;
 mod error;
@@ -15,6 +16,7 @@ mod file_identity;
 mod input_resolution;
 mod inspection;
 mod key_file;
+mod multi_content_format;
 mod nca;
 mod operation;
 mod partition_fs;
@@ -50,12 +52,13 @@ pub use operation::{
     CopyBatchItemPlanSnapshot, CopyBatchItemPlanState, CopyBatchItemRequest, CopyBatchItemResult,
     CopyBatchItemState, CopyBatchPlan, CopyBatchPlanSnapshot, CopyBatchProgress, CopyBatchRequest,
     CopyBatchResult, CopyBatchSession, CopyBatchSessionPhase, CopyBatchSessionSnapshot,
-    CopyBatchSessionStatus, CopyThroughRequest, DestinationBaseline, JobState, OperationArtifact,
-    OperationArtifactRole, OperationCompletion, OperationError, OperationEvent,
-    OperationEventConsumer, OperationEventKind, OperationFailure, OperationFailureCode,
-    OperationMilestone, OperationOutcome, OperationPlan, OperationPlanSnapshot, OperationResult,
-    OperationSession, OperationSessionPhase, OperationSessionSnapshot, OperationSessionStatus,
-    PlannedArtifact, PlannedEffect, PlannedSource, StagingStrategy,
+    CopyBatchSessionStatus, CopyThroughRequest, DestinationBaseline, JobState,
+    MultiContentBuildRequest, MultiContentSplitRequest, OperationArtifact, OperationArtifactRole,
+    OperationCompletion, OperationError, OperationEvent, OperationEventConsumer,
+    OperationEventKind, OperationFailure, OperationFailureCode, OperationKind, OperationMilestone,
+    OperationOutcome, OperationPlan, OperationPlanSnapshot, OperationResult, OperationSession,
+    OperationSessionPhase, OperationSessionSnapshot, OperationSessionStatus, PlannedArtifact,
+    PlannedContentGroup, PlannedContentMember, PlannedEffect, PlannedSource, StagingStrategy,
 };
 
 pub use input_resolution::{

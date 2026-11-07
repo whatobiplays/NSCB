@@ -5,8 +5,9 @@ use crate::inspection::{
 };
 use crate::operation::{
     CopyBatchCheckpointError, CopyBatchExecution, CopyBatchItemCheckpoint, CopyBatchPlan,
-    CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyThroughRequest, OperationError,
-    OperationPlan, OperationResult, OperationSession,
+    CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyThroughRequest,
+    MultiContentBuildRequest, MultiContentSplitRequest, OperationError, OperationPlan,
+    OperationResult, OperationSession,
 };
 use crate::pfs0;
 use serde::Serialize;
@@ -49,6 +50,29 @@ impl Engine {
         request: CopyThroughRequest,
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_copy_through(request)
+    }
+
+    /// Resolves a typed multi-content Build request into an immutable plan.
+    ///
+    /// Planning validates supported PFS0 and plaintext Program NCA structures,
+    /// derives exact ProgramId groups from member bytes, and records source
+    /// evidence without changing any path.
+    pub fn plan_multi_content_build(
+        &self,
+        request: MultiContentBuildRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_multi_content_build(request)
+    }
+
+    /// Resolves a typed multi-content Split request into an immutable plan.
+    ///
+    /// The resulting directory contains one deterministic PFS0 package per
+    /// validated ProgramId group and is published as a single operation unit.
+    pub fn plan_multi_content_split(
+        &self,
+        request: MultiContentSplitRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_multi_content_split(request)
     }
     /// Resolves independent regular files into one immutable sequential copy plan.
     ///
