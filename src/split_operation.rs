@@ -7,10 +7,11 @@
 #[cfg(target_os = "macos")]
 use crate::operation::OperationOutcome;
 use crate::operation::{
-    ConflictPolicy, OperationArtifact, OperationArtifactRole, OperationError, OperationFailureCode,
-    OperationMilestone, OperationResult, OperationSession, PlannedSource,
-    SplitArtifactInventoryRecord,
+    ConflictPolicy, OperationError, OperationFailureCode, OperationMilestone, OperationResult,
+    OperationSession, PlannedSource,
 };
+#[cfg(target_os = "macos")]
+use crate::operation::{OperationArtifact, OperationArtifactRole, SplitArtifactInventoryRecord};
 use crate::sha256::Sha256Digest;
 use crate::split_trust::SplitTrustWriter;
 #[cfg(target_os = "macos")]
