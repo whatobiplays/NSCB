@@ -1,0 +1,12 @@
+{
+  "usage": "Usage: nscb split <source> [bundle-directory] [--replace | --skip] [--json | --jsonl]\n\nWrite one selected regular file as numbered Split parts in a bundle directory. Without a destination, NSCB uses <source-name>.split inside the configured output_dir or Documents/NSCB_output. The bundle contains a canonical <source-name> directory and an adjacent <source-name>.nscb-split.json manifest. Give resolve the canonical directory or one numbered member. The default policy refuses a different existing bundle. An exact qualified match is reported as already up to date; --replace does not replace a different existing bundle, and --skip leaves the destination unchanged. The production part size is fixed. Destination filesystems must meet the current local APFS qualification. For accepted work, --json emits one job.result document and --jsonl emits ordered job.event records followed by one job.result document. Invocation and planning errors before job admission emit a kind:error document.",
+  "created": "Split bundle published at {bundle}. Resolve the canonical directory at {canonical}. Manifest: {manifest}.",
+  "already_up_to_date": "Split bundle already matches the planned source: {bundle}.",
+  "skipped": "Split left the existing bundle unchanged: {bundle}.",
+  "cancelled": "Split was cancelled before the receipt commit.",
+  "failed": "Split failed: {code}",
+  "internal_failure": "Split ended without an authoritative result.",
+  "unknown_error": "Split ended in an unrecognized state.",
+  "cleanup_warning": "Operation-owned recovery data was retained because cleanup could not be proven safe.",
+  "recovery_bundle": "Recovery bundle retained at {path}."
+}

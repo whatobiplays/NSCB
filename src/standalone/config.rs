@@ -252,6 +252,34 @@ impl StandaloneConfig {
         Ok((directory.join(file_name), selection))
     }
 
+    /// Selects the standalone outer bundle path for a Split operation.
+    pub(crate) fn split_bundle_destination_with_selection(
+        &self,
+        source: &Path,
+    ) -> Result<(PathBuf, CopyDestinationSelection), OutputPathError> {
+        let (copy_destination, selection) = self.copy_destination_with_selection(source)?;
+        let mut bundle_name = copy_destination
+            .file_name()
+            .ok_or(OutputPathError::OutputDestinationInvalid)?
+            .to_os_string();
+        bundle_name.push(".split");
+        Ok((copy_destination.with_file_name(bundle_name), selection))
+    }
+
+    /// Validates an implicit Split output parent without creating it during planning.
+    pub(crate) fn validate_split_output_directory(
+        &self,
+        bundle_destination: &Path,
+    ) -> Result<(), OutputPathError> {
+        let parent = bundle_destination
+            .parent()
+            .ok_or(OutputPathError::OutputDirectoryUnavailable)?;
+        match fs::metadata(parent) {
+            Ok(metadata) if metadata.is_dir() => Ok(()),
+            _ => Err(OutputPathError::OutputDirectoryUnavailable),
+        }
+    }
+
     pub(crate) fn snapshot(&self) -> Result<ConfigSnapshot, StandaloneConfigError> {
         let path = self
             .path
@@ -884,6 +912,37 @@ mod tests {
                 && value.value == "/synthetic/output"
                 && value.source == "file"
         }));
+    }
+
+    #[test]
+    fn split_destination_checks_configured_output_without_creating_it() {
+        let root = tempfile::tempdir().expect("standalone split destination");
+        let output = root.path().join("configured-output");
+        let document = format!(
+            "schema_version = 1\nkeys_path = \"/synthetic/keys\"\noutput_dir = {:?}\n",
+            output.to_string_lossy()
+        )
+        .parse::<DocumentMut>()
+        .unwrap();
+        let config = StandaloneConfig {
+            path: root.path().join("config.toml"),
+            source_schema_version: 1,
+            document,
+        };
+
+        let (bundle, selection) = config
+            .split_bundle_destination_with_selection(std::path::Path::new("Game.nca"))
+            .unwrap();
+        assert_eq!(bundle, output.join("Game.nca.split"));
+        assert_eq!(
+            selection,
+            super::CopyDestinationSelection::ConfiguredOutputDirectory
+        );
+        assert!(!output.exists());
+        assert!(config.validate_split_output_directory(&bundle).is_err());
+        assert!(!output.exists());
+        std::fs::create_dir(&output).unwrap();
+        assert!(config.validate_split_output_directory(&bundle).is_ok());
     }
 
     #[cfg(unix)]

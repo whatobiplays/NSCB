@@ -17,7 +17,8 @@ use nscb::{
     InspectionHost, InspectionPreflightStatus, InspectionRequest, InspectionResult, JobState,
     LocalSplitTrustStore, OperationEventConsumer, OperationEventKind, OperationFailureCode,
     OperationPlan, OperationResult, OperationSession, OperationSessionSnapshot,
-    SplitQualificationKind, VerificationErrorCode, VerificationProfile, VerificationRequest,
+    SplitQualificationKind, SplitRequest, SplitTrustWriter, VerificationErrorCode,
+    VerificationProfile, VerificationRequest,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -493,6 +494,11 @@ pub(crate) fn is_copy_batch_command(args: &[OsString]) -> bool {
         .is_some_and(|argument| argument == OsStr::new("copy-batch"))
 }
 
+fn is_split_command(args: &[OsString]) -> bool {
+    args.first()
+        .is_some_and(|argument| argument == OsStr::new("split"))
+}
+
 /// Reports machine output requested before the positional delimiter.
 ///
 /// Parsing normally supplies the authoritative mode. This fallback is used
@@ -507,6 +513,7 @@ fn machine_output_requested_before_delimiter(args: &[OsString]) -> bool {
 pub(crate) fn requires_reporting_session(args: &[OsString]) -> bool {
     is_copy_command(args)
         || is_copy_batch_command(args)
+        || is_split_command(args)
         || (args
             .first()
             .is_some_and(|argument| argument == OsStr::new("jobs"))
@@ -565,6 +572,17 @@ fn run_with_control(
             || argument == OsStr::new("multi-content-split")
     }) {
         return run_multi_content_command(args, engine, stdout, stderr);
+    }
+
+    if is_split_command(args) {
+        #[cfg(target_os = "macos")]
+        {
+            return run_split_with_control(args, engine, standalone, stdout, stderr, reporting);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return run_split_with_standalone_config(args, engine, standalone, stdout, stderr);
+        }
     }
 
     if args
@@ -2537,6 +2555,14 @@ struct CopyInvocation {
     jsonl: bool,
 }
 
+struct SplitInvocation {
+    source: PathBuf,
+    bundle_directory: Option<PathBuf>,
+    conflict_policy: ConflictPolicy,
+    json: bool,
+    jsonl: bool,
+}
+
 fn execute_copy_batch_failed_items_retry(
     intent: BatchFailedItemsRetryIntent,
     options: JobsRetryOptions,
@@ -2954,6 +2980,65 @@ fn parse_copy(args: &[OsString]) -> Result<CopyInvocation, ()> {
         destination,
         workspace,
         replace,
+        json,
+        jsonl,
+    })
+}
+
+fn parse_split(args: &[OsString]) -> Result<SplitInvocation, ()> {
+    if !is_split_command(args) {
+        return Err(());
+    }
+    let mut positionals = Vec::new();
+    let mut conflict_policy = ConflictPolicy::Fail;
+    let mut conflict_selected = false;
+    let mut json = false;
+    let mut jsonl = false;
+    for argument in args.iter().skip(1) {
+        if argument == OsStr::new("--replace") {
+            if conflict_selected {
+                return Err(());
+            }
+            conflict_selected = true;
+            conflict_policy = ConflictPolicy::Replace;
+        } else if argument == OsStr::new("--skip") {
+            if conflict_selected {
+                return Err(());
+            }
+            conflict_selected = true;
+            conflict_policy = ConflictPolicy::Skip;
+        } else if argument == OsStr::new("--json") {
+            if json {
+                return Err(());
+            }
+            json = true;
+        } else if argument == OsStr::new("--jsonl") {
+            if jsonl {
+                return Err(());
+            }
+            jsonl = true;
+        } else if argument
+            .to_str()
+            .is_some_and(|value| value.starts_with("--"))
+        {
+            return Err(());
+        } else {
+            positionals.push(PathBuf::from(argument));
+        }
+    }
+    if json && jsonl || !(1..=2).contains(&positionals.len()) {
+        return Err(());
+    }
+    let bundle_directory = if positionals.len() == 2 {
+        Some(positionals.pop().ok_or(())?)
+    } else {
+        None
+    };
+    let source = positionals.pop().ok_or(())?;
+    Ok(SplitInvocation {
+        source,
+        bundle_directory,
+        conflict_policy,
         json,
         jsonl,
     })
@@ -4022,14 +4107,16 @@ fn validate_invocation_cwd(
 
 fn exit_for_operation_failure(code: OperationFailureCode) -> i32 {
     match code {
-        OperationFailureCode::DestinationConflict | OperationFailureCode::DestinationChanged => {
-            EXIT_CONFLICT
-        }
+        OperationFailureCode::DestinationBusy
+        | OperationFailureCode::DestinationConflict
+        | OperationFailureCode::SplitReplacementUnsupported
+        | OperationFailureCode::DestinationChanged => EXIT_CONFLICT,
         OperationFailureCode::DuplicateInput
         | OperationFailureCode::DestinationCollision
         | OperationFailureCode::EmptySelection
         | OperationFailureCode::SourceUnavailable
         | OperationFailureCode::SplitInputUnsupported
+        | OperationFailureCode::SplitSourceSizeUnsupported
         | OperationFailureCode::SourceChanged
         | OperationFailureCode::StalePlan
         | OperationFailureCode::WorkspaceUnavailable
@@ -4234,6 +4321,61 @@ fn stream_job_events(
     (output_ok, terminal_written, persisted_error)
 }
 
+fn stream_split_job_events(
+    consumer: &OperationEventConsumer,
+    stdout: &mut dyn Write,
+    worker: &std::thread::ScopedJoinHandle<'_, CopyWorkerOutput>,
+) -> (bool, bool) {
+    let mut output_ok = true;
+    let mut terminal_written = false;
+    loop {
+        let event = match consumer.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !worker.is_finished() {
+                    continue;
+                }
+                match consumer.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let wrote = match event.event() {
+            OperationEventKind::Completed { result } => {
+                terminal_written = true;
+                write_json(
+                    &JobResultDocument {
+                        schema_version: 1,
+                        kind: "job.result",
+                        nscb_version: env!("CARGO_PKG_VERSION"),
+                        job_id: None,
+                        history_error: None,
+                        sequence: event.sequence(),
+                        snapshot: event.snapshot(),
+                        result,
+                    },
+                    stdout,
+                )
+            }
+            _ => write_json(
+                &JobEventDocument {
+                    schema_version: 1,
+                    kind: "job.event",
+                    nscb_version: env!("CARGO_PKG_VERSION"),
+                    sequence: event.sequence(),
+                    snapshot: event.snapshot(),
+                    event: event.event(),
+                },
+                stdout,
+            ),
+        };
+        output_ok &= wrote && stdout.flush().is_ok();
+    }
+    (output_ok, terminal_written)
+}
+
 fn write_last_job_completion(
     session: &OperationSession,
     stdout: &mut dyn Write,
@@ -4256,6 +4398,350 @@ fn write_last_job_completion(
         },
         stdout,
     )
+}
+
+#[cfg(all(test, target_os = "macos"))]
+fn run_split_with_trust_store(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    trust_store: &dyn SplitTrustWriter,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    #[cfg(target_os = "macos")]
+    {
+        run_split_impl(args, engine, standalone, trust_store, stdout, stderr, None)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        run_split_impl(args, engine, standalone, trust_store, stdout, stderr)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_split_with_standalone_config(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let trust_store = LocalSplitTrustStore::from_environment();
+    run_split_impl(args, engine, standalone, &trust_store, stdout, stderr)
+}
+
+#[cfg(target_os = "macos")]
+fn run_split_with_control(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    reporting: Option<&ReportingControl>,
+) -> i32 {
+    let trust_store = LocalSplitTrustStore::from_environment();
+    run_split_impl(
+        args,
+        engine,
+        standalone,
+        &trust_store,
+        stdout,
+        stderr,
+        reporting,
+    )
+}
+
+fn run_split_impl(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    trust_store: &dyn SplitTrustWriter,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
+) -> i32 {
+    let invocation = match parse_split(args) {
+        Ok(invocation) => invocation,
+        Err(()) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            if machine_output_requested_before_delimiter(args) {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            return if write_copy_record(stderr, crate::localization::english::split_usage()) {
+                EXIT_USAGE
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let machine_requested = invocation.json || invocation.jsonl;
+    let (bundle_directory, implicit_destination) = match &invocation.bundle_directory {
+        Some(path) => (path.clone(), false),
+        None => {
+            let Some(config) = standalone else {
+                #[cfg(target_os = "macos")]
+                if let Some(reporting) = reporting {
+                    reporting.pre_admission_complete();
+                }
+                if machine_requested {
+                    return emit_error(stdout, "usage_error", EXIT_USAGE);
+                }
+                return if write_copy_record(stderr, crate::localization::english::split_usage()) {
+                    EXIT_USAGE
+                } else {
+                    EXIT_INTERNAL
+                };
+            };
+            match config.split_bundle_destination_with_selection(&invocation.source) {
+                Ok((path, _selection)) => (path, true),
+                Err(error) => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(reporting) = reporting {
+                        reporting.pre_admission_complete();
+                    }
+                    return emit_split_preflight_error(
+                        error.code(),
+                        EXIT_INPUT,
+                        machine_requested,
+                        stdout,
+                        stderr,
+                    );
+                }
+            }
+        }
+    };
+
+    if implicit_destination {
+        let volume_check = bundle_directory
+            .parent()
+            .ok_or(OperationFailureCode::UnsafePath)
+            .and_then(|path| engine.validate_split_output_parent(path));
+        if let Err(code) = volume_check {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_split_preflight_error(
+                code.as_str(),
+                exit_for_operation_failure(code),
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    }
+
+    if implicit_destination
+        && standalone.is_some_and(|config| {
+            config
+                .validate_split_output_directory(&bundle_directory)
+                .is_err()
+        })
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        return emit_split_preflight_error(
+            "output_directory_unavailable",
+            EXIT_INPUT,
+            machine_requested,
+            stdout,
+            stderr,
+        );
+    }
+
+    let cancellation = match scoped_cancellation() {
+        Ok(cancellation) => cancellation,
+        Err(_) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            if machine_requested {
+                return emit_error(stdout, "signal_handler_failed", EXIT_INTERNAL);
+            }
+            let _ = write_copy_record(stderr, crate::localization::english::split_signal_failure());
+            return EXIT_INTERNAL;
+        }
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(reporting) = reporting {
+        reporting.begin_planning();
+    }
+    let request = SplitRequest::new(&invocation.source, &bundle_directory)
+        .with_conflict_policy(invocation.conflict_policy);
+    let plan = match engine.plan_split_with_cancellation(
+        request,
+        trust_store,
+        cancellation.handle().clone(),
+    ) {
+        Ok(plan) => plan,
+        Err(error) => {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.pre_admission_complete();
+            }
+            return emit_split_preflight_error(
+                error.code().as_str(),
+                exit_for_operation_failure(error.code()),
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let snapshot = plan.snapshot();
+    if machine_requested
+        && !paths_are_json_representable([
+            invocation.source.as_path(),
+            snapshot.bundle_directory(),
+            snapshot.canonical_directory(),
+            snapshot.manifest_path(),
+        ])
+    {
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.pre_admission_complete();
+        }
+        return emit_error(stdout, "unrepresentable_path", EXIT_INPUT);
+    }
+
+    let session = OperationSession::new();
+    if invocation.jsonl {
+        let consumer = match session.subscribe_events() {
+            Ok(consumer) => consumer,
+            Err(code) => {
+                #[cfg(target_os = "macos")]
+                if let Some(reporting) = reporting {
+                    reporting.pre_admission_complete();
+                }
+                return emit_error(stdout, code.as_str(), exit_for_operation_failure(code));
+            }
+        };
+        let (output_ok, terminal_written, worker_output) = std::thread::scope(|scope| {
+            let execution_session = session.clone();
+            let execution_cancellation = cancellation.handle().clone();
+            #[cfg(target_os = "macos")]
+            let execution_reporting = reporting.cloned();
+            let worker = scope.spawn(move || {
+                let result = engine.execute_split_with_cancellation(
+                    plan,
+                    &execution_session,
+                    execution_cancellation,
+                );
+                #[cfg(target_os = "macos")]
+                if let Some(reporting) = execution_reporting {
+                    reporting.job_complete();
+                }
+                CopyWorkerOutput {
+                    result: Some(result),
+                    history_error: None,
+                }
+            });
+            let (output_ok, terminal_written) = stream_split_job_events(&consumer, stdout, &worker);
+            let worker_output = worker.join().ok();
+            (output_ok, terminal_written, worker_output)
+        });
+        drop(cancellation);
+        let Some(worker_output) = worker_output else {
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.job_complete();
+            }
+            let _ = write_copy_record(
+                stderr,
+                crate::localization::english::split_internal_failure(),
+            );
+            return EXIT_INTERNAL;
+        };
+        let Some(result) = worker_output.result else {
+            return emit_error(stdout, "execution_worker_failed", EXIT_INTERNAL);
+        };
+        let mut output_ok = output_ok;
+        if !terminal_written && output_ok {
+            output_ok = write_last_job_completion(&session, stdout, None, None);
+        }
+        if !output_ok {
+            #[cfg(target_os = "macos")]
+            let managed = reporting.is_some();
+            #[cfg(target_os = "macos")]
+            if let Some(reporting) = reporting {
+                reporting.fail();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let managed = false;
+            if !managed {
+                let _ = write_copy_record(stderr, crate::localization::english::output_failure());
+            }
+            return EXIT_INTERNAL;
+        }
+        return exit_for_operation_result(&result);
+    }
+
+    let result =
+        engine.execute_split_with_cancellation(plan, &session, cancellation.handle().clone());
+    #[cfg(target_os = "macos")]
+    if let Some(reporting) = reporting {
+        reporting.job_complete();
+    }
+    drop(cancellation);
+    let output_failed = if invocation.json {
+        !write_last_job_completion(&session, stdout, None, None)
+    } else {
+        !write_human_split_result(&result, stdout, stderr)
+    };
+    if output_failed {
+        #[cfg(target_os = "macos")]
+        let managed = reporting.is_some();
+        #[cfg(target_os = "macos")]
+        if let Some(reporting) = reporting {
+            reporting.fail();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let managed = false;
+        if !managed {
+            let _ = write_copy_record(stderr, crate::localization::english::output_failure());
+        }
+        return EXIT_INTERNAL;
+    }
+    exit_for_operation_result(&result)
+}
+
+fn emit_split_preflight_error(
+    code: &'static str,
+    exit_code: i32,
+    machine_requested: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    if machine_requested {
+        emit_error(stdout, code, exit_code)
+    } else if write_copy_record(
+        stderr,
+        crate::localization::english::split_error_message(code),
+    ) {
+        exit_code
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
+fn write_human_split_result(
+    result: &OperationResult,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> bool {
+    let message = crate::localization::english::split_result(result);
+    if result.state() == JobState::Succeeded {
+        write_copy_record(stdout, &message)
+    } else {
+        write_copy_record(stderr, &message)
+    }
 }
 
 #[cfg(test)]
@@ -5280,6 +5766,179 @@ mod tests {
 }
 
 #[cfg(test)]
+mod split_cli_tests {
+    use super::parse_split;
+    #[cfg(target_os = "macos")]
+    use super::run_split_with_trust_store;
+    use nscb::ConflictPolicy;
+    #[cfg(target_os = "macos")]
+    use nscb::{Engine, LocalSplitTrustStore};
+    #[cfg(target_os = "macos")]
+    use serde_json::Value;
+    use std::ffi::OsString;
+    #[cfg(target_os = "macos")]
+    use std::fs;
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn split_parser_keeps_source_destination_and_conflict_choice_explicit() {
+        let invocation = parse_split(&args(&[
+            "split",
+            "source.nca",
+            "bundle",
+            "--replace",
+            "--json",
+        ]))
+        .expect("valid Split invocation");
+        assert_eq!(invocation.source, std::path::Path::new("source.nca"));
+        assert_eq!(
+            invocation.bundle_directory.as_deref(),
+            Some(std::path::Path::new("bundle"))
+        );
+        assert_eq!(invocation.conflict_policy, ConflictPolicy::Replace);
+        assert!(invocation.json);
+        assert!(!invocation.jsonl);
+
+        let skipped = parse_split(&args(&["split", "source.nca", "--skip"])).unwrap();
+        assert_eq!(skipped.conflict_policy, ConflictPolicy::Skip);
+    }
+
+    #[test]
+    fn split_parser_rejects_duplicate_and_conflicting_options() {
+        for invalid in [
+            &["split", "source.nca", "bundle", "--replace", "--replace"][..],
+            &["split", "source.nca", "--replace", "--skip"][..],
+            &["split", "source.nca", "--json", "--jsonl"][..],
+            &["split", "source.nca", "bundle", "extra"][..],
+            &["split", "--json"][..],
+        ] {
+            assert!(parse_split(&args(invalid)).is_err(), "accepted {invalid:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn split_cli_json_returns_outer_and_canonical_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "nscb-cli-split-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let source = root.join("selected.nca");
+        let bundle = root.join("selected.nca.split");
+        fs::write(&source, b"arbitrary regular-file bytes").unwrap();
+        let store = LocalSplitTrustStore::new(root.join("state").join("split-trust"));
+        let invocation = vec![
+            OsString::from("split"),
+            OsString::from("--json"),
+            source.as_os_str().to_owned(),
+            bundle.as_os_str().to_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_split_with_trust_store(
+            &invocation,
+            &Engine::new(),
+            None,
+            &store,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(exit, 0);
+        assert!(stderr.is_empty());
+        assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
+        let document: Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(document["kind"], "job.result");
+        assert_eq!(
+            document["result"]["split_output"]["bundle_directory"],
+            bundle.to_str().unwrap()
+        );
+        assert_eq!(
+            document["result"]["split_output"]["canonical_directory"],
+            bundle.join("selected.nca").to_str().unwrap()
+        );
+        assert!(bundle.join("selected.nca").join("00").is_file());
+        assert!(bundle.join("selected.nca.nscb-split.json").is_file());
+        assert!(source.is_file(), "Split must preserve the selected source");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn split_cli_jsonl_streams_job_events_and_one_terminal_result() {
+        let root = std::env::temp_dir().join(format!(
+            "nscb-cli-split-jsonl-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let source = root.join("streamed.bin");
+        let bundle = root.join("streamed.bin.split");
+        fs::write(&source, vec![0x5a; 128 * 1024]).unwrap();
+        let store = LocalSplitTrustStore::new(root.join("state").join("split-trust"));
+        let invocation = vec![
+            OsString::from("split"),
+            OsString::from("--jsonl"),
+            source.as_os_str().to_owned(),
+            bundle.as_os_str().to_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_split_with_trust_store(
+            &invocation,
+            &Engine::new(),
+            None,
+            &store,
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(exit, 0);
+        assert!(stderr.is_empty());
+        let records = stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(
+            records.len() > 1,
+            "progress and terminal records are streamed"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record["kind"] == "job.event" || record["kind"] == "job.result")
+        );
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record["kind"] == "job.result")
+                .count(),
+            1
+        );
+        assert_eq!(records.last().unwrap()["kind"], "job.result");
+        assert_eq!(
+            records.last().unwrap()["result"]["split_output"]["bundle_directory"],
+            bundle.to_str().unwrap()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
 mod copy_cli_tests {
     #[cfg(unix)]
     use super::SIGNAL_REGISTRATION_TEST_STATE;
@@ -6068,11 +6727,23 @@ mod copy_cli_tests {
             4
         );
         assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::SplitReplacementUnsupported),
+            4
+        );
+        assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::DestinationBusy),
+            4
+        );
+        assert_eq!(
             exit_for_operation_failure(OperationFailureCode::DestinationChanged),
             4
         );
         assert_eq!(
             exit_for_operation_failure(OperationFailureCode::SourceUnavailable),
+            3
+        );
+        assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::SplitSourceSizeUnsupported),
             3
         );
         assert_eq!(
@@ -6116,6 +6787,7 @@ mod copy_cli_tests {
             OperationFailureCode::WorkspaceUnavailable,
             OperationFailureCode::DestinationUnavailable,
             OperationFailureCode::DestinationConflict,
+            OperationFailureCode::SplitReplacementUnsupported,
             OperationFailureCode::DestinationChanged,
             OperationFailureCode::UnsafePath,
             OperationFailureCode::UnsupportedCapability,

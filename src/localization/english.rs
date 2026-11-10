@@ -115,11 +115,33 @@ struct CopyMessages {
     errors: HashMap<String, String>,
 }
 
+#[derive(Deserialize)]
+struct SplitMessages {
+    usage: String,
+    created: String,
+    already_up_to_date: String,
+    skipped: String,
+    cancelled: String,
+    failed: String,
+    internal_failure: String,
+    unknown_error: String,
+    cleanup_warning: String,
+    recovery_bundle: String,
+}
+
 fn copy_messages() -> &'static CopyMessages {
     static MESSAGES: OnceLock<CopyMessages> = OnceLock::new();
     MESSAGES.get_or_init(|| {
         serde_json::from_str(include_str!("copy.en.json"))
             .expect("bundled English copy-through localization resource must be valid")
+    })
+}
+
+fn split_messages() -> &'static SplitMessages {
+    static MESSAGES: OnceLock<SplitMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("split.en.json"))
+            .expect("bundled English Split localization resource must be valid")
     })
 }
 
@@ -418,6 +440,66 @@ pub(crate) fn copy_result(result: &OperationResult) -> String {
                 Err(_) => message.push_str(&format!("{artifact:?}")),
             }
         }
+    }
+    message
+}
+
+pub(crate) fn split_usage() -> &'static str {
+    &split_messages().usage
+}
+
+pub(crate) fn split_error_message(code: &str) -> &'static str {
+    copy_error_message(code)
+}
+
+pub(crate) fn split_signal_failure() -> &'static str {
+    &split_messages().internal_failure
+}
+
+pub(crate) fn split_internal_failure() -> &'static str {
+    &split_messages().internal_failure
+}
+
+/// Formats the terminal result of a Split job, including its canonical resolver path.
+pub(crate) fn split_result(result: &OperationResult) -> String {
+    let messages = split_messages();
+    let paths = result.split_output_paths();
+    let mut message = match result.state() {
+        JobState::Succeeded => match result.outcome() {
+            Some(OperationOutcome::AlreadyUpToDate) => messages.already_up_to_date.clone(),
+            Some(OperationOutcome::Skipped) => messages.skipped.clone(),
+            _ => messages.created.clone(),
+        },
+        JobState::Cancelled => messages.cancelled.clone(),
+        JobState::Failed => messages.failed.replace(
+            "{code}",
+            result
+                .failure()
+                .map(|failure| copy_error(failure.code()))
+                .unwrap_or(&messages.internal_failure),
+        ),
+        _ => messages.unknown_error.clone(),
+    };
+    if let Some(paths) = paths {
+        message = message
+            .replace("{bundle}", &paths.bundle_directory().display().to_string())
+            .replace(
+                "{canonical}",
+                &paths.canonical_directory().display().to_string(),
+            )
+            .replace("{manifest}", &paths.manifest_path().display().to_string());
+        if let Some(recovery) = paths.recovery_bundle_directory() {
+            message.push(' ');
+            message.push_str(
+                &messages
+                    .recovery_bundle
+                    .replace("{path}", &recovery.display().to_string()),
+            );
+        }
+    }
+    if result.cleanup_artifact_retained() {
+        message.push(' ');
+        message.push_str(&messages.cleanup_warning);
     }
     message
 }
@@ -860,11 +942,15 @@ mod tests {
             OperationFailureCode::DestinationCollision,
             OperationFailureCode::SourceUnavailable,
             OperationFailureCode::SplitInputUnsupported,
+            OperationFailureCode::SplitSourceSizeUnsupported,
+            OperationFailureCode::SplitReplacementUnsupported,
+            OperationFailureCode::SplitTrustUnavailable,
             OperationFailureCode::SourceChanged,
             OperationFailureCode::StalePlan,
             OperationFailureCode::WorkspaceUnavailable,
             OperationFailureCode::DestinationUnavailable,
             OperationFailureCode::DestinationConflict,
+            OperationFailureCode::DestinationBusy,
             OperationFailureCode::DestinationChanged,
             OperationFailureCode::UnsafePath,
             OperationFailureCode::UnsupportedCapability,
@@ -1071,6 +1157,13 @@ mod tests {
     #[test]
     fn resource_provides_cli_usage() {
         assert_eq!(usage(), "Usage: nscb probe <path> [--json]");
+    }
+
+    #[test]
+    fn split_usage_does_not_claim_existing_replacement_is_supported() {
+        assert!(!super::split_usage().contains("qualified replacement path"));
+        assert!(super::split_usage().contains("already up to date"));
+        assert!(super::split_usage().contains("before job admission"));
     }
 
     #[test]

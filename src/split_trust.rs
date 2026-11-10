@@ -82,9 +82,9 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 /// A host-owned read capability for Split trust receipts.
 ///
 /// Resolution receives only this trait, so it cannot issue or revoke trust.
-/// Implementations must return a receipt only when the exact manifest bytes are
-/// bound to the recorded source evidence, and must report store failures rather
-/// than converting them into an untrusted result.
+/// Implementations return a receipt only when the exact manifest bytes are
+/// bound to the recorded source evidence, and report errors when authoritative
+/// state cannot be read.
 pub trait SplitTrustStore: Send + Sync {
     /// Looks up a receipt bound to the exact manifest bytes.
     fn lookup(
@@ -92,6 +92,27 @@ pub trait SplitTrustStore: Send + Sync {
         manifest_sha256: &Sha256Digest,
     ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError>;
 }
+
+/// An exclusive host-state lease held while provisional Split artifacts are removed.
+///
+/// The lease is bound to one exact manifest digest. Its implementation must
+/// have established that the authoritative store has never committed an
+/// issued or revoked record for that digest, and must prevent issuance,
+/// revocation, and restoration from changing that state until the lease drops.
+/// Implementations that cannot provide both guarantees must not return a lease.
+/// Callers must not invoke another writer method while holding the lease, since
+/// the lease may keep the store's exclusive lock.
+pub trait SplitTrustCleanupLease: Send {}
+
+/// The boolean is true while the writer holds its receipt-state lock for the
+/// whole callback. The optional store view reads through that lock.
+pub type SplitTrustCommitAction<'a> = dyn FnMut(
+        Result<(), SplitTrustStoreError>,
+        Result<Option<SplitTrustReceipt>, SplitTrustStoreError>,
+        Option<&dyn SplitTrustStore>,
+        bool,
+    ) -> Result<(), SplitTrustStoreError>
+    + 'a;
 
 /// A host-owned write capability for source-backed Split evidence.
 ///
@@ -101,6 +122,83 @@ pub trait SplitTrustStore: Send + Sync {
 /// make each mutation atomic and durable across processes that share the same
 /// host state.
 pub trait SplitTrustWriter: SplitTrustStore {
+    /// Looks up trust for planning without reconciling pending store transactions.
+    ///
+    /// Split planning does not change host state. The default delegates to the
+    /// read-only store interface for compatibility. An implementation whose
+    /// `lookup` method reconciles pending transactions must override this
+    /// method and return an error while the authoritative state is pending.
+    fn lookup_for_planning(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        if is_cancelled() {
+            return Err(SplitTrustStoreError::Unavailable);
+        }
+        let receipt = self.lookup(manifest_sha256)?;
+        if is_cancelled() {
+            return Err(SplitTrustStoreError::Unavailable);
+        }
+        Ok(receipt)
+    }
+
+    /// Looks up an exact receipt while reconciling a durable Split journal.
+    ///
+    /// This read does not change the resolver's `SplitTrustStore` interface.
+    /// Implementations with host-state locks should poll `is_cancelled` while
+    /// waiting for those locks. The default preserves existing implementations
+    /// by delegating to `lookup`; callers must check cancellation after this
+    /// method returns because that legacy lookup may block. The default returns
+    /// `Unavailable` when cancellation is already requested; callers recheck
+    /// the probe to distinguish cancellation from a store failure.
+    fn lookup_for_recovery(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        if is_cancelled() {
+            return Err(SplitTrustStoreError::Unavailable);
+        }
+        self.lookup(manifest_sha256)
+    }
+
+    /// Attempts to hold an exclusive lease for cleanup of one exact manifest.
+    ///
+    /// A lease is granted only when durable authoritative state proves that
+    /// the manifest has never been committed. Active receipts, revocations,
+    /// pending or corrupt state, missing store state, and unsupported locking
+    /// all produce `Ok(None)` or an error. The default keeps existing writer
+    /// implementations source-compatible and disables artifact deletion. The
+    /// cancellation probe is polled while waiting for the store lock. Keep the
+    /// lease only for the final ownership checks and cleanup operation.
+    fn acquire_cleanup_lease(
+        &self,
+        _manifest_sha256: &Sha256Digest,
+        _is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn SplitTrustCleanupLease>>, SplitTrustStoreError> {
+        Ok(None)
+    }
+
+    /// Runs receipt issuance and the producer's final journal transition under
+    /// one receipt-state lock when the writer provides that guarantee.
+    ///
+    /// The default keeps older implementations source-compatible. It calls
+    /// `issue` and `lookup` before `after_issue`, then passes `false` for
+    /// `serialized`. Producers must preserve uncertain output in that case. A
+    /// writer with a held lock passes a read-only store view backed by that
+    /// lock, and the callback uses the view for receipt reads.
+    fn issue_with_commit_state(
+        &self,
+        receipt: SplitTrustReceipt,
+        after_issue: &mut SplitTrustCommitAction<'_>,
+    ) -> Result<(), SplitTrustStoreError> {
+        let manifest_sha256 = *receipt.manifest_sha256();
+        let issue_result = self.issue(receipt);
+        let receipt_state = self.lookup(&manifest_sha256);
+        after_issue(issue_result, receipt_state, None, false)
+    }
+
     /// Durably commits a complete, source-backed receipt.
     fn issue(&self, receipt: SplitTrustReceipt) -> Result<(), SplitTrustStoreError>;
 
@@ -263,6 +361,31 @@ struct StorePaths {
     pending: PathBuf,
 }
 
+struct LocalSplitTrustCleanupLease {
+    lock: File,
+}
+
+struct LocalSplitTrustLockedView<'a> {
+    paths: &'a StorePaths,
+}
+
+impl SplitTrustCleanupLease for LocalSplitTrustCleanupLease {}
+
+impl SplitTrustStore for LocalSplitTrustLockedView<'_> {
+    fn lookup(
+        &self,
+        manifest_sha256: &Sha256Digest,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        LocalSplitTrustStore::lookup_receipt_locked(self.paths, manifest_sha256)
+    }
+}
+
+impl Drop for LocalSplitTrustCleanupLease {
+    fn drop(&mut self) {
+        let _ = self.lock.unlock();
+    }
+}
+
 impl StorePaths {
     fn for_root(root: &Path) -> Result<Self, SplitTrustStoreError> {
         Ok(Self {
@@ -409,6 +532,35 @@ impl LocalSplitTrustStore {
         StorePaths::for_root(root)
     }
 
+    fn issue_locked(
+        paths: &StorePaths,
+        receipt: SplitTrustReceipt,
+    ) -> Result<(), SplitTrustStoreError> {
+        let (mut authority, continuity) = load_or_initialize_indexes(paths)?;
+        let manifest = *receipt.manifest_sha256();
+        let current = continuity.entry(&manifest).copied().unwrap_or(IndexEntry {
+            revision: 0,
+            state: IndexState::Issued,
+        });
+        if receipt.predecessor_revision() != current.revision {
+            return Err(SplitTrustStoreError::StaleEvidence);
+        }
+        let revision = current
+            .revision
+            .checked_add(1)
+            .ok_or(SplitTrustStoreError::Corrupt)?;
+        let path = receipt_path(&paths.receipts, &manifest);
+        let bytes = encode_receipt(&receipt, revision, &authority.authority_id)?;
+        let state = if receipt.is_revoked() {
+            IndexState::Revoked
+        } else {
+            IndexState::Issued
+        };
+        authority.upsert(&manifest, revision, state);
+        authority.advance_generation()?;
+        commit_indexes(paths, &authority, Some((&path, &bytes)))
+    }
+
     fn with_store_lock<T>(
         &self,
         operation: impl FnOnce(&StorePaths) -> Result<T, SplitTrustStoreError>,
@@ -422,24 +574,129 @@ impl LocalSplitTrustStore {
         paths: &StorePaths,
         operation: impl FnOnce(&StorePaths) -> Result<T, SplitTrustStoreError>,
     ) -> Result<T, SplitTrustStoreError> {
+        let lock = self.acquire_store_lock(paths)?;
+        let result = recover_pending_commit(paths).and_then(|()| operation(paths));
+        let _ = lock.unlock();
+        result
+    }
+
+    fn acquire_store_lock(&self, paths: &StorePaths) -> Result<File, SplitTrustStoreError> {
         let lock_path = paths.root.join(".lock");
         let lock = open_lock_file(&lock_path)?;
         lock.lock_exclusive()
             .map_err(|_| SplitTrustStoreError::Unavailable)?;
+        if let Err(error) = self.validate_store_lock(paths, &lock, &lock_path) {
+            let _ = lock.unlock();
+            return Err(error);
+        }
+        Ok(lock)
+    }
+
+    fn acquire_cleanup_store_lock(
+        &self,
+        paths: &StorePaths,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<File>, SplitTrustStoreError> {
+        let lock_path = paths.root.join(".lock");
+        let lock = open_lock_file(&lock_path)?;
+        loop {
+            if is_cancelled() {
+                return Ok(None);
+            }
+            match lock.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return Err(SplitTrustStoreError::Unavailable),
+            }
+        }
+        if is_cancelled() {
+            let _ = lock.unlock();
+            return Ok(None);
+        }
+        if let Err(error) = self.validate_store_lock(paths, &lock, &lock_path) {
+            let _ = lock.unlock();
+            return Err(error);
+        }
+        Ok(Some(lock))
+    }
+
+    fn validate_store_lock(
+        &self,
+        paths: &StorePaths,
+        lock: &File,
+        lock_path: &Path,
+    ) -> Result<(), SplitTrustStoreError> {
         let root_valid = validate_store_directory(&paths.root)?;
         let receipts_valid = validate_store_directory(&paths.receipts)?;
         let indexes_present =
             state_file_exists(&paths.authority)? || state_file_exists(&paths.continuity)?;
-        let result = if !root_valid
-            || !lock_matches_path(&lock, &lock_path)?
+        if !root_valid
+            || !lock_matches_path(lock, lock_path)?
             || (!receipts_valid && indexes_present)
         {
-            Err(SplitTrustStoreError::Corrupt)
-        } else {
-            recover_pending_commit(paths).and_then(|()| operation(paths))
+            return Err(SplitTrustStoreError::Corrupt);
+        }
+        Ok(())
+    }
+
+    fn cleanup_lease(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn SplitTrustCleanupLease>>, SplitTrustStoreError> {
+        let Some(paths) = self.existing_store_paths()? else {
+            return Ok(None);
         };
-        let _ = lock.unlock();
-        result
+        let lock_path = paths.root.join(".lock");
+        if !state_file_exists(&lock_path)? {
+            return Ok(None);
+        }
+        let Some(lock) = self.acquire_cleanup_store_lock(&paths, is_cancelled)? else {
+            return Ok(None);
+        };
+        let eligible = (|| {
+            if is_cancelled() {
+                return Ok(false);
+            }
+            // Reconcile durable intent while holding the same exclusive lock
+            // used by issue, revoke, and restore before inspecting history.
+            recover_pending_commit(&paths)?;
+            if is_cancelled() {
+                return Ok(false);
+            }
+            let (authority, continuity) = match load_indexes(&paths)? {
+                LoadedIndexes::Ready {
+                    authority,
+                    continuity,
+                } => (authority, continuity),
+                LoadedIndexes::Empty | LoadedIndexes::AnchorOnly { .. } => return Ok(false),
+            };
+            let authority_entry = authority.entry(manifest_sha256).copied();
+            let continuity_entry = continuity.entry(manifest_sha256).copied();
+            if authority_entry != continuity_entry || authority_entry.is_some() {
+                return Ok(false);
+            }
+            let receipt = read_receipt_file(
+                &receipt_path(&paths.receipts, manifest_sha256),
+                manifest_sha256,
+                Some(&authority.authority_id),
+            )?;
+            Ok(receipt.is_none() && !is_cancelled())
+        })();
+        match eligible {
+            Ok(true) => Ok(Some(Box::new(LocalSplitTrustCleanupLease { lock }))),
+            Ok(false) => {
+                let _ = lock.unlock();
+                Ok(None)
+            }
+            Err(error) => {
+                let _ = lock.unlock();
+                Err(error)
+            }
+        }
     }
 
     fn lookup_receipt(
@@ -450,45 +707,150 @@ impl LocalSplitTrustStore {
             return Ok(None);
         };
         self.with_locked_store(&paths, |paths| {
-            let path = receipt_path(&paths.receipts, manifest_sha256);
-            let (authority, continuity) = match load_indexes(paths)? {
-                LoadedIndexes::Empty => {
-                    // No authority exists yet, so a receipt cannot be bound to
-                    // this store. A malformed file is dangling corrupt state;
-                    // a well-formed one is inert.
-                    read_receipt_file(&path, manifest_sha256, None)?;
-                    return Ok(None);
-                }
-                LoadedIndexes::AnchorOnly { .. } => return Err(SplitTrustStoreError::Corrupt),
-                LoadedIndexes::Ready {
-                    authority,
-                    continuity,
-                } => (authority, continuity),
-            };
-            let Some(entry) = continuity.entry(manifest_sha256).copied() else {
-                // A well-formed receipt that no index names is inert, because
-                // trust is established by the index pair, not by receipt files.
-                // Malformed or non-regular files still fail closed.
-                read_receipt_file(&path, manifest_sha256, Some(&authority.authority_id))?;
-                return Ok(None);
-            };
-            let authority_entry = authority
-                .entry(manifest_sha256)
-                .copied()
-                .ok_or(SplitTrustStoreError::Corrupt)?;
-            if authority_entry != entry {
-                return Err(SplitTrustStoreError::Corrupt);
-            }
-            if entry.state == IndexState::Revoked {
-                return Ok(Some(revoked_tombstone(manifest_sha256, entry.revision)));
-            }
-            let receipt = read_receipt_file(&path, manifest_sha256, Some(&authority.authority_id))?
-                .ok_or(SplitTrustStoreError::Corrupt)?;
-            if receipt.predecessor_revision() != entry.revision || receipt.is_revoked() {
-                return Err(SplitTrustStoreError::Corrupt);
-            }
-            Ok(Some(receipt))
+            Self::lookup_receipt_locked(paths, manifest_sha256)
         })
+    }
+
+    fn lookup_receipt_for_planning(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        if is_cancelled() {
+            return Err(SplitTrustStoreError::Unavailable);
+        }
+        let Some(paths) = self.existing_store_paths()? else {
+            if is_cancelled() {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            return Ok(None);
+        };
+        let lock_path = paths.root.join(".lock");
+        let Some(lock) = open_existing_lock_file(&lock_path)? else {
+            if is_cancelled() {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            if state_file_exists(&paths.pending)?
+                || state_file_exists(&paths.authority)?
+                || state_file_exists(&paths.continuity)?
+            {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            read_receipt_file(
+                &receipt_path(&paths.receipts, manifest_sha256),
+                manifest_sha256,
+                None,
+            )?;
+            if is_cancelled()
+                || state_file_exists(&lock_path)?
+                || state_file_exists(&paths.pending)?
+                || state_file_exists(&paths.authority)?
+                || state_file_exists(&paths.continuity)?
+            {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            return Ok(None);
+        };
+        loop {
+            if is_cancelled() {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            match lock.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return Err(SplitTrustStoreError::Unavailable),
+            }
+        }
+        let result = (|| {
+            self.validate_store_lock(&paths, &lock, &lock_path)?;
+            if is_cancelled() {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            if state_file_exists(&paths.pending)? {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            let receipt = Self::lookup_receipt_locked(&paths, manifest_sha256)?;
+            if is_cancelled() {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            Ok(receipt)
+        })();
+        if lock.unlock().is_err() {
+            return Err(SplitTrustStoreError::Unavailable);
+        }
+        result
+    }
+
+    fn lookup_receipt_for_recovery(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        if is_cancelled() {
+            return Err(SplitTrustStoreError::Unavailable);
+        }
+        let Some(paths) = self.existing_store_paths()? else {
+            return Ok(None);
+        };
+        let Some(lock) = self.acquire_cleanup_store_lock(&paths, is_cancelled)? else {
+            return Err(SplitTrustStoreError::Unavailable);
+        };
+        let result = (|| {
+            recover_pending_commit(&paths)?;
+            if is_cancelled() {
+                return Err(SplitTrustStoreError::Unavailable);
+            }
+            Self::lookup_receipt_locked(&paths, manifest_sha256)
+        })();
+        let _ = lock.unlock();
+        result
+    }
+
+    fn lookup_receipt_locked(
+        paths: &StorePaths,
+        manifest_sha256: &Sha256Digest,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        let path = receipt_path(&paths.receipts, manifest_sha256);
+        let (authority, continuity) = match load_indexes(paths)? {
+            LoadedIndexes::Empty => {
+                // No authority exists yet, so a receipt cannot be bound to
+                // this store. A malformed file is dangling corrupt state;
+                // a well-formed one is inert.
+                read_receipt_file(&path, manifest_sha256, None)?;
+                return Ok(None);
+            }
+            LoadedIndexes::AnchorOnly { .. } => return Err(SplitTrustStoreError::Corrupt),
+            LoadedIndexes::Ready {
+                authority,
+                continuity,
+            } => (authority, continuity),
+        };
+        let Some(entry) = continuity.entry(manifest_sha256).copied() else {
+            // A well-formed receipt that no index names is inert, because
+            // trust is established by the index pair, not by receipt files.
+            // Malformed or non-regular files still fail closed.
+            read_receipt_file(&path, manifest_sha256, Some(&authority.authority_id))?;
+            return Ok(None);
+        };
+        let authority_entry = authority
+            .entry(manifest_sha256)
+            .copied()
+            .ok_or(SplitTrustStoreError::Corrupt)?;
+        if authority_entry != entry {
+            return Err(SplitTrustStoreError::Corrupt);
+        }
+        if entry.state == IndexState::Revoked {
+            return Ok(Some(revoked_tombstone(manifest_sha256, entry.revision)));
+        }
+        let receipt = read_receipt_file(&path, manifest_sha256, Some(&authority.authority_id))?
+            .ok_or(SplitTrustStoreError::Corrupt)?;
+        if receipt.predecessor_revision() != entry.revision || receipt.is_revoked() {
+            return Err(SplitTrustStoreError::Corrupt);
+        }
+        Ok(Some(receipt))
     }
 
     fn read_receipt(
@@ -689,32 +1051,50 @@ impl SplitTrustStore for LocalSplitTrustStore {
 }
 
 impl SplitTrustWriter for LocalSplitTrustStore {
+    fn lookup_for_planning(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        self.lookup_receipt_for_planning(manifest_sha256, is_cancelled)
+    }
+
+    fn lookup_for_recovery(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<SplitTrustReceipt>, SplitTrustStoreError> {
+        self.lookup_receipt_for_recovery(manifest_sha256, is_cancelled)
+    }
+
+    fn acquire_cleanup_lease(
+        &self,
+        manifest_sha256: &Sha256Digest,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> Result<Option<Box<dyn SplitTrustCleanupLease>>, SplitTrustStoreError> {
+        self.cleanup_lease(manifest_sha256, is_cancelled)
+    }
+
+    fn issue_with_commit_state(
+        &self,
+        receipt: SplitTrustReceipt,
+        after_issue: &mut SplitTrustCommitAction<'_>,
+    ) -> Result<(), SplitTrustStoreError> {
+        let paths = self.ensure_store_directories()?;
+        let lock = self.acquire_store_lock(&paths)?;
+        let manifest_sha256 = *receipt.manifest_sha256();
+        let result = recover_pending_commit(&paths).and_then(|()| {
+            let issue_result = Self::issue_locked(&paths, receipt);
+            let receipt_state = Self::lookup_receipt_locked(&paths, &manifest_sha256);
+            let locked_view = LocalSplitTrustLockedView { paths: &paths };
+            after_issue(issue_result, receipt_state, Some(&locked_view), true)
+        });
+        let _ = lock.unlock();
+        result
+    }
+
     fn issue(&self, receipt: SplitTrustReceipt) -> Result<(), SplitTrustStoreError> {
-        self.with_store_lock(|paths| {
-            let (mut authority, continuity) = load_or_initialize_indexes(paths)?;
-            let manifest = *receipt.manifest_sha256();
-            let current = continuity.entry(&manifest).copied().unwrap_or(IndexEntry {
-                revision: 0,
-                state: IndexState::Issued,
-            });
-            if receipt.predecessor_revision() != current.revision {
-                return Err(SplitTrustStoreError::StaleEvidence);
-            }
-            let revision = current
-                .revision
-                .checked_add(1)
-                .ok_or(SplitTrustStoreError::Corrupt)?;
-            let path = receipt_path(&paths.receipts, &manifest);
-            let bytes = encode_receipt(&receipt, revision, &authority.authority_id)?;
-            let state = if receipt.is_revoked() {
-                IndexState::Revoked
-            } else {
-                IndexState::Issued
-            };
-            authority.upsert(&manifest, revision, state);
-            authority.advance_generation()?;
-            commit_indexes(paths, &authority, Some((&path, &bytes)))
-        })
+        self.with_store_lock(|paths| Self::issue_locked(paths, receipt))
     }
 
     fn revoke(&self, manifest_sha256: &Sha256Digest) -> Result<(), SplitTrustStoreError> {
@@ -1086,6 +1466,34 @@ fn open_lock_file(path: &Path) -> Result<File, SplitTrustStoreError> {
         return Err(SplitTrustStoreError::Unavailable);
     }
     Ok(file)
+}
+
+fn open_existing_lock_file(path: &Path) -> Result<Option<File>, SplitTrustStoreError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(SplitTrustStoreError::Unavailable),
+    };
+    if !file
+        .metadata()
+        .map_err(|_| SplitTrustStoreError::Unavailable)?
+        .is_file()
+    {
+        return Err(SplitTrustStoreError::Unavailable);
+    }
+    Ok(Some(file))
 }
 
 fn read_receipt_file(
@@ -1671,6 +2079,7 @@ mod tests {
         SplitTrustWriter, StateRoot, state_root_from,
     };
     use crate::sha256::Sha256Digest;
+    use fs2::FileExt as _;
     use std::ffi::OsStr;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1758,6 +2167,392 @@ mod tests {
             .with_predecessor_revision(revoked.predecessor_revision());
         store.issue(requalified).unwrap();
         assert!(!store.lookup(&manifest).unwrap().unwrap().is_revoked());
+        remove_store(&root);
+    }
+
+    #[test]
+    fn cleanup_lease_requires_known_never_committed_authoritative_state() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        let manifest = Sha256Digest::digest(b"cleanup candidate manifest");
+        let unrelated = Sha256Digest::digest(b"unrelated committed manifest");
+        let source = Sha256Digest::digest(b"source");
+
+        assert!(
+            store
+                .acquire_cleanup_lease(&manifest, &|| false)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .issue(SplitTrustReceipt::new(unrelated, 6, source))
+            .unwrap();
+        let lease = store.acquire_cleanup_lease(&manifest, &|| false).unwrap();
+        assert!(lease.is_some());
+        drop(lease);
+
+        store
+            .issue(SplitTrustReceipt::new(manifest, 6, source))
+            .unwrap();
+        assert!(
+            store
+                .acquire_cleanup_lease(&manifest, &|| false)
+                .unwrap()
+                .is_none()
+        );
+
+        let snapshot_root = temp_root();
+        copy_tree(&root, &snapshot_root);
+        store.revoke(&manifest).unwrap();
+        assert!(
+            store
+                .acquire_cleanup_lease(&manifest, &|| false)
+                .unwrap()
+                .is_none()
+        );
+        store.restore_from_snapshot(&snapshot_root).unwrap();
+        assert!(
+            store
+                .acquire_cleanup_lease(&manifest, &|| false)
+                .unwrap()
+                .is_none()
+        );
+        remove_store(&snapshot_root);
+        remove_store(&root);
+    }
+
+    #[test]
+    fn cleanup_lease_recovers_a_pending_receipt_before_manifest_lookup() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        let initialized = Sha256Digest::digest(b"initialized store state");
+        store
+            .issue(SplitTrustReceipt::new(
+                initialized,
+                1,
+                Sha256Digest::digest(b"initialized source"),
+            ))
+            .unwrap();
+
+        let manifest = Sha256Digest::digest(b"receipt committed before stale split journal");
+        let source = Sha256Digest::digest(b"pending source evidence");
+        let paths = store.ensure_store_directories().unwrap();
+        let mut authority = super::read_index_file(&paths.authority, super::AUTHORITY_KIND)
+            .unwrap()
+            .unwrap();
+        let revision = 1;
+        let receipt = SplitTrustReceipt::new(manifest, 9, source);
+        let receipt_bytes =
+            super::encode_receipt(&receipt, revision, &authority.authority_id).unwrap();
+        let receipt_path = super::receipt_path(&paths.receipts, &manifest);
+        authority.upsert(&manifest, revision, super::IndexState::Issued);
+        authority.advance_generation().unwrap();
+        let pending =
+            super::encode_commit(&authority, Some((&receipt_path, &receipt_bytes))).unwrap();
+        super::atomic_write(&paths.pending, &pending).unwrap();
+        assert!(paths.pending.is_file());
+        assert!(!receipt_path.exists());
+
+        let cleanup_lease = store.acquire_cleanup_lease(&manifest, &|| false).unwrap();
+
+        assert!(cleanup_lease.is_none());
+        assert!(!paths.pending.exists());
+        let recovered = store.lookup(&manifest).unwrap().unwrap();
+        assert!(!recovered.is_revoked());
+        assert_eq!(recovered.predecessor_revision(), revision);
+        remove_store(&root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn occupied_replace_planning_does_not_recover_pending_store_commit() {
+        use crate::{Engine, OperationFailureCode, OperationSession, SplitRequest};
+
+        let root = temp_root();
+        let source = root.join("loose.nca");
+        fs::write(&source, b"read-only planning with pending trust state").unwrap();
+        let output = root.join("output");
+        fs::create_dir(&output).unwrap();
+        let bundle = output.join("loose.nca.split");
+
+        let publisher_root = root.join("publisher-state");
+        let publisher = LocalSplitTrustStore::new(&publisher_root);
+        let publish_plan = Engine::new()
+            .plan_split(SplitRequest::new(&source, &bundle), &publisher)
+            .unwrap();
+        let published = Engine::new().execute_split(publish_plan, &OperationSession::new());
+        assert!(published.failure().is_none(), "{published:?}");
+
+        let state_root = root.join("planning-state");
+        let store = LocalSplitTrustStore::new(&state_root);
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(b"initialized manifest"),
+                1,
+                Sha256Digest::digest(b"initialized source"),
+            ))
+            .unwrap();
+        let paths = store.ensure_store_directories().unwrap();
+        let mut authority = super::read_index_file(&paths.authority, super::AUTHORITY_KIND)
+            .unwrap()
+            .unwrap();
+        let pending_manifest = Sha256Digest::digest(b"unrelated pending manifest");
+        let pending_source = Sha256Digest::digest(b"unrelated pending source");
+        let revision = 1;
+        let receipt = SplitTrustReceipt::new(pending_manifest, 9, pending_source);
+        let receipt_bytes =
+            super::encode_receipt(&receipt, revision, &authority.authority_id).unwrap();
+        let receipt_path = super::receipt_path(&paths.receipts, &pending_manifest);
+        authority.upsert(&pending_manifest, revision, super::IndexState::Issued);
+        authority.advance_generation().unwrap();
+        let pending =
+            super::encode_commit(&authority, Some((&receipt_path, &receipt_bytes))).unwrap();
+        super::atomic_write(&paths.pending, &pending).unwrap();
+
+        let authority_before = fs::read(&paths.authority).unwrap();
+        let continuity_before = fs::read(&paths.continuity).unwrap();
+        let pending_before = fs::read(&paths.pending).unwrap();
+        assert!(!receipt_path.exists());
+
+        let error = Engine::new()
+            .plan_split(
+                SplitRequest::new(&source, &bundle)
+                    .with_conflict_policy(crate::ConflictPolicy::Replace),
+                &store,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.code(),
+            OperationFailureCode::SplitReplacementUnsupported
+        );
+        assert_eq!(fs::read(&paths.authority).unwrap(), authority_before);
+        assert_eq!(fs::read(&paths.continuity).unwrap(), continuity_before);
+        assert_eq!(fs::read(&paths.pending).unwrap(), pending_before);
+        assert!(!receipt_path.exists());
+        assert!(bundle.is_dir());
+        assert_eq!(
+            fs::read(&source).unwrap(),
+            b"read-only planning with pending trust state"
+        );
+
+        remove_store(&publisher_root);
+        remove_store(&state_root);
+    }
+
+    #[test]
+    fn cleanup_lease_holds_and_releases_the_cross_process_store_lock() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        let unrelated = Sha256Digest::digest(b"initialized store");
+        store
+            .issue(SplitTrustReceipt::new(
+                unrelated,
+                6,
+                Sha256Digest::digest(b"source"),
+            ))
+            .unwrap();
+
+        let lease = store
+            .acquire_cleanup_lease(&Sha256Digest::digest(b"cleanup candidate"), &|| false)
+            .unwrap();
+        assert!(lease.is_some());
+        let lock = super::open_lock_file(&root.join(".lock")).unwrap();
+        assert!(lock.try_lock_exclusive().is_err());
+        drop(lease);
+        lock.try_lock_exclusive().unwrap();
+        lock.unlock().unwrap();
+        remove_store(&root);
+    }
+
+    #[test]
+    fn issue_commit_scope_holds_store_lock_through_caller_transition() {
+        let root = temp_root();
+        let store = Arc::new(LocalSplitTrustStore::new(&root));
+        let manifest = Sha256Digest::digest(b"commit-scope manifest");
+        let source = Sha256Digest::digest(b"commit-scope source");
+        let receipt = SplitTrustReceipt::new(manifest, 12, source);
+        let callback_finished = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (entered_sender, entered_receiver) = std::sync::mpsc::sync_channel(0);
+        let (resume_sender, resume_receiver) = std::sync::mpsc::sync_channel(0);
+
+        let operation_store = Arc::clone(&store);
+        let operation_root = root.clone();
+        let operation_callback_finished = Arc::clone(&callback_finished);
+        let operation = std::thread::spawn(move || {
+            let mut after_issue =
+                |issue_result: Result<(), SplitTrustStoreError>,
+                 receipt_state: Result<Option<SplitTrustReceipt>, SplitTrustStoreError>,
+                 locked_store: Option<&dyn SplitTrustStore>,
+                 serialized: bool| {
+                    assert!(serialized);
+                    assert_eq!(issue_result, Ok(()));
+                    assert_eq!(receipt_state.unwrap().unwrap().manifest_sha256(), &manifest);
+                    assert!(locked_store.unwrap().lookup(&manifest).unwrap().is_some());
+
+                    let probe = super::open_lock_file(&operation_root.join(".lock")).unwrap();
+                    assert!(probe.try_lock_exclusive().is_err());
+                    entered_sender.send(()).unwrap();
+                    resume_receiver.recv().unwrap();
+                    operation_callback_finished.store(true, Ordering::SeqCst);
+                    Ok(())
+                };
+
+            operation_store
+                .issue_with_commit_state(receipt, &mut after_issue)
+                .unwrap();
+        });
+
+        entered_receiver.recv().unwrap();
+
+        let revoker_store = Arc::clone(&store);
+        let revoker_callback_finished = Arc::clone(&callback_finished);
+        let (revoker_started_sender, revoker_started_receiver) = std::sync::mpsc::sync_channel(0);
+        let revoker = std::thread::spawn(move || {
+            revoker_started_sender.send(()).unwrap();
+            revoker_store.revoke(&manifest).unwrap();
+            assert!(revoker_callback_finished.load(Ordering::SeqCst));
+        });
+        revoker_started_receiver.recv().unwrap();
+
+        let probe = super::open_lock_file(&root.join(".lock")).unwrap();
+        assert!(probe.try_lock_exclusive().is_err());
+        resume_sender.send(()).unwrap();
+        operation.join().unwrap();
+        revoker.join().unwrap();
+
+        assert!(store.lookup(&manifest).unwrap().unwrap().is_revoked());
+        remove_store(&root);
+    }
+
+    #[test]
+    fn cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(b"initialized store"),
+                6,
+                Sha256Digest::digest(b"source"),
+            ))
+            .unwrap();
+        let manifest = Sha256Digest::digest(b"cleanup candidate");
+        let held_lock = super::open_lock_file(&root.join(".lock")).unwrap();
+        held_lock.try_lock_exclusive().unwrap();
+        let checks = std::cell::Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        };
+
+        let lease = store.acquire_cleanup_lease(&manifest, &cancelled).unwrap();
+
+        assert!(lease.is_none());
+        assert!(checks.get() >= 2);
+        held_lock.unlock().unwrap();
+        let probe = super::open_lock_file(&root.join(".lock")).unwrap();
+        probe.try_lock_exclusive().unwrap();
+        probe.unlock().unwrap();
+        assert!(
+            store
+                .acquire_cleanup_lease(&manifest, &|| false)
+                .unwrap()
+                .is_some()
+        );
+        remove_store(&root);
+    }
+
+    #[test]
+    fn recovery_lookup_cancellation_interrupts_store_lock_wait_without_leaking() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(b"initialized store"),
+                6,
+                Sha256Digest::digest(b"source"),
+            ))
+            .unwrap();
+        let manifest = Sha256Digest::digest(b"recovery candidate");
+        let held_lock = super::open_lock_file(&root.join(".lock")).unwrap();
+        held_lock.try_lock_exclusive().unwrap();
+        let checks = std::cell::Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        };
+
+        let receipt = store.lookup_for_recovery(&manifest, &cancelled);
+
+        assert!(matches!(receipt, Err(SplitTrustStoreError::Unavailable)));
+        assert!(checks.get() >= 2);
+        held_lock.unlock().unwrap();
+        let probe = super::open_lock_file(&root.join(".lock")).unwrap();
+        probe.try_lock_exclusive().unwrap();
+        probe.unlock().unwrap();
+        assert!(
+            store
+                .lookup_for_recovery(&manifest, &|| false)
+                .unwrap()
+                .is_none()
+        );
+        remove_store(&root);
+    }
+
+    #[test]
+    fn planning_lookup_cancellation_interrupts_store_lock_wait_without_leaking() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        let manifest = Sha256Digest::digest(b"planning candidate");
+        store
+            .issue(SplitTrustReceipt::new(
+                manifest,
+                6,
+                Sha256Digest::digest(b"source"),
+            ))
+            .unwrap();
+        let held_lock = super::open_lock_file(&root.join(".lock")).unwrap();
+        held_lock.try_lock_exclusive().unwrap();
+        let checks = std::cell::Cell::new(0);
+        let cancelled = || {
+            checks.set(checks.get() + 1);
+            checks.get() >= 2
+        };
+
+        let receipt = store.lookup_receipt_for_planning(&manifest, &cancelled);
+
+        assert!(matches!(receipt, Err(SplitTrustStoreError::Unavailable)));
+        assert!(checks.get() >= 2);
+        held_lock.unlock().unwrap();
+        let probe = super::open_lock_file(&root.join(".lock")).unwrap();
+        probe.try_lock_exclusive().unwrap();
+        probe.unlock().unwrap();
+        assert!(
+            store
+                .lookup_receipt_for_planning(&manifest, &|| false)
+                .unwrap()
+                .is_some()
+        );
+        remove_store(&root);
+    }
+
+    #[test]
+    fn cleanup_lease_refuses_corrupt_store_state() {
+        let root = temp_root();
+        let store = LocalSplitTrustStore::new(&root);
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(b"initialized store"),
+                6,
+                Sha256Digest::digest(b"source"),
+            ))
+            .unwrap();
+        fs::write(root.join("authority.json"), b"truncated").unwrap();
+
+        assert!(matches!(
+            store.acquire_cleanup_lease(&Sha256Digest::digest(b"cleanup candidate"), &|| false),
+            Err(SplitTrustStoreError::Corrupt)
+        ));
         remove_store(&root);
     }
 
