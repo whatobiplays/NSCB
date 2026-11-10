@@ -6,10 +6,12 @@ use crate::inspection::{
 use crate::operation::{
     CopyBatchCheckpointError, CopyBatchExecution, CopyBatchItemCheckpoint, CopyBatchPlan,
     CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyThroughRequest,
-    MultiContentBuildRequest, MultiContentSplitRequest, OperationError, OperationPlan,
-    OperationResult, OperationSession,
+    MultiContentBuildRequest, MultiContentSplitRequest, OperationError, OperationFailureCode,
+    OperationPlan, OperationResult, OperationSession,
 };
 use crate::pfs0;
+use crate::split_operation::{SplitPlan, SplitRequest};
+use crate::split_trust::SplitTrustWriter;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
@@ -30,8 +32,9 @@ impl ContainerProbeRequest {
 }
 
 /// A runtime-neutral facade for container probing, recognition, resolution,
-/// inspection, verification, and copy-through operations. Copy-through planning
-/// is read-only; executing a plan performs filesystem publication.
+/// inspection, verification, source-backed Split, and copy-through operations.
+/// Copy-through and Split planning are read-only; executing a plan performs
+/// filesystem publication.
 pub struct Engine;
 
 impl Engine {
@@ -73,6 +76,56 @@ impl Engine {
         request: MultiContentSplitRequest,
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_multi_content_split(request)
+    }
+
+    /// Resolves an explicit regular source and outer bundle destination into a
+    /// non-replayable canonical Split plan.
+    pub fn plan_split<'a>(
+        &self,
+        request: SplitRequest,
+        trust_store: &'a dyn SplitTrustWriter,
+    ) -> Result<SplitPlan<'a>, OperationError> {
+        crate::split_operation::plan_split(request, trust_store)
+    }
+
+    /// Checks whether the nearest existing parent supports Split publication.
+    ///
+    /// The method does not create directories. Unsupported or unverifiable
+    /// filesystem capabilities return an error.
+    pub fn validate_split_output_parent(&self, path: &Path) -> Result<(), OperationFailureCode> {
+        crate::split_operation::validate_split_output_parent(path)
+    }
+
+    /// Resolves a Split plan while honoring cancellation during source hashing.
+    ///
+    /// The returned plan remains non-replayable and execution still uses the
+    /// caller's operation session for progress and cancellation after planning.
+    pub fn plan_split_with_cancellation<'a>(
+        &self,
+        request: SplitRequest,
+        trust_store: &'a dyn SplitTrustWriter,
+        cancellation: CancellationHandle,
+    ) -> Result<SplitPlan<'a>, OperationError> {
+        crate::split_operation::plan_split_with_cancellation(request, trust_store, cancellation)
+    }
+
+    /// Executes one canonical Split plan using host-owned session state.
+    pub fn execute_split(
+        &self,
+        plan: SplitPlan<'_>,
+        session: &OperationSession,
+    ) -> OperationResult {
+        crate::split_operation::execute_split(plan, session, None)
+    }
+
+    /// Executes one canonical Split plan with caller-owned cancellation.
+    pub fn execute_split_with_cancellation(
+        &self,
+        plan: SplitPlan<'_>,
+        session: &OperationSession,
+        cancellation: CancellationHandle,
+    ) -> OperationResult {
+        crate::split_operation::execute_split(plan, session, Some(cancellation))
     }
     /// Resolves independent regular files into one immutable sequential copy plan.
     ///

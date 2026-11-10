@@ -26,6 +26,7 @@ mod provider;
 mod recognition;
 mod sha256;
 mod split_manifest;
+mod split_operation;
 mod split_reader;
 mod split_resolution;
 mod split_trust;
@@ -61,6 +62,10 @@ pub use operation::{
     OperationSessionPhase, OperationSessionSnapshot, OperationSessionStatus, PlannedArtifact,
     PlannedContentGroup, PlannedContentMember, PlannedEffect, PlannedSource, StagingStrategy,
 };
+pub use split_operation::{
+    SplitBundleBaseline, SplitOutputPaths, SplitPlan, SplitPlanSnapshot, SplitReceiptCommitState,
+    SplitRequest,
+};
 
 pub use input_resolution::{
     DEFAULT_MAX_SPLIT_VALIDATION_BYTES, InputProvenance, InputResolutionBatchEntry,
@@ -79,8 +84,8 @@ pub use inspection::{
 };
 pub use sha256::{InvalidSha256Digest, SHA256_HEX_LENGTH, Sha256Digest};
 pub use split_trust::{
-    LocalSplitTrustStore, SplitTrustReceipt, SplitTrustRestore, SplitTrustStore,
-    SplitTrustStoreError, SplitTrustWriter,
+    LocalSplitTrustStore, SplitTrustCleanupLease, SplitTrustCommitAction, SplitTrustReceipt,
+    SplitTrustRestore, SplitTrustStore, SplitTrustStoreError, SplitTrustWriter,
 };
 
 pub use verification::{

@@ -21,6 +21,7 @@ use crate::multi_content_format::FormatError;
 #[cfg(target_os = "macos")]
 use crate::multi_content_format::{ComponentGroup, ProgramMember};
 use crate::sha256::Sha256Digest;
+use crate::split_operation::{SplitOutputPaths, SplitReceiptCommitState};
 #[cfg(target_os = "macos")]
 use crate::split_resolution::{directory_has_canonical_member, has_adjacent_sidecar};
 #[cfg(target_os = "macos")]
@@ -78,6 +79,8 @@ pub enum ConflictPolicy {
     #[default]
     Fail,
     /// Replace using qualified Darwin renameatx_np(RENAME_SWAP) exchange semantics.
+    /// Existing-destination replacement is unsupported for Split requests; an exact
+    /// qualified match may still return `AlreadyUpToDate`.
     Replace,
     /// Leave an existing different destination unchanged and report a skipped item.
     Skip,
@@ -344,13 +347,15 @@ pub enum JobState {
     Cancelled,
 }
 
-/// Describes the publication outcome reached by a copy-through operation.
+/// Describes the publication outcome reached by an operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OperationOutcome {
     /// A destination was published or replaced with the planned source bytes.
     Copied,
+    /// A canonical Split bundle and its source-backed receipt were committed.
+    SplitCreated,
     /// The destination was already proven byte-identical to the planned source.
     AlreadyUpToDate,
     /// An existing destination was deliberately left unchanged by `skip`.
@@ -405,6 +410,13 @@ pub enum OperationFailureCode {
     SplitInputUnsupported,
     /// A source changed after the immutable plan was made.
     SourceChanged,
+    /// The source length cannot be represented by the qualified Split profile.
+    SplitSourceSizeUnsupported,
+    /// Split cannot replace a different existing bundle on the qualified profile.
+    SplitReplacementUnsupported,
+    /// The host-owned Split trust store could not confirm its durable state.
+    #[serde(rename = "split_state_unavailable")]
+    SplitTrustUnavailable,
     /// A requested path no longer resolves to the path captured by the plan.
     StalePlan,
     /// The workspace is unavailable, unsafe, or not a directory.
@@ -424,6 +436,8 @@ pub enum OperationFailureCode {
     /// Another operation is already active in the same shared session.
     #[serde(rename = "operation_session_busy")]
     Busy,
+    /// Another operation holds the coordination lock for this destination.
+    DestinationBusy,
     /// The session already has a live semantic-event consumer, or a
     /// subscription was attempted while an execution was active.
     #[serde(rename = "event_consumer_unavailable")]
@@ -465,6 +479,9 @@ impl OperationFailureCode {
             Self::SourceUnavailable => "source_unavailable",
             Self::SplitInputUnsupported => "split_input_unsupported",
             Self::SourceChanged => "source_changed",
+            Self::SplitSourceSizeUnsupported => "split_source_size_unsupported",
+            Self::SplitReplacementUnsupported => "split_replacement_unsupported",
+            Self::SplitTrustUnavailable => "split_state_unavailable",
             Self::StalePlan => "stale_plan",
             Self::WorkspaceUnavailable => "workspace_unavailable",
             Self::DestinationUnavailable => "destination_unavailable",
@@ -474,6 +491,7 @@ impl OperationFailureCode {
             Self::UnsupportedCapability => "unsupported_capability",
             Self::InsufficientStorage => "insufficient_storage",
             Self::Busy => "operation_session_busy",
+            Self::DestinationBusy => "destination_busy",
             Self::EventConsumerUnavailable => "event_consumer_unavailable",
             Self::SessionUnavailable => "operation_session_unavailable",
             Self::Cancelled => "cancelled",
@@ -500,7 +518,7 @@ pub struct OperationError {
 }
 
 impl OperationError {
-    fn new(code: OperationFailureCode) -> Self {
+    pub(crate) fn new(code: OperationFailureCode) -> Self {
         Self { code }
     }
 
@@ -554,6 +572,8 @@ pub enum OperationMilestone {
     Validated,
     /// Atomic promotion made the validated output visible at its destination.
     Published,
+    /// The host trust store confirmed the receipt for the published Split set.
+    ReceiptCommitted,
     /// Execution stopped with a typed failure.
     Failed,
     /// Execution stopped after explicit host cancellation.
@@ -571,7 +591,13 @@ pub struct OperationResult {
     cleanup_warning: Option<OperationFailure>,
     milestones: Vec<OperationMilestone>,
     cleanup_artifact_retained: bool,
+    #[serde(skip)]
+    retained_storage_unknown: bool,
     artifacts: Vec<OperationArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split_output: Option<SplitOutputPaths>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    split_receipt_commit: Option<SplitReceiptCommitState>,
 }
 
 impl OperationResult {
@@ -627,17 +653,97 @@ impl OperationResult {
         &self.artifacts
     }
 
+    /// Returns the outer bundle and inner canonical Split paths for Split jobs.
+    pub const fn split_output_paths(&self) -> Option<&SplitOutputPaths> {
+        self.split_output.as_ref()
+    }
+
+    /// Returns the receipt-commit state for Split jobs.
+    pub const fn split_receipt_commit_state(&self) -> Option<SplitReceiptCommitState> {
+        self.split_receipt_commit
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn split_success(
+        outcome: OperationOutcome,
+        mut milestones: Vec<OperationMilestone>,
+        output: SplitOutputPaths,
+        receipt_commit: SplitReceiptCommitState,
+        cleanup_artifact_retained: bool,
+        retained_storage_unknown: bool,
+        artifacts: Vec<OperationArtifact>,
+    ) -> Self {
+        if cleanup_artifact_retained {
+            milestones.push(OperationMilestone::CleanupIncomplete);
+        }
+        Self {
+            state: JobState::Succeeded,
+            outcome: Some(outcome),
+            failure: None,
+            cleanup_warning: cleanup_artifact_retained
+                .then(|| OperationFailure::new(OperationFailureCode::CleanupIncomplete)),
+            milestones,
+            cleanup_artifact_retained,
+            retained_storage_unknown,
+            artifacts,
+            split_output: Some(output),
+            split_receipt_commit: Some(receipt_commit),
+        }
+    }
+
+    pub(crate) fn split_failure(
+        code: OperationFailureCode,
+        mut milestones: Vec<OperationMilestone>,
+        output: SplitOutputPaths,
+        receipt_commit: SplitReceiptCommitState,
+        cleanup_artifact_retained: bool,
+        retained_storage_unknown: bool,
+        artifacts: Vec<OperationArtifact>,
+    ) -> Self {
+        let state = if code == OperationFailureCode::Cancelled {
+            milestones.push(OperationMilestone::Cancelled);
+            JobState::Cancelled
+        } else {
+            milestones.push(OperationMilestone::Failed);
+            JobState::Failed
+        };
+        if cleanup_artifact_retained {
+            milestones.push(OperationMilestone::CleanupIncomplete);
+        }
+        Self {
+            state,
+            outcome: None,
+            failure: Some(OperationFailure::new(code)),
+            cleanup_warning: cleanup_artifact_retained
+                .then(|| OperationFailure::new(OperationFailureCode::CleanupIncomplete)),
+            milestones,
+            cleanup_artifact_retained,
+            retained_storage_unknown,
+            artifacts,
+            split_output: Some(output),
+            split_receipt_commit: Some(receipt_commit),
+        }
+    }
+
     /// Returns the known bytes retained beyond the published destination.
     ///
     /// File identities are deduplicated because a successfully published file
     /// may share an inode with its retained staging name. A published identity
     /// is excluded only when the destination path is positively verified to
-    /// still identify that inode. `None` means at least one retained data file
-    /// lacks enough identity or size evidence to compute a safe total.
+    /// still identify that inode. `None` means a retained data file lacks
+    /// enough identity or size evidence, retained storage has no per-file
+    /// evidence, or Split artifact enumeration is incomplete.
+    /// Incomplete enumeration returns `None` because unobserved entries could
+    /// change the total.
     /// Unretained evidence records contribute no bytes. This includes a
     /// path-linked competitor alias that has a complete alias identity and
     /// digest but does not match the competitor observed before linking.
     pub fn retained_storage_bytes(&self) -> Option<u64> {
+        if self.retained_storage_unknown
+            || self.cleanup_artifact_retained && self.artifacts.is_empty()
+        {
+            return None;
+        }
         let mut identities = std::collections::BTreeSet::new();
         let published_identities = self
             .artifacts
@@ -670,6 +776,53 @@ impl OperationResult {
             }
         }
         Some(total)
+    }
+}
+
+#[cfg(test)]
+mod incomplete_retained_storage_tests {
+    use super::*;
+
+    #[test]
+    fn retained_storage_is_unknown_when_only_a_retained_staging_directory_is_inventoried() {
+        let result = OperationResult {
+            state: JobState::Failed,
+            outcome: None,
+            failure: Some(OperationFailure::new(
+                OperationFailureCode::PublicationUncertain,
+            )),
+            cleanup_warning: Some(OperationFailure::new(
+                OperationFailureCode::CleanupIncomplete,
+            )),
+            milestones: Vec::new(),
+            cleanup_artifact_retained: true,
+            retained_storage_unknown: true,
+            artifacts: vec![OperationArtifact {
+                artifact_id: 1,
+                parent_artifact_id: None,
+                relative_name: std::path::PathBuf::from("staging"),
+                parent_device: Some(1),
+                parent_inode: Some(2),
+                parent_identity_matches: Some(true),
+                role: OperationArtifactRole::PrivateStagingDirectory,
+                path: std::path::PathBuf::from("/private/staging"),
+                device: Some(1),
+                inode: Some(3),
+                length: None,
+                sha256: None,
+                recorded_length: None,
+                recorded_sha256: None,
+                path_identity_matches: Some(true),
+                path_device: Some(1),
+                path_inode: Some(3),
+                path_length: None,
+                retained: true,
+            }],
+            split_output: None,
+            split_receipt_commit: None,
+        };
+
+        assert_eq!(result.retained_storage_bytes(), None);
     }
 }
 
@@ -833,6 +986,52 @@ impl OperationArtifact {
     pub const fn retained(&self) -> bool {
         self.retained
     }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn from_split_inventory(record: SplitArtifactInventoryRecord) -> Self {
+        Self {
+            artifact_id: record.artifact_id,
+            parent_artifact_id: record.parent_artifact_id,
+            relative_name: record.relative_name,
+            parent_device: record.parent_identity.map(FileIdentity::device),
+            parent_inode: record.parent_identity.map(FileIdentity::inode),
+            parent_identity_matches: record.parent_identity_matches,
+            role: record.role,
+            path: record.path,
+            device: record.identity.map(FileIdentity::device),
+            inode: record.identity.map(FileIdentity::inode),
+            length: record.length,
+            sha256: record.sha256,
+            recorded_length: record.recorded_length,
+            recorded_sha256: record.recorded_sha256,
+            path_identity_matches: record.path_identity_matches,
+            path_device: record.path_identity.map(FileIdentity::device),
+            path_inode: record.path_identity.map(FileIdentity::inode),
+            path_length: record.path_length,
+            retained: record.retained,
+        }
+    }
+}
+
+/// Inputs used to build one terminal Split artifact observation.
+#[cfg(target_os = "macos")]
+pub(crate) struct SplitArtifactInventoryRecord {
+    pub artifact_id: u64,
+    pub parent_artifact_id: Option<u64>,
+    pub relative_name: PathBuf,
+    pub parent_identity: Option<FileIdentity>,
+    pub parent_identity_matches: Option<bool>,
+    pub role: OperationArtifactRole,
+    pub path: PathBuf,
+    pub identity: Option<FileIdentity>,
+    pub length: Option<u64>,
+    pub sha256: Option<Sha256Digest>,
+    pub recorded_length: Option<u64>,
+    pub recorded_sha256: Option<Sha256Digest>,
+    pub path_identity_matches: Option<bool>,
+    pub path_identity: Option<FileIdentity>,
+    pub path_length: Option<u64>,
+    pub retained: bool,
 }
 
 /// The path and expected content evidence for a possible execution artifact.
@@ -876,6 +1075,21 @@ pub struct PlannedSource {
 }
 
 impl PlannedSource {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn new(
+        path: PathBuf,
+        identity: Sha256Digest,
+        size: u64,
+        sha256: Sha256Digest,
+    ) -> Self {
+        Self {
+            path,
+            identity,
+            size,
+            sha256,
+        }
+    }
+
     /// Returns the canonical path that execution will open.
     pub fn path(&self) -> &Path {
         &self.path
@@ -1691,7 +1905,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn admit_with_cancellation(
+    pub(crate) fn admit_with_cancellation(
         &self,
         cancellation: Option<&CancellationHandle>,
         total_bytes: Option<u64>,
@@ -1736,7 +1950,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn cancellation_requested(&self) -> Result<bool, OperationFailureCode> {
+    pub(crate) fn cancellation_requested(&self) -> Result<bool, OperationFailureCode> {
         self.state
             .lock()
             .map(|state| state.cancellation_flag())
@@ -1744,7 +1958,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn record_observed_cancellation(&self) {
+    pub(crate) fn record_observed_cancellation(&self) {
         if let Ok(mut state) = self.state.lock()
             && state.cancellation_flag()
         {
@@ -1753,7 +1967,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn begin_promotion(&self) -> Result<bool, OperationFailureCode> {
+    pub(crate) fn begin_promotion(&self) -> Result<bool, OperationFailureCode> {
         let mut state = self
             .state
             .lock()
@@ -1770,7 +1984,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn finish_promotion(&self) -> Result<(), OperationFailureCode> {
+    pub(crate) fn finish_promotion(&self) -> Result<(), OperationFailureCode> {
         let mut state = self
             .state
             .lock()
@@ -1783,7 +1997,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn begin_finalization(&self) -> Result<bool, OperationFailureCode> {
+    pub(crate) fn begin_finalization(&self) -> Result<bool, OperationFailureCode> {
         let mut state = self
             .state
             .lock()
@@ -1801,7 +2015,7 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn begin_completion(&self) -> Result<bool, OperationFailureCode> {
+    pub(crate) fn begin_completion(&self) -> Result<bool, OperationFailureCode> {
         let mut state = self
             .state
             .lock()
@@ -1818,14 +2032,14 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
-    fn record_milestone(&self, milestone: OperationMilestone) {
+    pub(crate) fn record_milestone(&self, milestone: OperationMilestone) {
         if let Ok(mut state) = self.state.lock() {
             record_session_milestone(&mut state, milestone);
         }
     }
 
     #[cfg(target_os = "macos")]
-    fn record_progress(&self, completed_bytes: u64) {
+    pub(crate) fn record_progress(&self, completed_bytes: u64) {
         let observer = if let Ok(mut state) = self.state.lock() {
             state.completed_bytes = completed_bytes;
             state.progress_observer.clone()
@@ -1895,7 +2109,7 @@ impl OperationSession {
 }
 
 #[cfg(target_os = "macos")]
-struct AdmissionGuard {
+pub(crate) struct AdmissionGuard {
     state: Arc<Mutex<SessionState>>,
     generation: u64,
     active: bool,
@@ -1903,7 +2117,7 @@ struct AdmissionGuard {
 
 #[cfg(target_os = "macos")]
 impl AdmissionGuard {
-    fn finish(&mut self, result: &OperationResult) {
+    pub(crate) fn finish(&mut self, result: &OperationResult) {
         if let Ok(mut state) = self.state.lock()
             && state.generation == self.generation
         {
@@ -3745,7 +3959,7 @@ fn select_staging_workspace(
 }
 
 #[cfg(target_os = "macos")]
-fn qualified_local_apfs_volume(directory: &File) -> bool {
+pub(crate) fn qualified_local_apfs_volume(directory: &File) -> bool {
     let mut status = std::mem::MaybeUninit::<libc::statfs>::uninit();
     // SAFETY: the open directory remains valid for the call and status points to a full statfs
     // output structure.
@@ -4009,7 +4223,7 @@ fn qualify_rename_swap(directory: &File) -> Result<(), OperationFailureCode> {
 }
 
 #[cfg(target_os = "macos")]
-fn volume_supports_rename_swap(directory: &File) -> bool {
+pub(crate) fn volume_supports_rename_swap(directory: &File) -> bool {
     #[repr(C)]
     struct CapabilityOutput {
         length: u32,
@@ -4701,7 +4915,10 @@ where
                     .then(|| OperationFailure::new(OperationFailureCode::CleanupIncomplete)),
                 milestones,
                 cleanup_artifact_retained,
+                retained_storage_unknown: false,
                 artifacts: operation_artifacts,
+                split_output: None,
+                split_receipt_commit: None,
             }
         }
         Err(code) => {
@@ -4723,7 +4940,10 @@ where
                     .then(|| OperationFailure::new(OperationFailureCode::CleanupIncomplete)),
                 milestones,
                 cleanup_artifact_retained,
+                retained_storage_unknown: false,
                 artifacts: operation_artifacts,
+                split_output: None,
+                split_receipt_commit: None,
             }
         }
     };
@@ -4753,7 +4973,10 @@ fn failed_result(
             .then(|| OperationFailure::new(OperationFailureCode::CleanupIncomplete)),
         milestones,
         cleanup_artifact_retained,
+        retained_storage_unknown: false,
         artifacts: Vec::new(),
+        split_output: None,
+        split_receipt_commit: None,
     }
 }
 

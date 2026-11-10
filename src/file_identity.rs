@@ -20,6 +20,12 @@ pub(crate) struct FileIdentity {
 }
 
 impl FileIdentity {
+    /// Reconstructs the two platform identity fields from a durable journal.
+    #[cfg(target_os = "macos")]
+    pub(crate) const fn from_parts(first: u64, second: u64) -> Self {
+        Self { first, second }
+    }
+
     /// Returns the filesystem or volume identifier reported by the host.
     #[cfg(target_os = "macos")]
     pub(crate) const fn device(self) -> u64 {

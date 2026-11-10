@@ -8,6 +8,8 @@
 use crate::input_resolution::{InputResolutionError, InputResolutionErrorCode};
 use crate::sha256::Sha256Digest;
 use crate::strict_json::{self, StrictJsonValue};
+#[cfg(any(target_os = "macos", test))]
+use serde::Serialize;
 use std::collections::HashSet;
 
 /// Maximum sidecar byte length accepted by the v1 manifest contract.
@@ -41,6 +43,74 @@ impl SplitManifestSegment {
     pub(crate) fn name(&self) -> String {
         format!("{:02}", self.index)
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Serialize)]
+struct ManifestDocument {
+    schema_version: u8,
+    kind: &'static str,
+    required_features: [&'static str; 0],
+    source: ManifestSource,
+    segments: Vec<ManifestSegment>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Serialize)]
+struct ManifestSource {
+    size_bytes: u64,
+    sha256: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Serialize)]
+struct ManifestSegment {
+    name: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+/// Encodes deterministic v1 sidecar bytes after checking their segment arithmetic.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn encode_manifest(
+    source_size: u64,
+    source_sha256: Sha256Digest,
+    segments: &[SplitManifestSegment],
+) -> Result<Vec<u8>, InputResolutionError> {
+    if source_size == 0 || segments.is_empty() || segments.len() > MAX_SPLIT_SEGMENTS {
+        return Err(invalid());
+    }
+
+    let mut checked_source_size = 0_u64;
+    let mut encoded_segments = Vec::with_capacity(segments.len());
+    for (position, segment) in segments.iter().enumerate() {
+        if usize::from(segment.index) != position || segment.size == 0 {
+            return Err(invalid());
+        }
+        checked_source_size = checked_source_size
+            .checked_add(segment.size)
+            .ok_or_else(invalid)?;
+        encoded_segments.push(ManifestSegment {
+            name: format!("{position:02}"),
+            size_bytes: segment.size,
+            sha256: segment.sha256.to_hex(),
+        });
+    }
+    if checked_source_size != source_size {
+        return Err(invalid());
+    }
+
+    let document = ManifestDocument {
+        schema_version: 1,
+        kind: MANIFEST_KIND,
+        required_features: [],
+        source: ManifestSource {
+            size_bytes: source_size,
+            sha256: source_sha256.to_hex(),
+        },
+        segments: encoded_segments,
+    };
+    serde_json::to_vec_pretty(&document).map_err(|_| invalid())
 }
 
 /// Parses and validates one manifest document.
@@ -189,7 +259,10 @@ fn error(code: InputResolutionErrorCode) -> InputResolutionError {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SPLIT_MANIFEST_BYTES, MAX_SPLIT_SEGMENTS, parse_manifest};
+    use super::{
+        MAX_SPLIT_MANIFEST_BYTES, MAX_SPLIT_SEGMENTS, SplitManifestSegment, encode_manifest,
+        parse_manifest,
+    };
     use crate::input_resolution::InputResolutionErrorCode;
     use crate::sha256::Sha256Digest;
 
@@ -308,5 +381,65 @@ mod tests {
             parsed.source_sha256,
             Sha256Digest::parse_hex(DIGEST).unwrap()
         );
+    }
+
+    #[test]
+    fn deterministic_writer_emits_parser_accepted_source_backed_manifest() {
+        let source = b"source bytes";
+        let first = b"source ";
+        let second = b"bytes";
+        let segments = [
+            SplitManifestSegment {
+                index: 0,
+                size: first.len() as u64,
+                sha256: Sha256Digest::digest(first),
+            },
+            SplitManifestSegment {
+                index: 1,
+                size: second.len() as u64,
+                sha256: Sha256Digest::digest(second),
+            },
+        ];
+        let source_sha256 = Sha256Digest::digest(source);
+
+        let encoded = encode_manifest(source.len() as u64, source_sha256, &segments).unwrap();
+
+        assert_eq!(
+            encoded,
+            format!(
+                concat!(
+                    "{{\n",
+                    "  \"schema_version\": 1,\n",
+                    "  \"kind\": \"nscb.split_manifest\",\n",
+                    "  \"required_features\": [],\n",
+                    "  \"source\": {{\n",
+                    "    \"size_bytes\": 12,\n",
+                    "    \"sha256\": \"{}\"\n",
+                    "  }},\n",
+                    "  \"segments\": [\n",
+                    "    {{\n",
+                    "      \"name\": \"00\",\n",
+                    "      \"size_bytes\": 7,\n",
+                    "      \"sha256\": \"{}\"\n",
+                    "    }},\n",
+                    "    {{\n",
+                    "      \"name\": \"01\",\n",
+                    "      \"size_bytes\": 5,\n",
+                    "      \"sha256\": \"{}\"\n",
+                    "    }}\n",
+                    "  ]\n",
+                    "}}"
+                ),
+                source_sha256.to_hex(),
+                Sha256Digest::digest(first).to_hex(),
+                Sha256Digest::digest(second).to_hex(),
+            )
+            .into_bytes()
+        );
+
+        let parsed = parse_manifest(&encoded).unwrap();
+        assert_eq!(parsed.source_size, source.len() as u64);
+        assert_eq!(parsed.source_sha256, source_sha256);
+        assert_eq!(parsed.segments, segments);
     }
 }

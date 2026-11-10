@@ -111,7 +111,7 @@ schema_version = 1
 # When omitted, NSCB uses the conventional ~/.switch/prod.keys file.
 # keys_path = "/home/alice/.switch/prod.keys"
 
-# Absolute directory used when copy omits its destination.
+# Absolute output directory used when Copy or Split omits its destination.
 # When omitted, NSCB uses Documents/NSCB_output.
 # output_dir = "/home/alice/Documents/NSCB_output"
 ```
@@ -121,9 +121,20 @@ location cannot be resolved, the generated comment reports that condition
 instead of inventing a fallback.
 
 `keys_path` changes the configured key source for Inspection and Verification.
-`output_dir` supplies the directory used by Copy when its destination argument
-is omitted. `config show` resolves the Documents default only when `output_dir`
-is not configured. `config set` checks that both values are nonempty and
+`output_dir` supplies the directory used by Copy or Split when its destination
+argument is omitted. Split selects a sibling bundle directory named after the
+source with the `.split` suffix (for example, `Game.nca.split`) inside the
+selected output directory. Split planning is read-only and requires this output
+directory to exist already; a missing directory fails without creating it.
+When an existing different qualified bundle is present, `--skip` leaves it
+unchanged. `AlreadyUpToDate` applies only when the existing bundle exactly
+matches the qualified manifest and contents. In canonical Split v1, `--replace`
+for an occupied nonmatching destination fails with
+`SplitReplacementUnsupported` before staging or mutation. Positive replacement
+is deferred under the owner-approved TAC-8 amendment until the contract defines
+displaced-bundle retention, receipt disposition, and crash recovery.
+`config show` resolves the Documents default only when `output_dir` is not
+configured. `config set` checks that both values are nonempty and
 absolute. It does not require the target to exist; commands that use the path
 report an unavailable path when needed.
 
