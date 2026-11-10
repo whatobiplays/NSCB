@@ -784,7 +784,6 @@ impl LocalSplitTrustStore {
         result
     }
 
-    #[cfg(target_os = "macos")]
     fn lookup_receipt_for_recovery(
         &self,
         manifest_sha256: &Sha256Digest,
@@ -1060,7 +1059,6 @@ impl SplitTrustWriter for LocalSplitTrustStore {
         self.lookup_receipt_for_planning(manifest_sha256, is_cancelled)
     }
 
-    #[cfg(target_os = "macos")]
     fn lookup_for_recovery(
         &self,
         manifest_sha256: &Sha256Digest,
