@@ -1,0 +1,19 @@
+src/split_operation.rs
+  s_4baad43b796cbe::t_ef512eb8d73aea 10-11,13-14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "21ac6f0c07c61803aeb74c02560480e86ab31bc7",
+  "prompts": {},
+  "sessions": {
+    "s_4baad43b796cbe": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b614-52ee-78b2-980b-91af2078e4ce",
+        "model": "gpt-6-luna"
+      },
+      "human_author": "WhatObiPlays <219249021+whatobiplays@users.noreply.github.com>"
+    }
+  }
+}
