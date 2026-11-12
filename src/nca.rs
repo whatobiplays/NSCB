@@ -90,8 +90,8 @@ pub(crate) fn read_header(
 ///
 /// Verification needs the decrypted bytes for filesystem-header hashes and for
 /// both signatures, while Inspection only needs the parsed header.
-pub(crate) fn read_header_block(
-    file: &mut File,
+pub(crate) fn read_header_block<R: Read + Seek>(
+    file: &mut R,
     file_size: u64,
     header_key: &[u8; 32],
 ) -> Result<[u8; HEADER_SIZE], HeaderError> {

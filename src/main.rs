@@ -2,6 +2,7 @@ mod cli;
 #[cfg(target_os = "macos")]
 mod cli_reporting;
 #[path = "key_file.rs"]
+#[allow(dead_code)] // This standalone copy only consumes shared header-key parsing.
 mod key_file;
 mod localization;
 mod standalone;
