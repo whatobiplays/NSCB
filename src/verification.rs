@@ -1034,11 +1034,7 @@ fn evaluate_full(
     checks: &mut Vec<VerificationCheck>,
 ) -> Result<(), VerificationError> {
     for partition in &header.partitions {
-        let index = usize::from(partition.index);
-        let fs_start = 0x400 + index * 0x200;
-        let hash_start = 0x280 + index * 0x20;
-        let actual = Sha256::digest(&block[fs_start..fs_start + 0x200]);
-        let matches = actual.as_slice() == &block[hash_start..hash_start + 0x20];
+        let matches = fs_header_hash_matches(block, usize::from(partition.index));
         checks.push(completed(
             VerificationCheckId::FsHeaderHash,
             if matches {
@@ -1187,6 +1183,16 @@ fn evaluate_full(
         ));
     }
     Ok(())
+}
+
+pub(crate) fn fs_header_hash_matches(block: &[u8; nca::HEADER_SIZE], index: usize) -> bool {
+    if index >= 4 {
+        return false;
+    }
+    let fs_start = 0x400 + index * 0x200;
+    let hash_start = 0x280 + index * 0x20;
+    let actual = Sha256::digest(&block[fs_start..fs_start + 0x200]);
+    actual.as_slice() == &block[hash_start..hash_start + 0x20]
 }
 
 fn limitations(

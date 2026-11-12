@@ -19,6 +19,7 @@ mod key_file;
 #[cfg(any(target_os = "macos", test))]
 mod multi_content_format;
 mod nca;
+mod nsp_semantic_qualification;
 mod operation;
 mod partition_fs;
 mod pfs0;
@@ -48,6 +49,12 @@ pub use engine::{
     ContainerFormat, ContainerProbeEntry, ContainerProbeRequest, ContainerProbeResult, Engine,
 };
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
+pub use nsp_semantic_qualification::{
+    NspSemanticQualificationError, NspSemanticQualificationErrorCode,
+    NspSemanticQualificationFacts, NspSemanticQualificationMember, NspSemanticQualificationOutcome,
+    NspSemanticQualificationProfile, NspSemanticQualificationReason,
+    NspSemanticQualificationRequest, NspSemanticQualificationResult, NspSemanticQualificationRole,
+};
 pub use operation::{
     ConflictPolicy, CopyBatchCheckpointError, CopyBatchCompletion, CopyBatchEvent,
     CopyBatchEventConsumer, CopyBatchEventKind, CopyBatchExecution, CopyBatchItemCheckpoint,

@@ -60,3 +60,57 @@ jobs:
 
       - name: Run repository validation
         run: make all
+
+  nsp-semantic-native:
+    name: NSP semantic tests (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS 15 arm64
+            runner: macos-15
+          - name: Windows Server 2025 x86_64
+            runner: windows-2025
+          - name: Linux glibc x86_64
+            runner: ubuntu-24.04
+          - name: Linux glibc arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Install the repository Rust toolchain
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import tomllib
+          from pathlib import Path
+
+          toolchain = tomllib.loads(Path("rust-toolchain.toml").read_text())[
+              "toolchain"
+          ]
+          command = [
+              "rustup",
+              "toolchain",
+              "install",
+              toolchain["channel"],
+              "--profile",
+              toolchain.get("profile", "minimal"),
+          ]
+          for component in toolchain.get("components", []):
+              command.extend(["--component", component])
+          subprocess.run(command, check=True)
+          PY
+
+      - name: Run native qualification tests
+        shell: bash
+        run: |
+          cargo test --no-default-features --lib nsp_semantic_qualification::tests::
+          cargo test --no-default-features --lib key_file::qualification_tests::
+          cargo test --no-default-features --lib pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables
+          cargo test --no-default-features --test nsp_semantic_qualification

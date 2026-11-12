@@ -14,6 +14,21 @@ pub(crate) fn probe<R: Read + Seek>(
     reader: &mut R,
     file_size: u64,
 ) -> Result<ContainerProbeResult, ContainerProbeError> {
+    probe_with_limits(
+        reader,
+        file_size,
+        MAX_ENTRIES,
+        HEADER_SIZE + MAX_ENTRIES * ENTRY_SIZE + MAX_STRING_TABLE,
+    )
+}
+
+/// Parses PFS0 metadata under caller-selected entry and total-metadata limits.
+pub(crate) fn probe_with_limits<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+    max_entries: usize,
+    max_metadata: usize,
+) -> Result<ContainerProbeResult, ContainerProbeError> {
     if file_size < HEADER_SIZE as u64 {
         return Err(error(ContainerProbeErrorCode::TruncatedInput));
     }
@@ -39,7 +54,7 @@ pub(crate) fn probe<R: Read + Seek>(
 
     let entry_count =
         usize::try_from(entry_count).map_err(|_| error(ContainerProbeErrorCode::LimitExceeded))?;
-    if entry_count > MAX_ENTRIES {
+    if entry_count > max_entries {
         return Err(error(ContainerProbeErrorCode::LimitExceeded));
     }
 
@@ -69,6 +84,12 @@ pub(crate) fn probe<R: Read + Seek>(
     let metadata_size = entry_table_size
         .checked_add(string_table_size)
         .ok_or_else(|| error(ContainerProbeErrorCode::InvalidHeader))?;
+    let total_metadata_size = HEADER_SIZE
+        .checked_add(metadata_size)
+        .ok_or_else(|| error(ContainerProbeErrorCode::InvalidHeader))?;
+    if total_metadata_size > max_metadata {
+        return Err(error(ContainerProbeErrorCode::LimitExceeded));
+    }
     let mut metadata = Vec::new();
     metadata
         .try_reserve_exact(metadata_size)
@@ -204,7 +225,7 @@ fn error(code: ContainerProbeErrorCode) -> ContainerProbeError {
 
 #[cfg(test)]
 mod tests {
-    use super::{HEADER_SIZE, probe};
+    use super::{HEADER_SIZE, probe, probe_with_limits};
     use crate::ContainerProbeErrorCode;
     use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -387,6 +408,18 @@ mod tests {
             parse(header_with(0, (MAX_STRING_TABLE + 1) as u32)),
             ContainerProbeErrorCode::LimitExceeded,
         );
+    }
+
+    #[test]
+    fn caller_metadata_limit_is_checked_before_reading_declared_tables() {
+        let bytes = raw_pfs0(&[entry(0, 0, 0, 0)], b"x\0", &[]);
+        let mut reader = CountingReader::new(bytes.clone());
+
+        let error = probe_with_limits(&mut reader, bytes.len() as u64, 1, HEADER_SIZE)
+            .expect_err("entry metadata exceeds the caller limit");
+
+        assert_eq!(error.code(), ContainerProbeErrorCode::LimitExceeded);
+        assert_eq!(reader.bytes_read, HEADER_SIZE);
     }
 
     #[test]

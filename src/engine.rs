@@ -262,6 +262,17 @@ impl Engine {
         crate::verification::verify(request)
     }
 
+    /// Checks byte-derived consistency for the supported two-member NSP profile.
+    ///
+    /// The result does not establish authenticity, installability, Full
+    /// Verification, or compatibility with other package profiles.
+    pub fn qualify_nsp_semantics(
+        &self,
+        request: crate::NspSemanticQualificationRequest,
+    ) -> Result<crate::NspSemanticQualificationResult, crate::NspSemanticQualificationError> {
+        crate::nsp_semantic_qualification::qualify(request)
+    }
+
     /// Recognizes byte-supported structure without keys, execution authority, or content identity.
     pub fn recognize_content(
         &self,

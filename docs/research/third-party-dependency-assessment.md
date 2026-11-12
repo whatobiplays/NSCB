@@ -92,3 +92,22 @@ The repository retains an RSA-PSS/SHA-256 known-answer test from a NIST CAVP
 verification vector and a synthetic positive/negative signature suite.
 Upgrade or replace `rsa` when a fixed release is available and passes the
 same evidence.
+
+## Issue #71 NSP semantic qualification
+
+| Capability | Selected implementation | Evidence and license | Decision |
+| --- | --- | --- | --- |
+| NCA header and PFS0 framing | Existing NSCB NCA and PFS0 parsers | Maintained in this repository; existing validation and bounded metadata behavior reused | Reuse native parsing rather than duplicate header or container syntax. |
+| AES-128 block operations | `aes` 0.8.4 (RustCrypto) | [crate metadata](https://docs.rs/crate/aes/0.8.4); MIT OR Apache-2.0; `zeroize` feature enabled | Use the established block-cipher implementation for key-area AES-ECB and header code already in the crate. No native C dependency. |
+| AES-CTR stream mode | `ctr` 0.9.2 (RustCrypto) | [crate metadata](https://docs.rs/crate/ctr/0.9.2); MIT OR Apache-2.0 | Use its generic counter mode with `aes::Aes128`; NSCB owns only the checked NCA counter construction and bounded reader. No native C dependency. |
+| Secret-buffer clearing | `zeroize` 1.9.1 | [crate metadata](https://docs.rs/crate/zeroize/1.9.1); MIT OR Apache-2.0 | Clear parsed key bytes, decrypted key area, section key, and owned streaming buffers on drop. This reduces memory retention; it is not a claim of complete forensic erasure. |
+| Independent NCA/PFS0 oracle | hactool at commit `1d64a83450e025622f3468c28fc4164dad2c5ef6` | [source](https://github.com/SciresM/hactool/tree/1d64a83450e025622f3468c28fc4164dad2c5ef6); ISC | Built and run only as a temporary test tool. It checked the synthetic NCA headers, FS-header hashes, hierarchical tables, and PFS0 layout. Do not link or bundle it: its C CLI does not expose the bounded, member-relative, sanitized Engine interface, and its verification path allocates hash tables from file-controlled lengths. |
+| Independent CNMT reader | NSTool v1.9.2 at commit `e89ea84bd70c11b67ebec9153fb4a446f18a9d3d` | [source](https://github.com/jakcron/nstool/tree/e89ea84bd70c11b67ebec9153fb4a446f18a9d3d); MIT plus separately licensed pinned submodules | Built and run on macOS as a temporary test tool. It read the two-member package, decrypted both NCA sections, and displayed the expected Application CNMT and Program row fields. Do not invoke it from this Engine operation: its process and text-output boundary does not provide the bounded member reader or stable Rust result types. Other native targets remain unqualified. |
+
+The implementation adds no package reader or writer dependency. NSCB reuses its
+existing parsers, adds only the bounded AES-CTR and CNMT logic needed by the
+approved synthetic profile, and uses RustCrypto primitives rather than a
+custom AES or SHA implementation. The selected crates have Rust APIs and no
+native C build dependency; native qualification remains a separate PAC-5 gate.
+Review the pinned lockfile and current RustSec database again before release
+qualification.
