@@ -241,6 +241,170 @@ fn rejects_extra_outer_members_and_plain_pfs0_framing() {
 }
 
 #[test]
+fn rejects_trailing_unreferenced_outer_pfs0_payload() {
+    let fixture = synthetic_nsp_qualification::valid();
+    let mut package = fixture.package.clone();
+    package.push(0xa5);
+
+    assert_not_qualified(&package, &fixture.key_file);
+}
+
+#[test]
+fn rejects_a_gap_between_outer_pfs0_member_spans() {
+    let fixture = synthetic_nsp_qualification::valid();
+    let mut payload = fixture.meta_nca.clone();
+    payload.push(0xa5);
+    payload.extend_from_slice(&fixture.program_nca);
+    let package = synthetic_pfs0::pfs0(
+        &[
+            synthetic_pfs0::EntrySpec {
+                name: "program.nca",
+                offset: 0,
+                size: fixture.meta_nca.len() as u64,
+            },
+            synthetic_pfs0::EntrySpec {
+                name: "meta.cnmt.nca",
+                offset: (fixture.meta_nca.len() + 1) as u64,
+                size: fixture.program_nca.len() as u64,
+            },
+        ],
+        &payload,
+    );
+
+    assert_not_qualified(&package, &fixture.key_file);
+}
+
+#[test]
+fn rejects_a_leading_unreferenced_outer_pfs0_payload_gap() {
+    let fixture = synthetic_nsp_qualification::valid();
+    let mut payload = vec![0xa5];
+    payload.extend_from_slice(&fixture.meta_nca);
+    payload.extend_from_slice(&fixture.program_nca);
+    let package = synthetic_pfs0::pfs0(
+        &[
+            synthetic_pfs0::EntrySpec {
+                name: "program.nca",
+                offset: 1,
+                size: fixture.meta_nca.len() as u64,
+            },
+            synthetic_pfs0::EntrySpec {
+                name: "meta.cnmt.nca",
+                offset: (fixture.meta_nca.len() + 1) as u64,
+                size: fixture.program_nca.len() as u64,
+            },
+        ],
+        &payload,
+    );
+
+    assert_not_qualified(&package, &fixture.key_file);
+}
+
+#[test]
+fn outer_pfs0_table_order_does_not_change_complete_payload_accounting() {
+    let fixture = synthetic_nsp_qualification::valid();
+    let mut payload = fixture.meta_nca.clone();
+    payload.extend_from_slice(&fixture.program_nca);
+    let package = synthetic_pfs0::pfs0(
+        &[
+            synthetic_pfs0::EntrySpec {
+                name: "meta.cnmt.nca",
+                offset: fixture.meta_nca.len() as u64,
+                size: fixture.program_nca.len() as u64,
+            },
+            synthetic_pfs0::EntrySpec {
+                name: "program.nca",
+                offset: 0,
+                size: fixture.meta_nca.len() as u64,
+            },
+        ],
+        &payload,
+    );
+
+    let result = qualify(&package, &fixture.key_file).expect("qualify reordered table");
+    assert!(matches!(
+        result.outcome,
+        NspSemanticQualificationOutcome::Qualified(_)
+    ));
+}
+
+#[test]
+fn rejects_an_empty_outer_pfs0_member() {
+    let fixture = synthetic_nsp_qualification::valid();
+    let package = synthetic_pfs0::pfs0(
+        &[
+            synthetic_pfs0::EntrySpec {
+                name: "empty.nca",
+                offset: 0,
+                size: 0,
+            },
+            synthetic_pfs0::EntrySpec {
+                name: "member.nca",
+                offset: 0,
+                size: fixture.meta_nca.len() as u64,
+            },
+        ],
+        &fixture.meta_nca,
+    );
+
+    assert_not_qualified(&package, &fixture.key_file);
+}
+
+#[test]
+fn rejects_unreferenced_payload_in_program_section_pfs0() {
+    let content = b"program-content";
+
+    let mut trailing_payload = content.to_vec();
+    trailing_payload.push(0xa5);
+    let trailing = synthetic_pfs0::pfs0(
+        &[synthetic_pfs0::EntrySpec {
+            name: "program.bin",
+            offset: 0,
+            size: content.len() as u64,
+        }],
+        &trailing_payload,
+    );
+
+    let gap_payload = b"first!!!_second";
+    let gap = synthetic_pfs0::pfs0(
+        &[
+            synthetic_pfs0::EntrySpec {
+                name: "first.bin",
+                offset: 0,
+                size: 8,
+            },
+            synthetic_pfs0::EntrySpec {
+                name: "second.bin",
+                offset: 9,
+                size: 6,
+            },
+        ],
+        gap_payload,
+    );
+
+    let leading_payload = [b"_".as_slice(), content].concat();
+    let leading = synthetic_pfs0::pfs0(
+        &[synthetic_pfs0::EntrySpec {
+            name: "program.bin",
+            offset: 1,
+            size: content.len() as u64,
+        }],
+        &leading_payload,
+    );
+
+    for pfs0 in [trailing, gap, leading] {
+        let fixture = synthetic_nsp_qualification::build_with_program_pfs0(pfs0);
+        assert_not_qualified(&fixture.package, &fixture.key_file);
+    }
+}
+
+#[test]
+fn rejects_unreferenced_payload_in_meta_section_pfs0() {
+    let fixture = synthetic_nsp_qualification::build_with_meta_cnmt_suffix(&[0xa5]);
+
+    assert_not_qualified(&fixture.package, &fixture.key_file);
+}
+
+#[test]
 fn rejects_a_truncated_cnmt_without_parsing_past_its_member() {
     let fixture = synthetic_nsp_qualification::build_with_cnmt_size(0x87);
     assert_eq!(
@@ -382,5 +546,19 @@ fn not_qualified(package: &[u8], key_file: &[u8]) -> NspSemanticQualificationRea
             panic!("the fixture does not match the supported profile")
         }
         _ => panic!("the fixture returned a future qualification outcome"),
+    }
+}
+
+fn assert_not_qualified(package: &[u8], key_file: &[u8]) {
+    let result = qualify(package, key_file).expect("profile mismatch is not an I/O failure");
+    match result.outcome {
+        NspSemanticQualificationOutcome::NotQualified(reason) => assert_eq!(
+            reason,
+            NspSemanticQualificationReason::UnaccountedPfs0Payload
+        ),
+        NspSemanticQualificationOutcome::Qualified(_) => {
+            panic!("unaccounted PFS0 payload must not return Qualified")
+        }
+        _ => panic!("unaccounted payload returned an unexpected outcome"),
     }
 }

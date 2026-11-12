@@ -14,12 +14,16 @@ positive NSP identity, and this result is not a Verification result.
 
 ## Supported profile
 
-The outer PFS0 must contain exactly two non-overlapping members. File names and
-extensions do not assign their roles. The decrypted NCA headers must identify
-exactly one Meta member and one Program member. Other base Application roles,
-including Control, Data, Manual, and PublicData, are unsupported. Tickets,
-patches, DLC, system updates, delta content, multiple titles, and rights-bearing
-NCAs are outside the profile.
+The outer PFS0 must contain exactly two nonempty members. Their checked spans,
+sorted by payload offset, must start at zero, meet without gaps or overlap, and
+end at the complete PFS0 payload size. The check does not depend on entry-table
+order. Leading gaps, inter-member gaps, trailing bytes, and empty members
+return `NotQualified(unaccounted_pfs0_payload)`. File names and extensions do
+not assign member roles. The decrypted NCA headers must identify exactly one
+Meta member and one Program member. Other base Application roles, including
+Control, Data, Manual, and PublicData, are unsupported. Tickets, patches, DLC,
+system updates, delta content, multiple titles, and rights-bearing NCAs are
+outside the profile.
 
 Each NCA must be NCA3, Download distribution, RightsId zero, effective key
 revision zero, and key-area index zero. Its declared archive size must match
@@ -27,11 +31,14 @@ its bounded outer member. Exactly one section must be present, at index zero.
 That section must use PartitionFs, Hierarchical SHA-256, AES-CTR, and no
 extended section metadata.
 
-The Meta section's PFS0 must contain one file of exactly `0x88` bytes. That
-extent is the `0x20`-byte CNMT header, `0x10`-byte Application extended header,
-one `0x38`-byte content row, and the trailing `0x20`-byte CNMT digest. The
-digest field is present inside the Meta section's checked hash tree; this
-qualification does not recompute its value or use it as an authenticity claim.
+The Meta and Program section PFS0 payloads follow the same complete-coverage
+rule. Every entry must be nonempty, and the sorted entry spans must account for
+the full PFS0 data region. The Meta PFS0 must contain exactly one file of
+exactly `0x88` bytes. That extent is the `0x20`-byte CNMT header, `0x10`-byte
+Application extended header, one `0x38`-byte content row, and the trailing
+`0x20`-byte CNMT digest. The digest field is present inside the Meta section's
+checked hash tree; this qualification does not recompute its value or use it
+as an authenticity claim.
 NSTool v1.9.2 includes the digest in its CNMT size calculation and reads it as
 the final field. The [pinned CNMT layout](https://github.com/jakcron/libpietendo/blob/5d50d02f8f3b8918bdfbbb599b8c4c1628660d89/include/pietendo/hac/define/cnmt.h)
 defines the digest size, and the [CNMT parser](https://github.com/jakcron/libpietendo/blob/5d50d02f8f3b8918bdfbbb599b8c4c1628660d89/src/hac/ContentMeta.cpp)
@@ -90,11 +97,23 @@ bytes. The table length must equal
 
 ## Bounded reads and source stability
 
-The existing PFS0 parser validates names and spans. The qualifier supplies a
+The existing PFS0 parser validates names, bounds, and overlaps. It continues to
+allow gaps for unrelated callers. This qualification layer adds its own
+complete-coverage check and returns `unaccounted_pfs0_payload` for a readable
+PFS0 whose nonempty member spans leave any bytes outside them. It supplies a
 1 MiB total metadata limit and a profile-specific entry limit. Its member
 reader checks `start + length` with checked arithmetic, caps every read at the
 member end, and rejects seeks past that end. Nested Meta PFS0 and CNMT reads
 are bounded again by their immediate parent ranges.
+
+The no-gap rule is limited to this profile. The pinned hacPack writer at commit
+[`e506cb58b7843d86df7518156debd28f3b575638`](https://github.com/DarkMatterCore/hacPack/tree/e506cb58b7843d86df7518156debd28f3b575638)
+sets each PFS0 file offset to the cumulative preceding file sizes and writes
+those files consecutively. Its PFS0 header alignment bytes are included in the
+string table, while its hash-table alignment is placed before the PFS0 range.
+This writer documents a compact PFS0 layout. Its output does not establish the
+behavior of every PFS0 producer. The qualification profile accepts no
+member-data padding; a broader padding rule requires separate owner review.
 
 The source is opened once and read through that handle. The operation records
 filesystem identity and metadata before reading, hashes the full source and
@@ -139,9 +158,11 @@ member accounting and the explicit profile id
 `rights_free_base_application_v1`. `NotQualified(reason)` means the source was
 read but failed the selected profile. Typed errors report missing or malformed
 prerequisites, cancellation, resource limits, input changes, and operational
-failures. If a supplied Application key fails encrypted-section integrity
-checks, the stable error is `key_or_section_integrity_failure`; it does not
-guess whether the key or the encrypted bytes caused the mismatch.
+failures. Source read errors are mapped to the sanitized `input_unavailable`
+error without retaining the underlying OS message or path. If a supplied
+Application key fails encrypted-section integrity checks, the stable error is
+`key_or_section_integrity_failure`; it does not guess whether the key or the
+encrypted bytes caused the mismatch.
 
 Key-file contents, key bytes, and input paths do not appear in results or
 diagnostics. Key buffers, decrypted key-area bytes, section keys, and streaming

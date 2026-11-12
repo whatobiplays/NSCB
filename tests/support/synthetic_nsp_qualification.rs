@@ -28,7 +28,16 @@ pub fn build_with_program_payload(
     change: impl FnOnce(&mut [u8; 0x88]),
 ) -> Fixture {
     let program_pfs0 = pfs0(&[("unrelated.bin", program_payload)]);
-    build_with_program_pfs0(program_pfs0, change)
+    build_with_program_pfs0_and_meta_suffix(program_pfs0, &[], change)
+}
+
+pub fn build_with_program_pfs0(program_pfs0: Vec<u8>) -> Fixture {
+    build_with_program_pfs0_and_meta_suffix(program_pfs0, &[], |_| {})
+}
+
+pub fn build_with_meta_cnmt_suffix(suffix: &[u8]) -> Fixture {
+    let program_pfs0 = pfs0(&[("unrelated.bin", b"synthetic program section")]);
+    build_with_program_pfs0_and_meta_suffix(program_pfs0, suffix, |_| {})
 }
 
 pub fn build_with_program_entry_count(entry_count: usize) -> Fixture {
@@ -40,7 +49,7 @@ pub fn build_with_program_entry_count(entry_count: usize) -> Fixture {
         .iter()
         .map(|name| (name.as_str(), empty.as_slice()))
         .collect::<Vec<_>>();
-    build_with_program_pfs0(pfs0(&entries), |_| {})
+    build_with_program_pfs0_and_meta_suffix(pfs0(&entries), &[], |_| {})
 }
 
 pub fn build_with_cnmt_size(cnmt_size: usize) -> Fixture {
@@ -57,7 +66,11 @@ pub fn build_with_cnmt_size(cnmt_size: usize) -> Fixture {
     }
 }
 
-fn build_with_program_pfs0(program_pfs0: Vec<u8>, change: impl FnOnce(&mut [u8; 0x88])) -> Fixture {
+fn build_with_program_pfs0_and_meta_suffix(
+    program_pfs0: Vec<u8>,
+    meta_suffix: &[u8],
+    change: impl FnOnce(&mut [u8; 0x88]),
+) -> Fixture {
     let program_nca = nca(0, &program_pfs0, PROGRAM_ID);
     let program_digest = Sha256::digest(&program_nca);
 
@@ -73,7 +86,9 @@ fn build_with_program_pfs0(program_pfs0: Vec<u8>, change: impl FnOnce(&mut [u8; 
     cnmt[0x67] = 0;
     change(&mut cnmt);
 
-    let meta_pfs0 = pfs0(&[("misleading.txt", &cnmt)]);
+    let mut meta_payload = cnmt.to_vec();
+    meta_payload.extend_from_slice(meta_suffix);
+    let meta_pfs0 = pfs0_with_payload(&[("misleading.txt", &cnmt)], meta_payload);
     let meta_nca = nca(1, &meta_pfs0, PROGRAM_ID);
     let package = package_with_members(&meta_nca, &program_nca);
     let key_file = key_file_with_application_kaek(APPLICATION_KAEK);

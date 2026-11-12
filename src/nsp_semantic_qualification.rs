@@ -4,7 +4,7 @@
 //! Program NCA, and one Application CNMT. It does not establish authenticity,
 //! installability, full verification, or broad package compatibility.
 
-use crate::engine::ContainerProbeEntry;
+use crate::engine::{ContainerProbeEntry, ContainerProbeResult};
 use crate::file_identity::{FileIdentity, FileSnapshot};
 use crate::key_file::{NspKeyFileError, NspQualificationKeys};
 use crate::nca::{self, ContentType, Distribution, HeaderError};
@@ -204,6 +204,8 @@ pub enum NspSemanticQualificationReason {
     InvalidContainerStructure,
     /// The outer package does not contain exactly the supported two members.
     UnsupportedMemberSet,
+    /// A PFS0 payload contains bytes outside its nonempty member spans.
+    UnaccountedPfs0Payload,
     /// An embedded member is not a valid supported NCA3 header.
     InvalidNcaHeader,
     /// An NCA role, distribution, key generation, or section profile is unsupported.
@@ -466,6 +468,14 @@ where
             NspSemanticQualificationReason::UnsupportedMemberSet,
         ));
     }
+    if !pfs0_payload_is_fully_accounted(&outer)? {
+        let digests = hash_source(&mut input, None, &request, checkpoint)?;
+        input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
+        return Ok(NspSemanticQualificationResult::not_qualified(
+            digests.source,
+            NspSemanticQualificationReason::UnaccountedPfs0Payload,
+        ));
+    }
 
     let mut key_file = open_snapshot_file(
         &request.key_file,
@@ -694,6 +704,43 @@ fn map_key_file_error(error: NspKeyFileError) -> NspSemanticQualificationError {
     NspSemanticQualificationError::new(code)
 }
 
+/// Checks the qualification profile's stricter PFS0 payload accounting.
+///
+/// The general PFS0 probe permits gaps for unrelated callers. This profile
+/// requires every payload byte to belong to exactly one nonempty entry, while
+/// allowing entry-table records in any order.
+fn pfs0_payload_is_fully_accounted(
+    probe: &ContainerProbeResult,
+) -> Result<bool, NspSemanticQualificationError> {
+    if probe.entries.is_empty() || probe.payload_size == 0 {
+        return Ok(false);
+    }
+
+    let mut spans = try_reserve_vec(probe.entries.len())?;
+    for entry in &probe.entries {
+        if entry.size == 0 {
+            return Ok(false);
+        }
+        let Some(end) = entry.offset.checked_add(entry.size) else {
+            return Ok(false);
+        };
+        if end > probe.payload_size {
+            return Ok(false);
+        }
+        spans.push((entry.offset, end));
+    }
+
+    spans.sort_unstable_by_key(|(start, _)| *start);
+    let mut next_offset = 0_u64;
+    for (start, end) in spans {
+        if start != next_offset {
+            return Ok(false);
+        }
+        next_offset = end;
+    }
+    Ok(next_offset == probe.payload_size)
+}
+
 fn hash_source<F>(
     input: &mut OpenedInput,
     members: Option<&[ContainerProbeEntry]>,
@@ -903,6 +950,11 @@ where
             },
         }
     };
+    if !pfs0_payload_is_fully_accounted(&probe)? {
+        return Ok(ReadDecision::NotQualified(
+            NspSemanticQualificationReason::UnaccountedPfs0Payload,
+        ));
+    }
     let cnmt = if role == NspSemanticQualificationRole::Meta {
         if probe.entries.len() != 1 || probe.entries[0].size != SUPPORTED_CNMT_BYTES as u64 {
             return Ok(ReadDecision::NotQualified(
@@ -1333,9 +1385,12 @@ mod tests {
     use super::{
         BoundedReader, Checkpoint, CtrSectionReader, MAX_INPUT_BYTES,
         NspSemanticQualificationErrorCode, NspSemanticQualificationRequest, parse_section_regions,
-        qualify_with_checkpoint, try_reserve_vec, validate_input_size,
+        qualify_with_checkpoint, read_nca_member, try_reserve_vec, validate_input_size,
     };
     use crate::CancellationHandle;
+    use crate::engine::ContainerProbeEntry;
+    use crate::key_file::read_nsp_qualification_keys;
+    use crate::sha256::Sha256Digest;
     use std::fs::OpenOptions;
     use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
     use std::path::{Path, PathBuf};
@@ -1439,6 +1494,66 @@ mod tests {
             reader.read(&mut [0]).expect_err("parent failure").kind(),
             io::ErrorKind::PermissionDenied
         );
+    }
+
+    #[test]
+    fn nca_member_source_read_failure_is_sanitized_and_typed() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private-source-read-marker",
+                ))
+            }
+        }
+        impl Seek for FailingReader {
+            fn seek(&mut self, _: SeekFrom) -> io::Result<u64> {
+                Ok(0)
+            }
+        }
+
+        let key_bytes = key_file();
+        let keys =
+            read_nsp_qualification_keys(&mut Cursor::new(&key_bytes), key_bytes.len() as u64)
+                .expect("parse test-only keys");
+        let request = NspSemanticQualificationRequest::new(
+            "/private/source-path.nsp",
+            "/private/key-path.txt",
+        );
+        let entry = ContainerProbeEntry {
+            name: "member.nca".to_owned(),
+            offset: 0,
+            size: 0xc00,
+            file_offset: 0,
+        };
+        let mut reader = FailingReader;
+        let mut checkpoint = |_| {};
+        let result = read_nca_member(
+            &mut reader,
+            0xc00,
+            &entry,
+            Sha256Digest::digest(b"synthetic member"),
+            &keys,
+            &request,
+            &mut checkpoint,
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("injected source read error must remain an operational failure"),
+        };
+
+        assert_eq!(
+            error.code(),
+            NspSemanticQualificationErrorCode::InputUnavailable
+        );
+        assert_eq!(
+            error.to_string(),
+            "the qualification input could not be read"
+        );
+        assert!(!format!("{error:?}").contains("private-source-read-marker"));
+        assert!(!format!("{error}").contains("/private/source-path.nsp"));
+        assert!(!format!("{error}").contains("/private/key-path.txt"));
     }
 
     #[test]
