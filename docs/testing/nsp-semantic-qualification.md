@@ -11,8 +11,8 @@ means that some required evidence is still missing; it is not a pass.
 | PAC-2 — Negative semantics | PASS | The integration suite covers plain PFS0, misleading names, one or extra outer members, empty outer members, trailing, leading, and inter-member unreferenced payload at the outer level, the same unreferenced-payload cases in Program PFS0, trailing unreferenced Meta PFS0 payload, and valid reversed outer table order. It also covers duplicate Meta/Program roles, truncated and unsupported CNMT, unsupported section and key-generation profiles, nonzero RightsId, missing and malformed key prerequisites, wrong header key (`invalid_nca_header`), wrong key-area key (`key_or_section_integrity_failure`), Meta/Program title mismatch, and Program row hash, ContentId, size, type, IdOffset, and title-ID mismatches. |
 | PAC-3 — Boundary safety | UNVERIFIED | Tests cover checked member and section ranges, bounded reads/seeks, parent I/O propagation, a deterministic source-read failure mapped to sanitized `input_unavailable`, PFS0 metadata rejection before table reads, entry ceilings, input-size boundaries, source mutation after hashing, cancellation after the last hash chunk, and capacity-overflow mapping to `allocation_failed`. Key-file partial-read failure is injected. Real allocator exhaustion remains untested. The owner-approved same-handle strategy detects ordinary mutation and observable identity changes, but cannot detect a hostile writer that restores all observed metadata. No temporary-copy subsystem was added. |
 | PAC-4 — API and compatibility | PASS | `make all` passed on macOS 27.0.1 arm64. The public change is additive and Engine-only, with no CLI/TUI qualification command. A separate unrestricted `cargo test --no-default-features` invocation fails in the existing `multi_content_operations` CLI integration test because the `nscb` binary requires `standalone-job-history`; the Makefile's supported no-default gate tests the library and runs integration tests with that feature. |
-| PAC-5 — Native qualification | UNVERIFIED | `make all` and the focused suite passed natively on macOS 27.0.1 arm64. The CI workflow adds Windows Server 2025 x86_64, Linux x86_64, and Linux aarch64 jobs. Windows 11 x86_64 remains `NOT_RUN`; the Server runner does not substitute for it. |
-| PAC-6 — Review and format evidence | UNVERIFIED | Pinned hactool, NSTool, and hacPack source references and synthetic-reader results are documented. The prior independent review record and its corrected P2 dispositions are preserved below. A separate non-authoring review of the follow-up commit and complete PR diff remains required; ChatGPT owner review remains outstanding. |
+| PAC-5 — Native qualification | UNVERIFIED | `make all` and the focused suite passed natively on macOS 27.0.1 arm64. PR CI run `43205172852` passed native qualification on macOS 15 arm64, Windows Server 2025 x86_64, Linux glibc x86_64, and Linux glibc arm64. Windows 11 x86_64 remains `NOT_RUN`; the Server runner does not substitute for it. |
+| PAC-6 — Review and format evidence | UNVERIFIED | Pinned hactool, NSTool, and hacPack source references and synthetic-reader results are documented. The prior independent review record and corrected P2 dispositions are preserved below. Eevee's separate review of the complete PR diff through `f647cbbbfe82bd777d9a3fa11aa423f7c2913ad3` found no P0–P3 issues. ChatGPT owner review remains outstanding. |
 
 ## Prior independent review record
 
@@ -28,6 +28,25 @@ are `#[non_exhaustive]`. The reviewer checked the correction delta and the
 wrong-header-key negative case, then reported no remaining P0/P1 issue. The
 separate correction-delta review had no distinct committed SHA; the reviewed
 candidate SHA above is retained as the original review anchor.
+
+## Follow-up independent review record
+
+The non-authoring reviewer Eevee (agent id
+`01a1cf69-ff55-7ba2-ac78-560ed5595a69`) reviewed the complete PR diff from
+`45adc24ebeb09bdd8738df035faa44dece2e60f4` through
+`f647cbbbfe82bd777d9a3fa11aa423f7c2913ad3`, then checked the correction
+commit against the original implementation. The reviewer confirmed the outer
+and nested complete-payload checks, table-order independence, unchanged
+generic PFS0 behavior, sanitized source-read fault test, and documented
+same-handle limitation. The review found no P0–P3 issues.
+
+The reviewer inspected the CI and dependency manifests, qualification and
+dependency documents, Engine and key interfaces, NCA/PFS0/verification code,
+the qualifier, synthetic fixtures, and integration tests. No tests were run
+by the reviewer. The pinned base-to-head `git diff --check` completed with no
+output, and the reviewer made no changes. CodeGraph marked the changed files
+stale and TokenSave was bound to the primary checkout, so the reviewer checked
+the pinned diff and current worktree source directly.
 
 ## Focused test evidence
 
