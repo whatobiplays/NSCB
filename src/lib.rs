@@ -34,6 +34,7 @@ mod split_resolution;
 mod split_trust;
 mod strict_json;
 mod verification;
+mod xci_to_nsp;
 
 #[cfg(test)]
 mod test_allocator;
@@ -51,6 +52,15 @@ mod test_synthetic_verification;
 #[path = "../tests/support/synthetic_nsp_qualification.rs"]
 #[allow(dead_code)]
 mod test_synthetic_nsp_qualification;
+
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use test_synthetic_nsp_qualification as synthetic_nsp_qualification;
+
+#[cfg(test)]
+#[path = "../tests/support/synthetic_xci.rs"]
+#[allow(dead_code)]
+mod test_synthetic_xci;
 
 pub use recognition::{
     CompressionVariant, ContentRecognitionError, ContentRecognitionErrorCode,
@@ -114,3 +124,4 @@ pub use verification::{
     VerificationErrorCode, VerificationLimitation, VerificationOutcome, VerificationProfile,
     VerificationReason, VerificationRequest, VerificationResult,
 };
+pub use xci_to_nsp::XciToNspRequest;

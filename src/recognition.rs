@@ -1,6 +1,8 @@
 //! Bounded recognition of container families and archive representations.
 use crate::{ContainerProbeError, ContainerProbeErrorCode};
 use serde::Serialize;
+#[cfg(target_os = "macos")]
+use sha2::{Digest, Sha256};
 use std::{
     fmt,
     io::{Read, Seek, SeekFrom},
@@ -250,6 +252,32 @@ struct Members {
     spans: Vec<(u64, u64)>,
     /// Name of each member in table order.
     names: Vec<String>,
+    #[cfg(target_os = "macos")]
+    /// Stored prefix-hash fields for each member in table order.
+    hashes: Vec<HfsHashFields>,
+}
+
+#[cfg(target_os = "macos")]
+struct HfsHashFields {
+    hashed_size: u32,
+    reserved: [u8; 8],
+    digest: [u8; 32],
+}
+
+/// A secure-partition member selected for the bounded XCI-to-NSP profile.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct XciSecureMember {
+    pub(crate) name: String,
+    pub(crate) offset: u64,
+    pub(crate) length: u64,
+}
+
+/// Structurally validated direct members of one XCI secure partition.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct XciConversionSource {
+    pub(crate) secure_members: Vec<XciSecureMember>,
 }
 fn add(a: u64, b: u64) -> Result<u64> {
     a.checked_add(b).ok_or(err(MalformedInput))
@@ -338,10 +366,16 @@ impl<R: Read + Seek> Parser<'_, R> {
         }
         let mut spans = Vec::new();
         let mut names_out = Vec::new();
+        #[cfg(target_os = "macos")]
+        let mut hashes = Vec::new();
         spans
             .try_reserve_exact(count as usize)
             .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
         names_out
+            .try_reserve_exact(count as usize)
+            .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
+        #[cfg(target_os = "macos")]
+        hashes
             .try_reserve_exact(count as usize)
             .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
         let mut previous = 0;
@@ -350,8 +384,10 @@ impl<R: Read + Seek> Parser<'_, R> {
             let len = u64le(&r[8..16]);
             let name = u32le(&r[16..20]) as usize;
             let hashed = u32le(&r[20..24]);
-            let target = u64le(&r[24..32]);
-            if add(target, hashed)? > len || off < previous {
+            let legacy_reserved_offset = u64le(&r[24..32]);
+            #[cfg(target_os = "macos")]
+            let reserved: [u8; 8] = r[24..32].try_into().expect("fixed HFS0 field");
+            if add(legacy_reserved_offset, hashed)? > len || off < previous {
                 return Err(err(MalformedInput));
             }
             let tail = strings.get(name..).ok_or(err(MalformedInput))?;
@@ -380,11 +416,19 @@ impl<R: Read + Seek> Parser<'_, R> {
                 return Err(err(TruncatedInput));
             }
             spans.push((s, e));
+            #[cfg(target_os = "macos")]
+            hashes.push(HfsHashFields {
+                hashed_size: u32::try_from(hashed).map_err(|_| err(MalformedInput))?,
+                reserved,
+                digest: r[32..64].try_into().expect("fixed HFS0 field"),
+            });
         }
         Ok(Members {
             header_size: size,
             spans,
             names: names_out,
+            #[cfg(target_os = "macos")]
+            hashes,
         })
     }
     /// Validates the supported gamecard image profile.
@@ -467,6 +511,125 @@ impl<R: Read + Seek> Parser<'_, R> {
         }
         Ok(compressed)
     }
+
+    #[cfg(target_os = "macos")]
+    fn xci_conversion_source(&mut self, end: u64) -> Result<XciConversionSource> {
+        let header = self.read(0, end, 0x200)?;
+        let root = u64le(&header[0x130..0x138]);
+        let root_members = self.hfs(root, end)?;
+        self.verify_hfs_hashes(&root_members)?;
+
+        let mut secure_members = Vec::new();
+        let mut update_seen = false;
+        let mut normal_seen = false;
+        let mut secure_seen = false;
+        let mut logo_seen = false;
+        for (name, &(start, stop)) in root_members.names.iter().zip(&root_members.spans) {
+            let partition = self.hfs(start, stop)?;
+            self.verify_hfs_hashes(&partition)?;
+            match name.as_str() {
+                "update" => {
+                    if update_seen || !partition.spans.is_empty() {
+                        return Err(err(UnsupportedStructure));
+                    }
+                    update_seen = true;
+                }
+                "normal" => {
+                    if normal_seen || !partition.spans.is_empty() {
+                        return Err(err(UnsupportedStructure));
+                    }
+                    normal_seen = true;
+                }
+                "logo" => {
+                    if logo_seen || !partition.spans.is_empty() {
+                        return Err(err(UnsupportedStructure));
+                    }
+                    logo_seen = true;
+                }
+                "secure" => {
+                    if secure_seen {
+                        return Err(err(UnsupportedStructure));
+                    }
+                    secure_seen = true;
+                    if partition.spans.len() != 2 {
+                        return Err(err(UnsupportedStructure));
+                    }
+                    secure_members
+                        .try_reserve_exact(partition.spans.len())
+                        .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
+                    for (&(member_start, member_end), member_name) in
+                        partition.spans.iter().zip(&partition.names)
+                    {
+                        let length = member_end
+                            .checked_sub(member_start)
+                            .ok_or(err(MalformedInput))?;
+                        secure_members.push(XciSecureMember {
+                            name: member_name.clone(),
+                            offset: member_start,
+                            length,
+                        });
+                    }
+                }
+                _ => return Err(err(UnsupportedStructure)),
+            }
+        }
+        if !update_seen || !normal_seen || !secure_seen || secure_members.len() != 2 {
+            return Err(err(UnsupportedStructure));
+        }
+        Ok(XciConversionSource { secure_members })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_hfs_hashes(&mut self, members: &Members) -> Result<()> {
+        if members.spans.len() != members.hashes.len() {
+            return Err(err(MalformedInput));
+        }
+        for (&(start, end), fields) in members.spans.iter().zip(&members.hashes) {
+            let member_length = end.checked_sub(start).ok_or(err(MalformedInput))?;
+            let hashed_size = u64::from(fields.hashed_size);
+            if hashed_size == 0
+                || hashed_size > member_length
+                || fields.reserved.iter().any(|byte| *byte != 0)
+            {
+                return Err(err(MalformedInput));
+            }
+            if self.hash_prefix(start, end, hashed_size)? != fields.digest {
+                return Err(err(MalformedInput));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn hash_prefix(&mut self, start: u64, end: u64, length: u64) -> Result<[u8; 32]> {
+        if add(start, length)? > end {
+            return Err(err(TruncatedInput));
+        }
+        charge(&mut self.budget.reads, length, READ_LIMIT)?;
+        self.reader
+            .seek(SeekFrom::Start(start))
+            .map_err(|_| err(ContentRecognitionErrorCode::InputUnavailable))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut remaining = length;
+        while remaining > 0 {
+            let count = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| err(LimitExceeded))?;
+            self.reader
+                .read_exact(&mut buffer[..count])
+                .map_err(|error| {
+                    err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                        TruncatedInput
+                    } else {
+                        ContentRecognitionErrorCode::InputUnavailable
+                    })
+                })?;
+            hasher.update(&buffer[..count]);
+            remaining -= count as u64;
+        }
+        Ok(hasher.finalize().into())
+    }
+
     /// Validates NCZ layout without reading key/counter fields or decoding encoded payload.
     fn ncz(&mut self, start: u64, end: u64) -> Result<bool> {
         if !self.marker(start, end, 0x4000, b"NCZSECTN")? {
@@ -742,6 +905,36 @@ impl<R: Read + Seek> Parser<'_, R> {
         }
     }
 }
+/// Extracts direct secure-partition members from a Slice A XCI image.
+///
+/// The image must carry the `HEAD` marker at offset `0x100`. Conversion also
+/// checks HFS0 prefix hashes and reserved fields, rejects unsupported
+/// partition payloads, and refuses compressed card members.
+#[cfg(target_os = "macos")]
+pub(crate) fn inspect_xci_for_conversion<R: Read + Seek>(
+    reader: &mut R,
+    length: u64,
+) -> Result<XciConversionSource> {
+    let compressed = {
+        let mut parser = Parser {
+            reader,
+            budget: Budget::default(),
+        };
+        if !parser.marker(0, length, 0x100, b"HEAD")? {
+            return Err(err(UnsupportedStructure));
+        }
+        parser.xci(length)?
+    };
+    if compressed {
+        return Err(err(UnsupportedStructure));
+    }
+    let mut parser = Parser {
+        reader,
+        budget: Budget::default(),
+    };
+    parser.xci_conversion_source(length)
+}
+
 pub(crate) fn recognize<R: Read + Seek>(
     reader: &mut R,
     size: u64,
@@ -1807,6 +2000,29 @@ mod tests {
             parser.ncz(0, bytes.len() as u64).unwrap_err().code(),
             LimitExceeded
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parser_hash_prefix_respects_read_budget() {
+        let bytes = [0_u8; 1];
+        let mut reader = Cursor::new(bytes);
+        let mut parser = Parser {
+            reader: &mut reader,
+            budget: Budget {
+                reads: READ_LIMIT,
+                ..Budget::default()
+            },
+        };
+
+        assert_eq!(
+            parser
+                .hash_prefix(0, bytes.len() as u64, 1)
+                .unwrap_err()
+                .code(),
+            LimitExceeded
+        );
+        assert_eq!(parser.reader.position(), 0);
     }
 
     #[test]

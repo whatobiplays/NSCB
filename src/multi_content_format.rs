@@ -59,6 +59,33 @@ pub(crate) struct ProgramPackage {
     pub(crate) members: Vec<ProgramMember>,
 }
 
+/// One entry in the metadata portion of a deterministic PFS0 layout.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Pfs0LayoutMember {
+    pub(crate) name: String,
+    pub(crate) data_offset: u64,
+    pub(crate) size: u64,
+}
+
+/// Shared PFS0 metadata and payload layout used by readers and writers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Pfs0WriteLayout {
+    pub(crate) metadata: Vec<u8>,
+    pub(crate) members: Vec<Pfs0LayoutMember>,
+    pub(crate) payload_offset: u64,
+    pub(crate) length: u64,
+}
+
+/// A source byte range and digest for one named PFS0 member.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Pfs0SourceMember {
+    pub(crate) name: String,
+    pub(crate) source_offset: u64,
+    pub(crate) size: u64,
+    pub(crate) sha256: Sha256Digest,
+}
+
 /// Failure categories for package parsing and deterministic PFS0 writing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FormatError {
@@ -250,14 +277,12 @@ pub(crate) fn write_pfs0<W: Write>(
     identities
         .try_reserve(ordered.len())
         .map_err(|_| FormatError::ResourceLimit)?;
-    let mut entries = Vec::new();
-    entries
+    let mut layout_members = Vec::new();
+    layout_members
         .try_reserve_exact(ordered.len())
         .map_err(|_| FormatError::ResourceLimit)?;
-    let mut string_table = Vec::new();
-    let mut payload_size = 0_u64;
 
-    for member in ordered {
+    for member in &ordered {
         if member.size == 0 {
             return Err(FormatError::InvalidPackage);
         }
@@ -273,8 +298,40 @@ pub(crate) fn write_pfs0<W: Write>(
             .ok_or(FormatError::InvalidPackage)?;
 
         let name = output_name(member.program_id, member.content_index)?;
-        let name_offset =
-            u32::try_from(string_table.len()).map_err(|_| FormatError::ResourceLimit)?;
+        layout_members.push((name, member.size));
+    }
+
+    let layout = build_pfs0_layout(&layout_members)?;
+    writer
+        .write_all(&layout.metadata)
+        .map_err(|_| FormatError::OutputUnavailable)?;
+
+    for member in ordered {
+        copy_member(writer, member, &mut on_chunk)?;
+    }
+    Ok(())
+}
+
+/// Builds PFS0 entry metadata once for both parsed-input and source-span paths.
+pub(crate) fn build_pfs0_layout(members: &[(String, u64)]) -> Result<Pfs0WriteLayout, FormatError> {
+    if members.len() > MAX_PFS0_ENTRIES {
+        return Err(FormatError::ResourceLimit);
+    }
+    let mut layout_members = Vec::new();
+    layout_members
+        .try_reserve_exact(members.len())
+        .map_err(|_| FormatError::ResourceLimit)?;
+    let mut names = HashSet::new();
+    names
+        .try_reserve(members.len())
+        .map_err(|_| FormatError::ResourceLimit)?;
+    let mut string_table = Vec::new();
+    let mut payload_size = 0_u64;
+    for (name, size) in members {
+        validate_output_name(name)?;
+        if *size == 0 || !names.insert(name.as_str()) {
+            return Err(FormatError::InvalidPackage);
+        }
         let added_name_size = name
             .len()
             .checked_add(1)
@@ -291,50 +348,148 @@ pub(crate) fn write_pfs0<W: Write>(
             .map_err(|_| FormatError::ResourceLimit)?;
         string_table.extend_from_slice(name.as_bytes());
         string_table.push(0);
-
-        entries.push(OutputEntry {
-            member,
-            name_offset,
+        layout_members.push(Pfs0LayoutMember {
+            name: name.clone(),
             data_offset: payload_size,
+            size: *size,
         });
         payload_size = payload_size
-            .checked_add(member.size)
+            .checked_add(*size)
             .ok_or(FormatError::ResourceLimit)?;
     }
 
-    let entry_count = u32::try_from(entries.len()).map_err(|_| FormatError::ResourceLimit)?;
+    let entry_count =
+        u32::try_from(layout_members.len()).map_err(|_| FormatError::ResourceLimit)?;
     let table_size = u32::try_from(string_table.len()).map_err(|_| FormatError::ResourceLimit)?;
+    let mut metadata = Vec::new();
+    let metadata_size = PFS0_HEADER_SIZE
+        .checked_add(
+            layout_members
+                .len()
+                .checked_mul(PFS0_ENTRY_SIZE)
+                .ok_or(FormatError::ResourceLimit)?,
+        )
+        .and_then(|size| size.checked_add(string_table.len()))
+        .ok_or(FormatError::ResourceLimit)?;
+    metadata
+        .try_reserve_exact(metadata_size)
+        .map_err(|_| FormatError::ResourceLimit)?;
     let mut header = [0_u8; PFS0_HEADER_SIZE];
     header[..4].copy_from_slice(b"PFS0");
     header[4..8].copy_from_slice(&entry_count.to_le_bytes());
     header[8..12].copy_from_slice(&table_size.to_le_bytes());
-    writer
-        .write_all(&header)
-        .map_err(|_| FormatError::OutputUnavailable)?;
-
-    for entry in &entries {
+    metadata.extend_from_slice(&header);
+    let mut name_offset = 0_u32;
+    for member in &layout_members {
         let mut raw = [0_u8; PFS0_ENTRY_SIZE];
-        raw[..8].copy_from_slice(&entry.data_offset.to_le_bytes());
-        raw[8..16].copy_from_slice(&entry.member.size.to_le_bytes());
-        raw[16..20].copy_from_slice(&entry.name_offset.to_le_bytes());
-        writer
-            .write_all(&raw)
-            .map_err(|_| FormatError::OutputUnavailable)?;
+        raw[..8].copy_from_slice(&member.data_offset.to_le_bytes());
+        raw[8..16].copy_from_slice(&member.size.to_le_bytes());
+        raw[16..20].copy_from_slice(&name_offset.to_le_bytes());
+        metadata.extend_from_slice(&raw);
+        name_offset = name_offset
+            .checked_add(
+                u32::try_from(member.name.len() + 1).map_err(|_| FormatError::ResourceLimit)?,
+            )
+            .ok_or(FormatError::ResourceLimit)?;
     }
-    writer
-        .write_all(&string_table)
-        .map_err(|_| FormatError::OutputUnavailable)?;
+    metadata.extend_from_slice(&string_table);
+    let payload_offset = u64::try_from(metadata.len()).map_err(|_| FormatError::ResourceLimit)?;
+    let length = payload_offset
+        .checked_add(payload_size)
+        .ok_or(FormatError::ResourceLimit)?;
+    Ok(Pfs0WriteLayout {
+        metadata,
+        members: layout_members,
+        payload_offset,
+        length,
+    })
+}
 
-    for entry in entries {
-        copy_member(writer, entry.member, &mut on_chunk)?;
+/// Writes a deterministic PFS0 from verified spans in one source file.
+/// Reports the metadata block and each payload chunk through `on_chunk` after
+/// the corresponding output bytes have been written.
+#[cfg(target_os = "macos")]
+pub(crate) fn write_pfs0_from_source<W: Write>(
+    writer: &mut W,
+    source: &mut File,
+    layout: &Pfs0WriteLayout,
+    members: &[Pfs0SourceMember],
+    mut on_chunk: impl FnMut(u64) -> Result<(), FormatError>,
+) -> Result<(), FormatError> {
+    if layout.members.len() != members.len()
+        || layout
+            .members
+            .iter()
+            .zip(members)
+            .any(|(expected, actual)| expected.name != actual.name || expected.size != actual.size)
+    {
+        return Err(FormatError::InvalidPackage);
+    }
+    let source_size = source
+        .metadata()
+        .map_err(|_| FormatError::SourceUnavailable)?
+        .len();
+    for member in members {
+        let end = member
+            .source_offset
+            .checked_add(member.size)
+            .ok_or(FormatError::InvalidPackage)?;
+        if end > source_size {
+            return Err(FormatError::InvalidPackage);
+        }
+    }
+    let metadata_length =
+        u64::try_from(layout.metadata.len()).map_err(|_| FormatError::ResourceLimit)?;
+    writer
+        .write_all(&layout.metadata)
+        .map_err(|_| FormatError::OutputUnavailable)?;
+    on_chunk(metadata_length)?;
+    let mut buffer = [0_u8; COPY_CHUNK_SIZE];
+    for member in members {
+        source
+            .seek(SeekFrom::Start(member.source_offset))
+            .map_err(|_| FormatError::SourceUnavailable)?;
+        let mut remaining = member.size;
+        let mut hasher = Sha256::new();
+        while remaining > 0 {
+            let wanted = usize::try_from(remaining.min(buffer.len() as u64))
+                .map_err(|_| FormatError::ResourceLimit)?;
+            let read = source
+                .read(&mut buffer[..wanted])
+                .map_err(|_| FormatError::SourceUnavailable)?;
+            if read == 0 {
+                return Err(FormatError::SourceUnavailable);
+            }
+            writer
+                .write_all(&buffer[..read])
+                .map_err(|_| FormatError::OutputUnavailable)?;
+            hasher.update(&buffer[..read]);
+            remaining -= u64::try_from(read).map_err(|_| FormatError::ResourceLimit)?;
+            on_chunk(u64::try_from(read).map_err(|_| FormatError::ResourceLimit)?)?;
+        }
+        let digest = Sha256Digest::from_bytes(hasher.finalize().into());
+        if digest != member.sha256 {
+            return Err(FormatError::SourceUnavailable);
+        }
     }
     Ok(())
 }
 
-struct OutputEntry<'a> {
-    member: &'a ProgramMember,
-    name_offset: u32,
-    data_offset: u64,
+fn validate_output_name(name: &str) -> Result<(), FormatError> {
+    if name.is_empty()
+        || name.len() > MAX_NAME_SIZE
+        || !name.is_ascii()
+        || name == "."
+        || name == ".."
+        || name.ends_with('.')
+        || name.ends_with(' ')
+        || name
+            .bytes()
+            .any(|byte| byte < b' ' || byte == b'/' || byte == b'\\' || byte == b':')
+    {
+        return Err(FormatError::InvalidPackage);
+    }
+    Ok(())
 }
 
 fn output_name(program_id: u64, content_index: u32) -> Result<String, FormatError> {

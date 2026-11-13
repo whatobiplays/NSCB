@@ -43,6 +43,8 @@ pub struct NspSemanticQualificationRequest {
     input: PathBuf,
     key_file: PathBuf,
     cancellation: Option<crate::CancellationHandle>,
+    #[cfg(target_os = "macos")]
+    expected_key_snapshot: Option<crate::file_identity::FileSnapshot>,
 }
 
 impl NspSemanticQualificationRequest {
@@ -52,7 +54,19 @@ impl NspSemanticQualificationRequest {
             input: input.into(),
             key_file: key_file.into(),
             cancellation: None,
+            #[cfg(target_os = "macos")]
+            expected_key_snapshot: None,
         }
+    }
+
+    /// Binds qualification to the key-file snapshot captured by its operation plan.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn with_expected_key_snapshot(
+        mut self,
+        snapshot: crate::file_identity::FileSnapshot,
+    ) -> Self {
+        self.expected_key_snapshot = Some(snapshot);
+        self
     }
 
     /// Attaches host-owned cancellation state to the request.
@@ -137,7 +151,7 @@ pub struct NspSemanticQualificationError {
 }
 
 impl NspSemanticQualificationError {
-    const fn new(code: NspSemanticQualificationErrorCode) -> Self {
+    pub(crate) const fn new(code: NspSemanticQualificationErrorCode) -> Self {
         Self { code }
     }
 
@@ -323,6 +337,15 @@ struct OpenedInput {
     size: u64,
 }
 
+/// Bounded random-access input shared by path-based and virtual PFS0 sources.
+pub(crate) trait NspSemanticInput: Read + Seek {
+    fn input_size(&self) -> u64;
+    fn revalidate(
+        &self,
+        code: NspSemanticQualificationErrorCode,
+    ) -> Result<(), NspSemanticQualificationError>;
+}
+
 impl OpenedInput {
     fn revalidate(
         &self,
@@ -349,6 +372,31 @@ impl OpenedInput {
             return Err(NspSemanticQualificationError::new(code));
         }
         Ok(())
+    }
+}
+
+impl Read for OpenedInput {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+
+impl Seek for OpenedInput {
+    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+impl NspSemanticInput for OpenedInput {
+    fn input_size(&self) -> u64 {
+        self.size
+    }
+
+    fn revalidate(
+        &self,
+        code: NspSemanticQualificationErrorCode,
+    ) -> Result<(), NspSemanticQualificationError> {
+        OpenedInput::revalidate(self, code)
     }
 }
 
@@ -396,6 +444,35 @@ pub(crate) fn qualify(
     qualify_inner(request, &mut checkpoint)
 }
 
+/// Runs qualification and checks for cancellation at each checkpoint.
+#[cfg(target_os = "macos")]
+pub(crate) fn qualify_with_cancellation_probe<F>(
+    request: NspSemanticQualificationRequest,
+    mut is_cancelled: F,
+) -> Result<NspSemanticQualificationResult, NspSemanticQualificationError>
+where
+    F: FnMut() -> bool,
+{
+    let cancellation = crate::CancellationHandle::new();
+    let request = request.with_cancellation(cancellation.clone());
+    let mut checkpoint = |_| {
+        if is_cancelled() {
+            cancellation.cancel();
+        }
+    };
+    qualify_inner(request, &mut checkpoint)
+}
+
+/// Qualifies a bounded virtual package using the same rules as a path-backed NSP.
+#[cfg(target_os = "macos")]
+pub(crate) fn qualify_with_input<I: NspSemanticInput>(
+    request: NspSemanticQualificationRequest,
+    input: I,
+) -> Result<NspSemanticQualificationResult, NspSemanticQualificationError> {
+    let mut checkpoint = |_| {};
+    qualify_input_inner(request, input, &mut checkpoint)
+}
+
 #[cfg(test)]
 fn qualify_with_checkpoint<F>(
     request: NspSemanticQualificationRequest,
@@ -415,18 +492,32 @@ where
     F: FnMut(Checkpoint),
 {
     check_cancelled(&request)?;
-    let mut input = open_snapshot_file(
+    let input = open_snapshot_file(
         &request.input,
         NspSemanticQualificationErrorCode::InputUnavailable,
         NspSemanticQualificationErrorCode::InputChangedDuringQualification,
     )?;
-    validate_input_size(input.size)?;
-    input.file.seek(SeekFrom::Start(0)).map_err(|_| {
+    qualify_input_inner(request, input, checkpoint)
+}
+
+fn qualify_input_inner<I, F>(
+    request: NspSemanticQualificationRequest,
+    mut input: I,
+    checkpoint: &mut F,
+) -> Result<NspSemanticQualificationResult, NspSemanticQualificationError>
+where
+    I: NspSemanticInput,
+    F: FnMut(Checkpoint),
+{
+    check_cancelled(&request)?;
+    validate_input_size(input.input_size())?;
+    input.seek(SeekFrom::Start(0)).map_err(|_| {
         NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InputUnavailable)
     })?;
+    let input_size = input.input_size();
     let outer = match crate::pfs0::probe_with_limits(
-        &mut input.file,
-        input.size,
+        &mut input,
+        input_size,
         OUTER_PFS0_MAX_ENTRIES,
         MAX_PFS0_METADATA_BYTES,
     ) {
@@ -483,6 +574,16 @@ where
         NspSemanticQualificationErrorCode::KeyFileUnavailable,
         NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
     )?;
+    #[cfg(target_os = "macos")]
+    if request
+        .expected_key_snapshot
+        .as_ref()
+        .is_some_and(|expected| expected != &key_file.snapshot)
+    {
+        return Err(NspSemanticQualificationError::new(
+            NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
+        ));
+    }
     if key_file.size > crate::key_file::MAX_KEY_FILE_BYTES {
         return Err(NspSemanticQualificationError::new(
             NspSemanticQualificationErrorCode::KeyFileLimitExceeded,
@@ -503,8 +604,8 @@ where
         checkpoint(Checkpoint::MemberStarted);
         check_cancelled(&request)?;
         let record = match read_nca_member(
-            &mut input.file,
-            input.size,
+            &mut input,
+            input_size,
             entry,
             digests.members[index],
             &keys,
@@ -746,16 +847,17 @@ fn pfs0_payload_is_fully_accounted(
     Ok(next_offset == probe.payload_size)
 }
 
-fn hash_source<F>(
-    input: &mut OpenedInput,
+fn hash_source<I, F>(
+    input: &mut I,
     members: Option<&[ContainerProbeEntry]>,
     request: &NspSemanticQualificationRequest,
     checkpoint: &mut F,
 ) -> Result<SourceDigests, NspSemanticQualificationError>
 where
+    I: NspSemanticInput,
     F: FnMut(Checkpoint),
 {
-    input.file.seek(SeekFrom::Start(0)).map_err(|_| {
+    input.seek(SeekFrom::Start(0)).map_err(|_| {
         NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InputUnavailable)
     })?;
     let mut source = Sha256::new();
@@ -765,13 +867,14 @@ where
         AllocationSite::NspSourceHashBuffer,
     )?;
     let mut offset = 0_u64;
-    while offset < input.size {
+    let input_size = input.input_size();
+    while offset < input_size {
         check_cancelled(request)?;
         let wanted =
-            usize::try_from((input.size - offset).min(buffer.len() as u64)).map_err(|_| {
+            usize::try_from((input_size - offset).min(buffer.len() as u64)).map_err(|_| {
                 NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InternalIo)
             })?;
-        let read = input.file.read(&mut buffer[..wanted]).map_err(|_| {
+        let read = input.read(&mut buffer[..wanted]).map_err(|_| {
             NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InputUnavailable)
         })?;
         if read == 0 {
@@ -1772,6 +1875,30 @@ mod tests {
         })
         .expect_err("cancellation at the last chunk must not become a result");
         assert_eq!(error.code(), NspSemanticQualificationErrorCode::Cancelled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn expected_key_snapshot_rejects_a_replaced_key_file() {
+        let input = TempFile::new(&two_member_pfs0());
+        let expected_key = TempFile::new(&key_file());
+        let opened_key = TempFile::new(&key_file());
+        let expected_handle = std::fs::File::open(expected_key.path()).expect("open expected key");
+        let expected_metadata = expected_handle.metadata().expect("expected key metadata");
+        let expected_identity =
+            crate::file_identity::handle_identity(&expected_handle).expect("expected key identity");
+        let expected_snapshot =
+            crate::file_identity::file_snapshot(&expected_metadata, Some(expected_identity));
+        let request = NspSemanticQualificationRequest::new(input.path(), opened_key.path())
+            .with_expected_key_snapshot(expected_snapshot);
+
+        let error = qualify_with_checkpoint(request, |_| {})
+            .expect_err("a replaced key file must be rejected");
+
+        assert_eq!(
+            error.code(),
+            NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification
+        );
     }
 
     #[test]

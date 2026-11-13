@@ -116,3 +116,9 @@ jobs:
           cargo test --locked --no-default-features --test nsp_semantic_qualification
           cargo test --locked --no-default-features --lib reservation -- --test-threads=1
           cargo test --locked --no-default-features --lib test_allocator::tests:: -- --test-threads=1
+
+      - name: Run XCI conversion capability tests
+        shell: bash
+        run: |
+          cargo test --locked --no-default-features --test xci_to_nsp
+          cargo test --locked --features standalone-job-history --test xci_to_nsp_cli
