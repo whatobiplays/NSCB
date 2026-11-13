@@ -1,0 +1,58 @@
+Repository: whatobiplays/NSCB
+Issue / PR: #73 / #74
+Policy revision: 142422527de28b8e20dea1158d2f54d020dcdcd5
+Source revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4
+Command: cargo test --locked --no-default-features --test nsp_semantic_qualification
+Exact cargo argv: ["test","--locked","--no-default-features","--test","nsp_semantic_qualification"]
+Capture wrapper argv: rtk proxy cargo test --locked --no-default-features --test nsp_semantic_qualification
+Working directory: <REPO_ROOT>
+Start UTC: 2026-11-13T05:23:29.8582750+00:00
+End UTC: 2026-11-13T05:23:34.5591922+00:00
+Exit status: 0
+Test results: passed=20; failed=0; ignored=0; skipped=0; measured=0; filtered_out=0
+Raw stdout SHA-256: 34579d59886f992a678a365ebc3912b43ff737c35b096d3efa91bbb0b2ba9abb
+Raw stderr SHA-256: 801027f19514726878da2ec1436767aa7143317f335c52566d5d9d6ec8e6143a
+Sanitization: user-home and worktree paths redacted in this derivative; original raw streams are unchanged.
+
+===== STDOUT =====
+
+running 20 tests
+test pre_cancelled_request_returns_typed_cancellation_before_opening_paths ... ok
+test request_debug_output_does_not_expose_source_or_key_paths ... ok
+test rejects_outer_pfs0_metadata_above_the_profile_limit_before_key_access ... ok
+test rejects_a_leading_unreferenced_outer_pfs0_payload_gap ... ok
+test rejects_an_empty_outer_pfs0_member ... ok
+test rejects_trailing_unreferenced_outer_pfs0_payload ... ok
+test rejects_a_gap_between_outer_pfs0_member_spans ... ok
+test rejects_unreferenced_payload_in_meta_section_pfs0 ... ok
+test rejects_a_truncated_cnmt_without_parsing_past_its_member ... ok
+test outer_pfs0_table_order_does_not_change_complete_payload_accounting ... ok
+test verifies_multiple_hash_table_entries_and_a_partial_final_block ... ok
+test rejects_extra_outer_members_and_plain_pfs0_framing ... ok
+test rejects_rights_bearing_and_unsupported_key_generation_profiles ... ok
+test qualifies_byte_backed_two_member_profile_despite_misleading_names ... ok
+test reports_missing_and_malformed_key_prerequisites_separately ... ok
+test enforces_the_program_section_entry_count_ceiling ... ok
+test rejects_meta_role_title_mismatch_and_unsupported_cnmt_metadata ... ok
+test rejects_unreferenced_payload_in_program_section_pfs0 ... ok
+test rejects_unexpected_section_hash_profiles_and_duplicate_member_roles ... ok
+test rejects_each_program_row_mismatch_after_section_integrity_passes ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.19s
+
+
+
+===== STDERR =====
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
+warning: unused import: `std::os::windows::io::AsRawHandle`
+  --> src\provider\process.rs:16:5
+   |
+16 | use std::os::windows::io::AsRawHandle;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `nscb` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.33s
+     Running tests\nsp_semantic_qualification.rs (target\debug\deps\nsp_semantic_qualification-778ee10a2df2229c.exe)
+

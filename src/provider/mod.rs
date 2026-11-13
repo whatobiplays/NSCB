@@ -413,7 +413,9 @@ fn execute_in(
 
 fn classify_header_error(error: crate::nca::HeaderError) -> ProviderFailure {
     match error.code() {
-        InspectionErrorCode::InternalIo => ProviderFailure::Internal(error.code()),
+        InspectionErrorCode::InternalIo | InspectionErrorCode::AllocationFailed => {
+            ProviderFailure::Internal(error.code())
+        }
         code => ProviderFailure::Prerequisite(code),
     }
 }
@@ -503,6 +505,14 @@ mod tests {
     use super::preflight;
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     use crate::inspection::ProvisioningPolicy;
+
+    #[test]
+    fn nca_allocation_failure_is_an_internal_inspection_failure() {
+        assert_eq!(
+            super::classify_header_error(crate::nca::HeaderError::AllocationFailed),
+            super::ProviderFailure::Internal(InspectionErrorCode::AllocationFailed)
+        );
+    }
 
     #[test]
     fn parser_profile_failures_remain_prerequisite_failures() {

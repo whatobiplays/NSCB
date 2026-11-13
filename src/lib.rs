@@ -10,6 +10,7 @@
 //! capabilities. They publish only independently checked output bytes through
 //! the host filesystem's qualified atomic rename or link operations.
 
+mod allocation;
 mod engine;
 mod error;
 mod file_identity;
@@ -35,9 +36,21 @@ mod strict_json;
 mod verification;
 
 #[cfg(test)]
+mod test_allocator;
+
+#[cfg(test)]
+#[global_allocator]
+static QUALIFICATION_TEST_ALLOCATOR: test_allocator::TestAllocator = test_allocator::TestAllocator;
+
+#[cfg(test)]
 #[path = "../tests/support/synthetic_verification.rs"]
 #[allow(dead_code)]
 mod test_synthetic_verification;
+
+#[cfg(test)]
+#[path = "../tests/support/synthetic_nsp_qualification.rs"]
+#[allow(dead_code)]
+mod test_synthetic_nsp_qualification;
 
 pub use recognition::{
     CompressionVariant, ContentRecognitionError, ContentRecognitionErrorCode,

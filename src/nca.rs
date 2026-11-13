@@ -5,6 +5,7 @@
 //! header key. It deliberately returns only header facts;
 //! filesystem payload validation belongs to the operation that owns that
 //! partition. Signature, authenticity, and integrity are not established here.
+use crate::allocation::{AllocationSite, reserve_exact};
 use crate::inspection::InspectionErrorCode;
 use aes::Aes128;
 use aes::cipher::KeyInit;
@@ -23,6 +24,7 @@ pub(crate) enum HeaderError {
     TruncatedInput,
     MalformedInput,
     InputUnavailable,
+    AllocationFailed,
 }
 
 impl HeaderError {
@@ -32,6 +34,7 @@ impl HeaderError {
             Self::TruncatedInput => InspectionErrorCode::TruncatedInput,
             Self::MalformedInput => InspectionErrorCode::MalformedInput,
             Self::InputUnavailable => InspectionErrorCode::InputUnavailable,
+            Self::AllocationFailed => InspectionErrorCode::AllocationFailed,
         }
     }
 }
@@ -148,6 +151,10 @@ pub(crate) struct HeaderSyntax {
 impl HeaderSyntax {
     /// Returns the descriptor indices of partitions that declare a byte range,
     /// in descriptor order.
+    ///
+    /// Verification uses this bounded list to select partition checks. The
+    /// header has four descriptors, and NSP semantic qualification does not
+    /// call this helper.
     pub(crate) fn present_partition_indices(&self) -> Vec<u8> {
         self.spans
             .iter()
@@ -211,6 +218,8 @@ pub(crate) fn parse_header_syntax(
     }
 
     let mut spans = Vec::new();
+    reserve_exact(&mut spans, MAX_PARTITIONS, AllocationSite::NcaHeaderSpans)
+        .map_err(|_| HeaderError::AllocationFailed)?;
     for index in 0..MAX_PARTITIONS {
         let descriptor = &block[0x240 + index * 16..0x250 + index * 16];
         let offset = u32le(&descriptor[..4])
@@ -278,6 +287,13 @@ pub(crate) fn complete_header(syntax: HeaderSyntax, file_size: u64) -> Result<He
     let mut previous_end = HEADER_SIZE as u64;
     let mut absent = false;
     let mut partitions = Vec::new();
+    let partition_count = syntax.spans.iter().filter(|span| !span.absent).count();
+    reserve_exact(
+        &mut partitions,
+        partition_count,
+        AllocationSite::NcaHeaderPartitions,
+    )
+    .map_err(|_| HeaderError::AllocationFailed)?;
     for span in &syntax.spans {
         if span.absent {
             absent = true;
@@ -426,7 +442,10 @@ pub(crate) fn synthetic_nca_with_header_fields_and_key(
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentType, Distribution, HeaderError, read_header};
+    use super::{
+        ContentType, Distribution, HeaderError, complete_header, parse_header_syntax, read_header,
+    };
+    use crate::inspection::InspectionErrorCode;
     use std::io::{Seek, Write};
 
     const KEY: [u8; 32] = [0x42; 32];
@@ -464,6 +483,60 @@ mod tests {
             block[fs + 5] = u8::from(extended);
         }
         block
+    }
+
+    #[test]
+    fn partition_indices_keep_descriptor_order_and_skip_absent_entries() {
+        let mut block = fixture(
+            &[
+                (0xc00, 0x200, 1, 1, 1, false),
+                (0xe00, 0x200, 1, 1, 1, false),
+            ],
+            0x1000,
+        );
+        block.copy_within(0x250..0x260, 0x260);
+        block[0x250..0x260].fill(0);
+        block.copy_within(0x600..0x800, 0x800);
+        block[0x600..0x800].fill(0);
+
+        let syntax = parse_header_syntax(&block, 0x1000).expect("synthetic NCA header parses");
+
+        assert_eq!(syntax.present_partition_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn span_reservation_refusal_is_typed_and_inspection_mapped() {
+        let block = fixture(&[(0xc00, 0x200, 1, 1, 1, false)], 0xe00);
+        let (result, observation) = crate::test_allocator::with_refusal(
+            crate::allocation::AllocationSite::NcaHeaderSpans,
+            1,
+            || parse_header_syntax(&block, 0xe00),
+        );
+
+        assert_eq!(result, Err(HeaderError::AllocationFailed));
+        assert!(observation.is_exact_refusal(crate::allocation::AllocationSite::NcaHeaderSpans, 1));
+        assert_eq!(observation.site_calls, 1);
+        assert_eq!(
+            HeaderError::AllocationFailed.code(),
+            InspectionErrorCode::AllocationFailed
+        );
+    }
+
+    #[test]
+    fn partition_reservation_refusal_is_typed() {
+        let block = fixture(&[(0xc00, 0x200, 1, 1, 1, false)], 0xe00);
+        let syntax = parse_header_syntax(&block, 0xe00).expect("synthetic NCA syntax parses");
+        let (result, observation) = crate::test_allocator::with_refusal(
+            crate::allocation::AllocationSite::NcaHeaderPartitions,
+            1,
+            || complete_header(syntax, 0xe00),
+        );
+
+        assert_eq!(result, Err(HeaderError::AllocationFailed));
+        assert!(
+            observation.is_exact_refusal(crate::allocation::AllocationSite::NcaHeaderPartitions, 1)
+        );
+        assert_eq!(observation.site_calls, 1);
     }
 
     fn encrypted_block(mut block: [u8; 0xc00]) -> [u8; 0xc00] {

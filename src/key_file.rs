@@ -4,6 +4,7 @@
 //! the parsed header key for its helper, while standalone key replacement can
 //! validate the header and persist every original entry unchanged.
 
+use crate::allocation::{AllocationSite, reserve_exact};
 use std::fmt;
 use std::io::Read;
 use zeroize::{Zeroize, Zeroizing};
@@ -101,8 +102,7 @@ pub(crate) fn read_nsp_qualification_keys(
     }
     let size = usize::try_from(file_size).map_err(|_| NspKeyFileError::LimitExceeded)?;
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes
-        .try_reserve_exact(size)
+    reserve_exact(&mut bytes, size, AllocationSite::KeyFileBytes)
         .map_err(|_| NspKeyFileError::AllocationFailed)?;
     bytes.resize(size, 0);
     reader

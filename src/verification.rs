@@ -623,6 +623,7 @@ fn map_header_error(error: HeaderError) -> VerificationErrorCode {
         HeaderError::TruncatedInput => VerificationErrorCode::TruncatedInput,
         HeaderError::MalformedInput => VerificationErrorCode::MalformedInput,
         HeaderError::InputUnavailable => VerificationErrorCode::InputUnavailable,
+        HeaderError::AllocationFailed => VerificationErrorCode::AllocationFailed,
     }
 }
 
@@ -1469,6 +1470,14 @@ fn read_trust_anchor(path: &Path, generation: u8) -> Result<TrustAnchor, Verific
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nca_allocation_failure_maps_to_verification_allocation_failed() {
+        assert_eq!(
+            super::map_header_error(crate::nca::HeaderError::AllocationFailed),
+            super::VerificationErrorCode::AllocationFailed
+        );
+    }
+
     use super::*;
     use crate::test_synthetic_verification as synthetic_verification;
     use std::io::Cursor;

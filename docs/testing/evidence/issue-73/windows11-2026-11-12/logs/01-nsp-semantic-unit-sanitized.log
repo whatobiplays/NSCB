@@ -1,0 +1,161 @@
+Repository: whatobiplays/NSCB
+Issue / PR: #73 / #74
+Policy revision: 142422527de28b8e20dea1158d2f54d020dcdcd5
+Source revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4
+Command: cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::
+Exact cargo argv: ["test","--locked","--no-default-features","--lib","nsp_semantic_qualification::tests::"]
+Capture wrapper argv: rtk proxy cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::
+Working directory: <REPO_ROOT>
+Start UTC: 2026-11-13T05:23:28.9478068+00:00
+End UTC: 2026-11-13T05:23:29.3297639+00:00
+Exit status: 0
+Test results: passed=11; failed=0; ignored=0; skipped=0; measured=0; filtered_out=250
+Raw stdout SHA-256: 4828a638b90114a5d0781df7e9f7d226ba7060852eec20d1418714e2084aebab
+Raw stderr SHA-256: fa26a9f73325ff6ff957b439c63cb0927c77ec4bef8a3b08f35a804ac626eee7
+Sanitization: user-home and worktree paths redacted in this derivative; original raw streams are unchanged.
+
+===== STDOUT =====
+
+running 11 tests
+test nsp_semantic_qualification::tests::bounded_reader_propagates_parent_io_errors ... ok
+test nsp_semantic_qualification::tests::bounded_reader_checks_parent_ranges_and_limits_reads_and_seeks ... ok
+test nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error ... ok
+test nsp_semantic_qualification::tests::input_size_limit_accepts_its_boundary_and_rejects_the_next_byte ... ok
+test nsp_semantic_qualification::tests::ctr_counter_uses_reversed_section_ctr_and_absolute_section_block ... ok
+test nsp_semantic_qualification::tests::key_byte_reservation_refusal_is_typed_and_site_attributed ... ok
+test nsp_semantic_qualification::tests::nca_member_source_read_failure_is_sanitized_and_typed ... ok
+test nsp_semantic_qualification::tests::section_regions_accept_only_checked_nonoverlapping_ranges ... ok
+test nsp_semantic_qualification::tests::source_mutation_after_hashing_returns_changed_input_error ... ok
+test nsp_semantic_qualification::tests::cancellation_after_the_final_source_hash_chunk_is_reported ... ok
+test nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 250 filtered out; finished in 0.12s
+
+
+
+===== STDERR =====
+warning: unused imports: `ProcessFailure` and `run`
+   --> src\provider\process.rs:557:17
+    |
+557 |     use super::{ProcessFailure, ProcessLimits, run};
+    |                 ^^^^^^^^^^^^^^                 ^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::inspection::CancellationHandle`
+   --> src\provider\process.rs:558:9
+    |
+558 |     use crate::inspection::CancellationHandle;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::ffi::OsString`
+   --> src\provider\process.rs:559:9
+    |
+559 |     use std::ffi::OsString;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs`
+   --> src\provider\process.rs:560:9
+    |
+560 |     use std::fs;
+    |         ^^^^^^^
+
+warning: unused import: `Path`
+   --> src\provider\process.rs:561:21
+    |
+561 |     use std::path::{Path, PathBuf};
+    |                     ^^^^
+
+warning: unused import: `std::sync::Arc`
+   --> src\provider\process.rs:562:9
+    |
+562 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AtomicUsize`
+   --> src\provider\process.rs:563:40
+    |
+563 |     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    |                                        ^^^^^^^^^^^
+
+warning: unused import: `Instant`
+   --> src\provider\process.rs:564:31
+    |
+564 |     use std::time::{Duration, Instant};
+    |                               ^^^^^^^
+
+warning: unused imports: `PreparedInputs`, `WatchedFile`, `execute_in`, `inspect_with_containment`, `nstool`, `prepare_inputs_with`, and `process`
+   --> src\provider\mod.rs:489:9
+    |
+489 |         PreparedInputs, ProviderFailure, WatchedFile, classify_parse_error, execute_in,
+    |         ^^^^^^^^^^^^^^                   ^^^^^^^^^^^                        ^^^^^^^^^^
+490 |         inspect_with_containment, nstool, open_regular, prepare_inputs, prepare_inputs_with,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^                                ^^^^^^^^^^^^^^^^^^^
+491 |         process,
+    |         ^^^^^^^
+
+warning: unused imports: `CancellationHandle` and `validate_provider_report`
+   --> src\provider\mod.rs:494:9
+    |
+494 |         CancellationHandle, InspectionErrorCode, InspectionHost, InspectionRequest,
+    |         ^^^^^^^^^^^^^^^^^^
+495 |         MemoryMonitoringPolicy, validate_provider_report,
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src\provider\mod.rs:501:9
+    |
+501 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Duration` and `Instant`
+   --> src\provider\mod.rs:502:21
+    |
+502 |     use std::time::{Duration, Instant};
+    |                     ^^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::os::windows::io::AsRawHandle`
+  --> src\provider\process.rs:16:5
+   |
+16 | use std::os::windows::io::AsRawHandle;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `synthetic_supported_nca` is never used
+   --> src\nca.rs:399:15
+    |
+399 | pub(crate) fn synthetic_supported_nca() -> Vec<u8> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `uncontained_test_limits` is never used
+   --> src\provider\process.rs:103:19
+    |
+101 | impl ProcessLimits {
+    | ------------------ associated function in this implementation
+102 |     #[cfg(test)]
+103 |     pub(crate) fn uncontained_test_limits(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `NEXT_SCRIPT` is never used
+   --> src\provider\process.rs:566:12
+    |
+566 |     static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(1);
+    |            ^^^^^^^^^^^
+
+warning: function `workdir` is never used
+   --> src\provider\process.rs:621:8
+    |
+621 |     fn workdir() -> PathBuf {
+    |        ^^^^^^^
+
+warning: function `test_limits` is never used
+   --> src\provider\process.rs:626:8
+    |
+626 |     fn test_limits(deadline: Duration, stdout: usize, stderr: usize) -> ProcessLimits {
+    |        ^^^^^^^^^^^
+
+warning: `nscb` (lib test) generated 18 warnings (run `cargo fix --lib -p nscb --tests` to apply 12 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running unittests src\lib.rs (target\debug\deps\nscb-3f2a31f6309dccf7.exe)
+

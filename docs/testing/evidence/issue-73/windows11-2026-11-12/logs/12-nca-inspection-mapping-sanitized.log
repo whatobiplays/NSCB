@@ -1,0 +1,151 @@
+Repository: whatobiplays/NSCB
+Issue / PR: #73 / #74
+Policy revision: 142422527de28b8e20dea1158d2f54d020dcdcd5
+Source revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4
+Command: cargo test --locked --no-default-features --lib nca::tests::span_reservation_refusal_is_typed_and_inspection_mapped -- --test-threads=1
+Exact cargo argv: ["test","--locked","--no-default-features","--lib","nca::tests::span_reservation_refusal_is_typed_and_inspection_mapped","--","--test-threads=1"]
+Capture wrapper argv: rtk proxy cargo test --locked --no-default-features --lib nca::tests::span_reservation_refusal_is_typed_and_inspection_mapped -- --test-threads=1
+Working directory: <REPO_ROOT>
+Start UTC: 2026-11-13T05:23:36.4678963+00:00
+End UTC: 2026-11-13T05:23:36.6789884+00:00
+Exit status: 0
+Test results: passed=1; failed=0; ignored=0; skipped=0; measured=0; filtered_out=260
+Raw stdout SHA-256: 5d7a30ff4e4abdaca5d9e199d2893acd9551703057ff8e4d7e167d81b9dc270e
+Raw stderr SHA-256: f7703a1937fae989f08b17f3ce767e017b346c68bfa16a82fa313013cf3fff26
+Sanitization: user-home and worktree paths redacted in this derivative; original raw streams are unchanged.
+
+===== STDOUT =====
+
+running 1 test
+test nca::tests::span_reservation_refusal_is_typed_and_inspection_mapped ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s
+
+
+
+===== STDERR =====
+warning: unused imports: `ProcessFailure` and `run`
+   --> src\provider\process.rs:557:17
+    |
+557 |     use super::{ProcessFailure, ProcessLimits, run};
+    |                 ^^^^^^^^^^^^^^                 ^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::inspection::CancellationHandle`
+   --> src\provider\process.rs:558:9
+    |
+558 |     use crate::inspection::CancellationHandle;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::ffi::OsString`
+   --> src\provider\process.rs:559:9
+    |
+559 |     use std::ffi::OsString;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs`
+   --> src\provider\process.rs:560:9
+    |
+560 |     use std::fs;
+    |         ^^^^^^^
+
+warning: unused import: `Path`
+   --> src\provider\process.rs:561:21
+    |
+561 |     use std::path::{Path, PathBuf};
+    |                     ^^^^
+
+warning: unused import: `std::sync::Arc`
+   --> src\provider\process.rs:562:9
+    |
+562 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AtomicUsize`
+   --> src\provider\process.rs:563:40
+    |
+563 |     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    |                                        ^^^^^^^^^^^
+
+warning: unused import: `Instant`
+   --> src\provider\process.rs:564:31
+    |
+564 |     use std::time::{Duration, Instant};
+    |                               ^^^^^^^
+
+warning: unused imports: `PreparedInputs`, `WatchedFile`, `execute_in`, `inspect_with_containment`, `nstool`, `prepare_inputs_with`, and `process`
+   --> src\provider\mod.rs:489:9
+    |
+489 |         PreparedInputs, ProviderFailure, WatchedFile, classify_parse_error, execute_in,
+    |         ^^^^^^^^^^^^^^                   ^^^^^^^^^^^                        ^^^^^^^^^^
+490 |         inspect_with_containment, nstool, open_regular, prepare_inputs, prepare_inputs_with,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^                                ^^^^^^^^^^^^^^^^^^^
+491 |         process,
+    |         ^^^^^^^
+
+warning: unused imports: `CancellationHandle` and `validate_provider_report`
+   --> src\provider\mod.rs:494:9
+    |
+494 |         CancellationHandle, InspectionErrorCode, InspectionHost, InspectionRequest,
+    |         ^^^^^^^^^^^^^^^^^^
+495 |         MemoryMonitoringPolicy, validate_provider_report,
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src\provider\mod.rs:501:9
+    |
+501 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Duration` and `Instant`
+   --> src\provider\mod.rs:502:21
+    |
+502 |     use std::time::{Duration, Instant};
+    |                     ^^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::os::windows::io::AsRawHandle`
+  --> src\provider\process.rs:16:5
+   |
+16 | use std::os::windows::io::AsRawHandle;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `synthetic_supported_nca` is never used
+   --> src\nca.rs:399:15
+    |
+399 | pub(crate) fn synthetic_supported_nca() -> Vec<u8> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `uncontained_test_limits` is never used
+   --> src\provider\process.rs:103:19
+    |
+101 | impl ProcessLimits {
+    | ------------------ associated function in this implementation
+102 |     #[cfg(test)]
+103 |     pub(crate) fn uncontained_test_limits(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `NEXT_SCRIPT` is never used
+   --> src\provider\process.rs:566:12
+    |
+566 |     static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(1);
+    |            ^^^^^^^^^^^
+
+warning: function `workdir` is never used
+   --> src\provider\process.rs:621:8
+    |
+621 |     fn workdir() -> PathBuf {
+    |        ^^^^^^^
+
+warning: function `test_limits` is never used
+   --> src\provider\process.rs:626:8
+    |
+626 |     fn test_limits(deadline: Duration, stdout: usize, stderr: usize) -> ProcessLimits {
+    |        ^^^^^^^^^^^
+
+warning: `nscb` (lib test) generated 18 warnings (run `cargo fix --lib -p nscb --tests` to apply 12 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src\lib.rs (target\debug\deps\nscb-3f2a31f6309dccf7.exe)
+

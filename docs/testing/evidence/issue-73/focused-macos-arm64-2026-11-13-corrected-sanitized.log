@@ -1,0 +1,226 @@
+# Sanitized derivative of the 2026-11-13 focused subprocess capture. Not byte-identical to the private raw file.
+# Redacted repository, Rustup, Cargo, and user-home paths; stripped trailing horizontal whitespace and terminal blank lines.
+# ARGV_JSON and EXIT_STATUS were captured from each subprocess invocation.
+FOCUSED VALIDATION CAPTURE
+UTC=2026-11-13T01:39:40Z
+SOURCE_COMMIT=e9c5ef8f7d6d6bff33012ff26010e5e21602fcfa
+CARGO_LOCK_SHA256=d63a9c75de9da3c14901f54f20ba41209ec283df2ddbf67298eba3d919ddb370
+HOST_OS=macOS 27.0.1 build 26A434
+HOST_ARCH=arm64
+TOOLCHAIN=Rust/Cargo 1.98.1
+CWD=<REPO_ROOT>
+RUSTC_WRAPPER=unset
+RUSTC_WORKSPACE_WRAPPER=unset
+CARGO_TERM_COLOR=never
+
+===== 01/11 workflow qualifier unit =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","nsp_semantic_qualification::tests::"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::
+--- STDOUT ---
+
+running 11 tests
+test nsp_semantic_qualification::tests::input_size_limit_accepts_its_boundary_and_rejects_the_next_byte ... ok
+test nsp_semantic_qualification::tests::bounded_reader_propagates_parent_io_errors ... ok
+test nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error ... ok
+test nsp_semantic_qualification::tests::section_regions_accept_only_checked_nonoverlapping_ranges ... ok
+test nsp_semantic_qualification::tests::ctr_counter_uses_reversed_section_ctr_and_absolute_section_block ... ok
+test nsp_semantic_qualification::tests::bounded_reader_checks_parent_ranges_and_limits_reads_and_seeks ... ok
+test nsp_semantic_qualification::tests::key_byte_reservation_refusal_is_typed_and_site_attributed ... ok
+test nsp_semantic_qualification::tests::nca_member_source_read_failure_is_sanitized_and_typed ... ok
+test nsp_semantic_qualification::tests::cancellation_after_the_final_source_hash_chunk_is_reported ... ok
+test nsp_semantic_qualification::tests::source_mutation_after_hashing_returns_changed_input_error ... ok
+test nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 511 filtered out; finished in 0.12s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 02/11 workflow key file =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","key_file::qualification_tests::"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib key_file::qualification_tests::
+--- STDOUT ---
+
+running 4 tests
+test key_file::qualification_tests::key_file_reader_enforces_the_shared_size_limit_and_sanitizes_io_errors ... ok
+test key_file::qualification_tests::conflicting_application_key_definitions_are_rejected_without_values ... ok
+test key_file::qualification_tests::reads_both_explicit_keys_and_redacts_the_application_key_debug_form ... ok
+test key_file::qualification_tests::missing_key_material_is_distinct_from_malformed_key_material ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 518 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 03/11 workflow PFS0 metadata limit =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables
+--- STDOUT ---
+
+running 1 test
+test pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 04/11 workflow semantic integration =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--test","nsp_semantic_qualification"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --test nsp_semantic_qualification
+--- STDOUT ---
+
+running 20 tests
+test pre_cancelled_request_returns_typed_cancellation_before_opening_paths ... ok
+test rejects_outer_pfs0_metadata_above_the_profile_limit_before_key_access ... ok
+test rejects_a_leading_unreferenced_outer_pfs0_payload_gap ... ok
+test rejects_trailing_unreferenced_outer_pfs0_payload ... ok
+test rejects_an_empty_outer_pfs0_member ... ok
+test request_debug_output_does_not_expose_source_or_key_paths ... ok
+test rejects_a_gap_between_outer_pfs0_member_spans ... ok
+test rejects_a_truncated_cnmt_without_parsing_past_its_member ... ok
+test rejects_unreferenced_payload_in_meta_section_pfs0 ... ok
+test outer_pfs0_table_order_does_not_change_complete_payload_accounting ... ok
+test rejects_extra_outer_members_and_plain_pfs0_framing ... ok
+test rejects_rights_bearing_and_unsupported_key_generation_profiles ... ok
+test reports_missing_and_malformed_key_prerequisites_separately ... ok
+test verifies_multiple_hash_table_entries_and_a_partial_final_block ... ok
+test qualifies_byte_backed_two_member_profile_despite_misleading_names ... ok
+test rejects_meta_role_title_mismatch_and_unsupported_cnmt_metadata ... ok
+test rejects_unexpected_section_hash_profiles_and_duplicate_member_roles ... ok
+test rejects_unreferenced_payload_in_program_section_pfs0 ... ok
+test enforces_the_program_section_entry_count_ceiling ... ok
+test rejects_each_program_row_mismatch_after_section_integrity_passes ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running tests/nsp_semantic_qualification.rs (target/debug/deps/nsp_semantic_qualification-09abf93392ce4551)
+EXIT_STATUS=0
+
+===== 05/11 workflow serialized reservation =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","reservation","--","--test-threads=1"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib reservation -- --test-threads=1
+--- STDOUT ---
+
+running 8 tests
+test nca::tests::partition_reservation_refusal_is_typed ... ok
+test nca::tests::span_reservation_refusal_is_typed_and_inspection_mapped ... ok
+test nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors ... ok
+test nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error ... ok
+test nsp_semantic_qualification::tests::key_byte_reservation_refusal_is_typed_and_site_attributed ... ok
+test pfs0::tests::injected_entry_and_span_reservation_refusals_map_to_resource_limits ... ok
+test pfs0::tests::injected_metadata_reservation_refusal_is_observed_at_its_site ... ok
+test pfs0::tests::second_filename_reservation_can_be_refused_without_hitting_the_first ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 514 filtered out; finished in 0.12s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 06/11 workflow serialized allocator harness =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","test_allocator::tests::","--","--test-threads=1"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib test_allocator::tests:: -- --test-threads=1
+--- STDOUT ---
+
+running 4 tests
+test test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok
+test test_allocator::tests::refusal_state_is_isolated_between_threads ... ok
+test test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok
+test test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 518 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 07/11 consumer error mappings =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","nca_allocation_failure","--","--test-threads=1"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib nca_allocation_failure -- --test-threads=1
+--- STDOUT ---
+
+running 4 tests
+test multi_content_format::tests::nca_allocation_failure_maps_to_multi_content_resource_limit ... ok
+test provider::tests::nca_allocation_failure_is_an_internal_inspection_failure ... ok
+test recognition::tests::nca_allocation_failure_maps_to_a_recognition_resource_limit ... ok
+test verification::tests::nca_allocation_failure_maps_to_verification_allocation_failed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 518 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 08/11 end-to-end qualifier refusal =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors","--","--test-threads=1"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors -- --test-threads=1
+--- STDOUT ---
+
+running 1 test
+test nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 0.12s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 09/11 capacity overflow =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error","--","--test-threads=1"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error -- --test-threads=1
+--- STDOUT ---
+
+running 1 test
+test nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 10/11 sanitized source-read regression =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","nca_member_source_read_failure_is_sanitized_and_typed"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib nca_member_source_read_failure_is_sanitized_and_typed
+--- STDOUT ---
+
+running 1 test
+test nsp_semantic_qualification::tests::nca_member_source_read_failure_is_sanitized_and_typed ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+===== 11/11 PFS0 payload-span regression =====
+ARGV_JSON=["rustup","run","1.98.1","cargo","test","--locked","--no-default-features","--lib","parses_payload_relative_spans_without_reading_payload_bytes"]
+SHELL_DISPLAY=rustup run 1.98.1 cargo test --locked --no-default-features --lib parses_payload_relative_spans_without_reading_payload_bytes
+--- STDOUT ---
+
+running 1 test
+test pfs0::tests::parses_payload_relative_spans_without_reading_payload_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 0.00s
+
+--- STDERR ---
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
+     Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
+EXIT_STATUS=0
+
+CAPTURE_COMPLETE
