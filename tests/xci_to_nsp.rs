@@ -1,13 +1,15 @@
+#[cfg(target_os = "macos")]
 use std::{
     fs,
     path::{Path, PathBuf},
 };
 
+#[cfg(target_os = "macos")]
 use nscb::{
-    CancellationHandle, ConflictPolicy, Engine, JobState, NspSemanticQualificationOutcome,
+    CancellationHandle, ConflictPolicy, JobState, NspSemanticQualificationOutcome,
     NspSemanticQualificationRequest, OperationFailureCode, OperationOutcome, OperationSession,
-    XciToNspRequest,
 };
+use nscb::{Engine, XciToNspRequest};
 
 #[allow(dead_code)]
 #[path = "support/synthetic_nsp_qualification.rs"]
@@ -16,6 +18,7 @@ mod synthetic_nsp_qualification;
 #[path = "support/synthetic_xci.rs"]
 mod synthetic_xci;
 
+#[cfg(target_os = "macos")]
 struct TestFiles {
     source: PathBuf,
     destination: PathBuf,
@@ -23,6 +26,7 @@ struct TestFiles {
     workspace: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 fn write_fixture(directory: &Path, fixture: &synthetic_xci::Fixture) -> TestFiles {
     let files = TestFiles {
         source: directory.join("source.xci"),
@@ -36,10 +40,12 @@ fn write_fixture(directory: &Path, fixture: &synthetic_xci::Fixture) -> TestFile
     files
 }
 
+#[cfg(target_os = "macos")]
 fn plan(files: &TestFiles) -> Result<nscb::OperationPlan, nscb::OperationError> {
     plan_with_policy(files, ConflictPolicy::Fail)
 }
 
+#[cfg(target_os = "macos")]
 fn plan_with_policy(
     files: &TestFiles,
     conflict_policy: ConflictPolicy,

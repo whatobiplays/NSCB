@@ -77,6 +77,7 @@ pub(crate) struct Pfs0WriteLayout {
 }
 
 /// A source byte range and digest for one named PFS0 member.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Pfs0SourceMember {
     pub(crate) name: String,
@@ -405,6 +406,7 @@ pub(crate) fn build_pfs0_layout(members: &[(String, u64)]) -> Result<Pfs0WriteLa
 }
 
 /// Writes a deterministic PFS0 from verified spans in one source file.
+#[cfg(target_os = "macos")]
 pub(crate) fn write_pfs0_from_source<W: Write>(
     writer: &mut W,
     source: &mut File,
