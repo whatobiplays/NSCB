@@ -1,8 +1,8 @@
 #[cfg(not(feature = "standalone-job-history"))]
 use nscb::XciToNspRequest;
-#[cfg(feature = "standalone-job-history")]
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 use std::fs;
-#[cfg(feature = "standalone-job-history")]
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 use std::path::PathBuf;
 #[cfg(feature = "standalone-job-history")]
 use std::process::Command;
@@ -16,7 +16,7 @@ mod synthetic_nsp_qualification;
 #[path = "support/synthetic_xci.rs"]
 mod synthetic_xci;
 
-#[cfg(feature = "standalone-job-history")]
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 struct CliFiles {
     root: tempfile::TempDir,
     source: PathBuf,
@@ -25,7 +25,7 @@ struct CliFiles {
     workspace: PathBuf,
 }
 
-#[cfg(feature = "standalone-job-history")]
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 fn files_with_fixture(fixture: &synthetic_xci::Fixture) -> CliFiles {
     let root = tempfile::tempdir().expect("temporary root");
     let source = root.path().join("misleading-name.bin");
@@ -44,7 +44,7 @@ fn files_with_fixture(fixture: &synthetic_xci::Fixture) -> CliFiles {
     }
 }
 
-#[cfg(feature = "standalone-job-history")]
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 fn command(files: &CliFiles, mode: &str) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_nscb"));
     command
@@ -61,7 +61,7 @@ fn command(files: &CliFiles, mode: &str) -> Command {
     command
 }
 
-#[cfg(feature = "standalone-job-history")]
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 fn combined_output(stdout: &[u8], stderr: &[u8]) -> String {
     format!(
         "{}{}",
