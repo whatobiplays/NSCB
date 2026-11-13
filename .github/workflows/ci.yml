@@ -110,7 +110,9 @@ jobs:
       - name: Run native qualification tests
         shell: bash
         run: |
-          cargo test --no-default-features --lib nsp_semantic_qualification::tests::
-          cargo test --no-default-features --lib key_file::qualification_tests::
-          cargo test --no-default-features --lib pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables
-          cargo test --no-default-features --test nsp_semantic_qualification
+          cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::
+          cargo test --locked --no-default-features --lib key_file::qualification_tests::
+          cargo test --locked --no-default-features --lib pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables
+          cargo test --locked --no-default-features --test nsp_semantic_qualification
+          cargo test --locked --no-default-features --lib reservation -- --test-threads=1
+          cargo test --locked --no-default-features --lib test_allocator::tests:: -- --test-threads=1

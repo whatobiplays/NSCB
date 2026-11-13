@@ -4,6 +4,7 @@
 //! Program NCA, and one Application CNMT. It does not establish authenticity,
 //! installability, full verification, or broad package compatibility.
 
+use crate::allocation::{AllocationSite, reserve_exact};
 use crate::engine::{ContainerProbeEntry, ContainerProbeResult};
 use crate::file_identity::{FileIdentity, FileSnapshot};
 use crate::key_file::{NspKeyFileError, NspQualificationKeys};
@@ -497,7 +498,7 @@ where
     checkpoint(Checkpoint::SourceHashed);
     check_cancelled(&request)?;
 
-    let mut records = try_reserve_vec(2)?;
+    let mut records = try_reserve_vec(2, AllocationSite::NspRecords)?;
     for (index, entry) in outer.entries.iter().enumerate() {
         checkpoint(Checkpoint::MemberStarted);
         check_cancelled(&request)?;
@@ -575,7 +576,7 @@ where
         ));
     }
 
-    let mut members = try_reserve_vec(2)?;
+    let mut members = try_reserve_vec(2, AllocationSite::NspMembers)?;
     members.extend([
         NspSemanticQualificationMember {
             role: NspSemanticQualificationRole::Meta,
@@ -673,9 +674,12 @@ fn validate_input_size(size: u64) -> Result<(), NspSemanticQualificationError> {
     Ok(())
 }
 
-fn try_reserve_vec<T>(capacity: usize) -> Result<Vec<T>, NspSemanticQualificationError> {
+fn try_reserve_vec<T>(
+    capacity: usize,
+    site: AllocationSite,
+) -> Result<Vec<T>, NspSemanticQualificationError> {
     let mut values = Vec::new();
-    values.try_reserve_exact(capacity).map_err(|_| {
+    reserve_exact(&mut values, capacity, site).map_err(|_| {
         NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::AllocationFailed)
     })?;
     Ok(values)
@@ -683,8 +687,9 @@ fn try_reserve_vec<T>(capacity: usize) -> Result<Vec<T>, NspSemanticQualificatio
 
 fn allocate_zeroizing_buffer(
     size: usize,
+    site: AllocationSite,
 ) -> Result<Zeroizing<Vec<u8>>, NspSemanticQualificationError> {
-    let mut buffer = Zeroizing::new(try_reserve_vec(size)?);
+    let mut buffer = Zeroizing::new(try_reserve_vec(size, site)?);
     buffer.resize(size, 0);
     Ok(buffer)
 }
@@ -716,7 +721,7 @@ fn pfs0_payload_is_fully_accounted(
         return Ok(false);
     }
 
-    let mut spans = try_reserve_vec(probe.entries.len())?;
+    let mut spans = try_reserve_vec(probe.entries.len(), AllocationSite::NspSpans)?;
     for entry in &probe.entries {
         if entry.size == 0 {
             return Ok(false);
@@ -755,7 +760,10 @@ where
     })?;
     let mut source = Sha256::new();
     let mut member_hashers = [Sha256::new(), Sha256::new()];
-    let mut buffer = allocate_zeroizing_buffer(MAX_WORKING_BUFFER_BYTES)?;
+    let mut buffer = allocate_zeroizing_buffer(
+        MAX_WORKING_BUFFER_BYTES,
+        AllocationSite::NspSourceHashBuffer,
+    )?;
     let mut offset = 0_u64;
     while offset < input.size {
         check_cancelled(request)?;
@@ -842,6 +850,11 @@ where
                 NspSemanticQualificationErrorCode::InputUnavailable,
             ));
         }
+        Err(HeaderError::AllocationFailed) => {
+            return Err(NspSemanticQualificationError::new(
+                NspSemanticQualificationErrorCode::AllocationFailed,
+            ));
+        }
         Err(_) => {
             return Ok(ReadDecision::NotQualified(
                 NspSemanticQualificationReason::InvalidNcaHeader,
@@ -853,6 +866,11 @@ where
         Err(HeaderError::InputUnavailable) => {
             return Err(NspSemanticQualificationError::new(
                 NspSemanticQualificationErrorCode::InputUnavailable,
+            ));
+        }
+        Err(HeaderError::AllocationFailed) => {
+            return Err(NspSemanticQualificationError::new(
+                NspSemanticQualificationErrorCode::AllocationFailed,
             ));
         }
         Err(_) => {
@@ -1090,7 +1108,10 @@ fn verify_section_hash_tree<F>(
 where
     F: FnMut(Checkpoint),
 {
-    let mut buffer = allocate_zeroizing_buffer(MAX_WORKING_BUFFER_BYTES)?;
+    let mut buffer = allocate_zeroizing_buffer(
+        MAX_WORKING_BUFFER_BYTES,
+        AllocationSite::NspSectionHashBuffer,
+    )?;
     let mut hasher = Sha256::new();
     section
         .seek(SeekFrom::Start(regions.hash_table_offset))
@@ -1425,6 +1446,66 @@ mod tests {
         }
     }
 
+    fn assert_qualifier_reservation_refusal(
+        site: crate::allocation::AllocationSite,
+        occurrence: u32,
+    ) {
+        let fixture = crate::test_synthetic_nsp_qualification::valid();
+        let input = TempFile::new(&fixture.package);
+        let key_file = TempFile::new(&fixture.key_file);
+        let input_before = fixture.package;
+        let key_file_before = fixture.key_file;
+        let request = NspSemanticQualificationRequest::new(input.path(), key_file.path());
+
+        let (result, observation) = crate::test_allocator::with_refusal(site, occurrence, || {
+            qualify_with_checkpoint(request, |_| {})
+        });
+
+        let error = result.expect_err("the selected bounded reservation was refused");
+        assert_eq!(
+            error.code(),
+            NspSemanticQualificationErrorCode::AllocationFailed
+        );
+        assert_eq!(
+            error.to_string(),
+            "qualification could not reserve bounded memory"
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains(input.path().to_string_lossy().as_ref())
+        );
+        assert!(
+            !error
+                .to_string()
+                .contains(key_file.path().to_string_lossy().as_ref())
+        );
+        assert!(
+            observation.is_exact_refusal(site, occurrence),
+            "{observation:?}"
+        );
+        assert_eq!(observation.site_calls, occurrence);
+        assert!(observation.requested_layout.is_some_and(|(size, align)| {
+            size <= super::MAX_WORKING_BUFFER_BYTES && align.is_power_of_two()
+        }));
+        assert_eq!(
+            std::fs::read(input.path()).expect("read input after refusal"),
+            input_before
+        );
+        assert_eq!(
+            std::fs::read(key_file.path()).expect("read key file after refusal"),
+            key_file_before
+        );
+        release_file_handle(&input);
+        release_file_handle(&key_file);
+    }
+
+    fn release_file_handle(file: &TempFile) {
+        let moved = file.path().with_extension("moved");
+        std::fs::rename(file.path(), &moved).expect("qualification released the file handle");
+        std::fs::rename(moved, file.path()).expect("restore the synthetic test input");
+    }
+
     fn two_member_pfs0() -> Vec<u8> {
         let strings = b"a\0b\0";
         let mut bytes = Vec::new();
@@ -1619,12 +1700,60 @@ mod tests {
 
     #[test]
     fn allocation_reservation_failure_maps_to_a_typed_error() {
-        let error = try_reserve_vec::<u8>(usize::MAX)
-            .expect_err("a capacity larger than Rust's allocation limit must fail");
+        let site = crate::allocation::AllocationSite::NspRecords;
+        let (error, observation) = crate::test_allocator::with_refusal(site, 1, || {
+            try_reserve_vec::<u8>(usize::MAX, site)
+        });
+        let error = error.expect_err("a capacity larger than Rust's allocation limit must fail");
         assert_eq!(
             error.code(),
             NspSemanticQualificationErrorCode::AllocationFailed
         );
+        assert_eq!(observation.site_calls, 1);
+        assert_eq!(observation.refusal_count, 0);
+        assert_eq!(observation.expected_layout, None);
+        assert!(observation.armed_on_finish);
+    }
+
+    #[test]
+    fn key_byte_reservation_refusal_is_typed_and_site_attributed() {
+        let bytes = b"bounded key fixture";
+        let site = crate::allocation::AllocationSite::KeyFileBytes;
+        let (result, observation) = crate::test_allocator::with_refusal(site, 1, || {
+            read_nsp_qualification_keys(&mut Cursor::new(bytes), bytes.len() as u64)
+        });
+
+        assert_eq!(
+            result.err(),
+            Some(crate::key_file::NspKeyFileError::AllocationFailed)
+        );
+        assert!(observation.is_exact_refusal(site, 1));
+        assert_eq!(observation.site_calls, 1);
+        assert!(
+            observation
+                .requested_layout
+                .is_some_and(|(size, _)| size <= crate::key_file::MAX_KEY_FILE_BYTES as usize)
+        );
+    }
+
+    #[test]
+    fn actual_bounded_qualifier_reservations_refuse_with_sanitized_errors() {
+        for (site, occurrence) in [
+            (crate::allocation::AllocationSite::KeyFileBytes, 1),
+            (crate::allocation::AllocationSite::Pfs0Metadata, 1),
+            (crate::allocation::AllocationSite::Pfs0Entries, 1),
+            (crate::allocation::AllocationSite::Pfs0Spans, 1),
+            (crate::allocation::AllocationSite::Pfs0NameBytes, 1),
+            (crate::allocation::AllocationSite::NspSourceHashBuffer, 1),
+            (crate::allocation::AllocationSite::NspSpans, 1),
+            (crate::allocation::AllocationSite::NspRecords, 1),
+            (crate::allocation::AllocationSite::NspSectionHashBuffer, 1),
+            (crate::allocation::AllocationSite::NspMembers, 1),
+            (crate::allocation::AllocationSite::NcaHeaderSpans, 1),
+            (crate::allocation::AllocationSite::NcaHeaderPartitions, 1),
+        ] {
+            assert_qualifier_reservation_refusal(site, occurrence);
+        }
     }
 
     #[test]

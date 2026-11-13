@@ -1,3 +1,4 @@
+use crate::allocation::{AllocationSite, reserve_exact, reserve_string_exact};
 use crate::engine::{ContainerFormat, ContainerProbeEntry, ContainerProbeResult};
 use crate::error::{ContainerProbeError, ContainerProbeErrorCode};
 use std::io::{Read, Seek, SeekFrom};
@@ -91,8 +92,7 @@ pub(crate) fn probe_with_limits<R: Read + Seek>(
         return Err(error(ContainerProbeErrorCode::LimitExceeded));
     }
     let mut metadata = Vec::new();
-    metadata
-        .try_reserve_exact(metadata_size)
+    reserve_exact(&mut metadata, metadata_size, AllocationSite::Pfs0Metadata)
         .map_err(|_| error(ContainerProbeErrorCode::ResourceLimitExceeded))?;
     metadata.resize(metadata_size, 0);
     reader.read_exact(&mut metadata).map_err(map_read_error)?;
@@ -102,12 +102,10 @@ pub(crate) fn probe_with_limits<R: Read + Seek>(
 
     let payload_size = file_size - payload_offset;
     let mut entries = Vec::new();
-    entries
-        .try_reserve_exact(entry_count)
+    reserve_exact(&mut entries, entry_count, AllocationSite::Pfs0Entries)
         .map_err(|_| error(ContainerProbeErrorCode::ResourceLimitExceeded))?;
     let mut spans = Vec::new();
-    spans
-        .try_reserve_exact(entry_count)
+    reserve_exact(&mut spans, entry_count, AllocationSite::Pfs0Spans)
         .map_err(|_| error(ContainerProbeErrorCode::ResourceLimitExceeded))?;
     let mut total_name_bytes = 0_usize;
 
@@ -132,8 +130,7 @@ pub(crate) fn probe_with_limits<R: Read + Seek>(
             return Err(error(ContainerProbeErrorCode::LimitExceeded));
         }
         let mut owned_name = String::new();
-        owned_name
-            .try_reserve_exact(name.len())
+        reserve_string_exact(&mut owned_name, name.len(), AllocationSite::Pfs0NameBytes)
             .map_err(|_| error(ContainerProbeErrorCode::ResourceLimitExceeded))?;
         owned_name.push_str(name);
         let relative_end = offset
@@ -323,6 +320,49 @@ mod tests {
             Err(error) => assert_eq!(error.code(), want),
             Ok(_) => panic!("input was accepted when rejection was expected"),
         }
+    }
+
+    #[test]
+    fn injected_metadata_reservation_refusal_is_observed_at_its_site() {
+        let bytes = raw_pfs0(&[entry(0, 1, 0, 0)], b"sample\0", b"x");
+        let (result, observation) = crate::test_allocator::with_refusal(
+            crate::allocation::AllocationSite::Pfs0Metadata,
+            1,
+            || parse(bytes),
+        );
+
+        assert_code(result, ContainerProbeErrorCode::ResourceLimitExceeded);
+        assert!(observation.is_exact_refusal(crate::allocation::AllocationSite::Pfs0Metadata, 1));
+    }
+
+    #[test]
+    fn injected_entry_and_span_reservation_refusals_map_to_resource_limits() {
+        let bytes = raw_pfs0(&[entry(0, 1, 0, 0)], b"sample\0", b"x");
+        for site in [
+            crate::allocation::AllocationSite::Pfs0Entries,
+            crate::allocation::AllocationSite::Pfs0Spans,
+        ] {
+            let (result, observation) =
+                crate::test_allocator::with_refusal(site, 1, || parse(bytes.clone()));
+
+            assert_code(result, ContainerProbeErrorCode::ResourceLimitExceeded);
+            assert!(observation.is_exact_refusal(site, 1), "{observation:?}");
+        }
+    }
+
+    #[test]
+    fn second_filename_reservation_can_be_refused_without_hitting_the_first() {
+        let bytes = raw_pfs0(
+            &[entry(0, 1, 0, 0), entry(1, 1, 6, 0)],
+            b"first\0second\0",
+            b"xy",
+        );
+        let site = crate::allocation::AllocationSite::Pfs0NameBytes;
+        let (result, observation) = crate::test_allocator::with_refusal(site, 2, || parse(bytes));
+
+        assert_code(result, ContainerProbeErrorCode::ResourceLimitExceeded);
+        assert!(observation.is_exact_refusal(site, 2), "{observation:?}");
+        assert_eq!(observation.site_calls, 2);
     }
 
     #[test]

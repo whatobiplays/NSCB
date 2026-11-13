@@ -576,6 +576,7 @@ fn map_header_error(error: nca::HeaderError) -> FormatError {
         nca::HeaderError::TruncatedInput => FormatError::InvalidPackage,
         nca::HeaderError::MalformedInput => FormatError::InvalidPackage,
         nca::HeaderError::InputUnavailable => FormatError::SourceUnavailable,
+        nca::HeaderError::AllocationFailed => FormatError::ResourceLimit,
     }
 }
 
@@ -635,6 +636,14 @@ impl Seek for FileSpan<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nca_allocation_failure_maps_to_multi_content_resource_limit() {
+        assert_eq!(
+            super::map_header_error(crate::nca::HeaderError::AllocationFailed),
+            super::FormatError::ResourceLimit
+        );
+    }
+
     use super::{FormatError, ProgramMember, ProgramPackage, inspect_package, write_pfs0};
     use crate::sha256::Sha256Digest;
     use std::fs;

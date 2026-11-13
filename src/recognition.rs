@@ -173,6 +173,18 @@ type Result<T> = std::result::Result<T, ContentRecognitionError>;
 fn err(code: ContentRecognitionErrorCode) -> ContentRecognitionError {
     ContentRecognitionError { code }
 }
+
+fn map_nca_header_error(error: crate::nca::HeaderError) -> ContentRecognitionError {
+    use crate::nca::HeaderError;
+    err(match error {
+        HeaderError::UnsupportedFormat | HeaderError::MalformedInput => {
+            ContentRecognitionErrorCode::MalformedInput
+        }
+        HeaderError::TruncatedInput => ContentRecognitionErrorCode::TruncatedInput,
+        HeaderError::InputUnavailable => ContentRecognitionErrorCode::MalformedInput,
+        HeaderError::AllocationFailed => ContentRecognitionErrorCode::ResourceLimitExceeded,
+    })
+}
 use ContentRecognitionErrorCode::{
     LimitExceeded, MalformedInput, TruncatedInput, UnsupportedStructure,
 };
@@ -654,12 +666,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         let block: [u8; crate::nca::HEADER_SIZE] =
             h.as_slice().try_into().map_err(|_| err(MalformedInput))?;
         let header =
-            crate::nca::parse_header_block(&block, end - start).map_err(|error| match error {
-                crate::nca::HeaderError::UnsupportedFormat
-                | crate::nca::HeaderError::MalformedInput => err(MalformedInput),
-                crate::nca::HeaderError::TruncatedInput => err(TruncatedInput),
-                crate::nca::HeaderError::InputUnavailable => err(MalformedInput),
-            })?;
+            crate::nca::parse_header_block(&block, end - start).map_err(map_nca_header_error)?;
         for partition in &header.partitions {
             let i = usize::from(partition.index);
             let fs = &h[0x400 + i * 0x200..0x600 + i * 0x200];
@@ -863,6 +870,15 @@ pub(crate) fn recognize<R: Read + Seek>(
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn nca_allocation_failure_maps_to_a_recognition_resource_limit() {
+        assert_eq!(
+            map_nca_header_error(crate::nca::HeaderError::AllocationFailed).code(),
+            ContentRecognitionErrorCode::ResourceLimitExceeded
+        );
+    }
+
     fn parse(b: Vec<u8>, name: &str) -> Result<ContentRecognitionResult> {
         recognize(&mut Cursor::new(&b), b.len() as u64, Path::new(name))
     }

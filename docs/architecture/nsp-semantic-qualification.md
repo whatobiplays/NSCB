@@ -100,11 +100,14 @@ bytes. The table length must equal
 The existing PFS0 parser validates names, bounds, and overlaps. It continues to
 allow gaps for unrelated callers. This qualification layer adds its own
 complete-coverage check and returns `unaccounted_pfs0_payload` for a readable
-PFS0 whose nonempty member spans leave any bytes outside them. It supplies a
-1 MiB total metadata limit and a profile-specific entry limit. Its member
-reader checks `start + length` with checked arithmetic, caps every read at the
-member end, and rejects seeks past that end. Nested Meta PFS0 and CNMT reads
-are bounded again by their immediate parent ranges.
+PFS0 whose nonempty member spans leave any bytes outside them. Each PFS0 probe
+has a 1 MiB total metadata limit, including its 16-byte header. The outer
+parser is also given a 65,536-entry limit, but the metadata limit permits at
+most 43,689 records before the qualifier checks that the outer member count is
+exactly two. The Program-section parser has a separate 4,096-entry limit. Its
+member reader checks `start + length` with checked arithmetic, caps every read
+at the member end, and rejects seeks past that end. Nested Meta PFS0 and CNMT
+reads are bounded again by their immediate parent ranges.
 
 The no-gap rule is limited to this profile. The pinned hacPack writer at commit
 [`e506cb58b7843d86df7518156debd28f3b575638`](https://github.com/DarkMatterCore/hacPack/tree/e506cb58b7843d86df7518156debd28f3b575638)
@@ -128,7 +131,8 @@ Limits are part of this initial profile, not Nintendo format limits:
 | Resource | Limit |
 | --- | ---: |
 | Source file | 64 GiB |
-| PFS0 metadata | 1 MiB |
+| PFS0 metadata, including the 16-byte header | 1 MiB per probe |
+| Outer PFS0 records before the exact-two-member check | 43,689 |
 | Program-section PFS0 entries | 4,096 |
 | Working buffer | 1 MiB |
 | Hash block size | `0x200`–`0x100000` |
@@ -137,6 +141,58 @@ Limits are part of this initial profile, not Nintendo format limits:
 All format offsets and lengths use checked arithmetic. Allocation uses
 fallible reservation. Cancellation is checked during source hashing,
 hierarchical-hash verification, and between member checks.
+
+## Allocation bounds and failure handling
+
+The qualifier uses fallible reservations for each explicitly bounded vector,
+string, and buffer in its call path. Reservation refusal returns a sanitized
+typed error. Local vectors and copied names are dropped on error; key-file
+bytes and hash buffers use `Zeroizing` and are cleared when dropped. Path
+resolution also creates standard-library `PathBuf` values; that separate
+allocation path is listed as not evidenced below.
+
+The outer record bound follows from the PFS0 layout: each record uses 24 bytes,
+the smallest valid shared name occupies two string-table bytes, and the total
+metadata limit includes a 16-byte header. Thus
+`floor((1,048,576 - 16 - 2) / 24) = 43,689`. The parser reserves the entry and
+span vectors before the qualifier rejects an outer count other than two. On
+the supported 64-bit targets, each `ContainerProbeEntry` occupies 48 bytes.
+PFS0 names can point to the same string-table bytes; the parser copies each
+entry name separately and limits their cumulative requested bytes to 16 MiB
+per probe. These bounds are not the same as the 1 MiB working-buffer limit.
+
+| Allocation path or site | Maximum on the qualifier path | Fallibility and error mapping | Cleanup |
+| --- | --- | --- | --- |
+| `KeyFileBytes` | 1 MiB | `try_reserve_exact`; `NspKeyFileError::AllocationFailed` becomes qualifier `allocation_failed` | Zeroizing byte buffer is cleared on all exits. |
+| `Pfs0Metadata` | At most 1,048,560 requested bytes per probe; the 16-byte header brings total metadata to 1 MiB | `try_reserve_exact`; parser keeps its `ResourceLimitExceeded` code, which the qualifier maps to `allocation_failed` | Metadata bytes are dropped on parse or read failure. |
+| `Pfs0Entries` | Outer: 43,689 entries (2,097,072 requested bytes on supported 64-bit targets); Program: 4,096 entries (196,608 bytes) | `try_reserve_exact`; parser `ResourceLimitExceeded`, mapped by the qualifier to `allocation_failed` | Partial entry vectors are dropped on failure. |
+| `Pfs0Spans` | Outer: 43,689 pairs (699,024 requested bytes); Program: 4,096 pairs (65,536 bytes). Capacity is reserved for every record, including empty spans. | `try_reserve_exact`; parser `ResourceLimitExceeded`, mapped by the qualifier to `allocation_failed` | Partial span vectors are dropped on failure. |
+| `Pfs0NameBytes` | Each request is at most 4 KiB; copied-name requests total at most 16 MiB per probe | `String::try_reserve_exact`; parser `ResourceLimitExceeded`, mapped by the qualifier to `allocation_failed` | Copied names are dropped with their entries on failure. |
+| `NspRecords` | 2 | `try_reserve_exact`; qualifier `AllocationFailed` | Partial records are dropped on failure. |
+| `NspMembers` | 2 | `try_reserve_exact`; qualifier `AllocationFailed` | Partial result members are dropped on failure. |
+| `NspSpans` | Outer PFS0: 2 pairs (32 requested bytes); Program-section PFS0: up to 4,096 pairs (65,536 bytes) | `try_reserve_exact`; qualifier `AllocationFailed` | Partial spans are dropped on failure. |
+| `NspSourceHashBuffer` | 1 MiB | `try_reserve_exact`; qualifier `AllocationFailed` | `Zeroizing<Vec<u8>>` clears the buffer on drop. |
+| `NspSectionHashBuffer` | 1 MiB, in a separate phase from the source buffer | `try_reserve_exact`; qualifier `AllocationFailed` | `Zeroizing<Vec<u8>>` clears the buffer on drop. |
+| `NcaHeaderSpans` | 4 descriptors | `try_reserve_exact`; `HeaderError::AllocationFailed` | Partial spans are dropped on failure. |
+| `NcaHeaderPartitions` | At most 4 | `try_reserve_exact`; `HeaderError::AllocationFailed` | Partial partitions are dropped on failure. |
+| Path buffers in `open_snapshot_file` | For each of the source and key paths, a canonical `PathBuf` and a copy of the requested path; path length is limited by the host OS, with no qualifier-specific byte cap | `std::fs::canonicalize` and `Path::to_path_buf` are outside the tagged fallible-reservation wrapper. Their allocation requests cannot be attributed reliably by the current harness; this path is `NOT_EVIDENCED`. `canonicalize` I/O errors map to `InputUnavailable`. | Temporary paths drop on helper errors; the two owned paths drop with `OpenedInput`. |
+
+PFS0's existing parser error contract remains `ResourceLimitExceeded` for a
+reservation refusal. The qualifier maps that parser result to its stable
+`allocation_failed` code; Inspection maps the same PFS0 refusal to its
+existing `InspectionErrorCode::AllocationFailed` code.
+
+`HeaderSyntax::present_partition_indices()` is used only by Verification; the
+NSP qualifier does not call it. The helper collects at most four indices
+because the descriptor table has four entries. That bounded
+Verification-only allocation is outside the qualifier call path, so leaving
+it unchanged does not weaken FUP-1's qualifier allocation evidence. A
+regression test checks descriptor order and absent-entry filtering.
+
+Path canonicalization, owned path copies, and standard-library I/O internals do
+not expose these tagged fallible-reservation APIs. They remain
+`NOT_EVIDENCED`; the failpoint results cover only the explicit bounded
+reservations in this table. No operating-system memory pressure was induced.
 
 ## API and result meaning
 

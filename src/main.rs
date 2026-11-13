@@ -1,3 +1,4 @@
+mod allocation;
 mod cli;
 #[cfg(target_os = "macos")]
 mod cli_reporting;
@@ -6,6 +7,13 @@ mod cli_reporting;
 mod key_file;
 mod localization;
 mod standalone;
+
+#[cfg(test)]
+mod test_allocator;
+
+#[cfg(test)]
+#[global_allocator]
+static QUALIFICATION_TEST_ALLOCATOR: test_allocator::TestAllocator = test_allocator::TestAllocator;
 
 use nscb::Engine;
 use std::process::ExitCode;
