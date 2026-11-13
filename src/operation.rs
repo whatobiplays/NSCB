@@ -1543,14 +1543,12 @@ impl OperationSessionSnapshot {
         self.failure
     }
 
-    /// Returns source bytes successfully written into private staging.
+    /// Returns output bytes confirmed written into private staging.
     ///
-    /// This value counts complete source chunks confirmed written by the copy
-    /// loop. A chunk whose write fails is not counted even when the operating
-    /// system accepted part of it. The value remains zero for
-    /// `AlreadyUpToDate` and for failures or cancellation before copying.
-    /// Reaching `total_bytes` does not imply that validation, promotion, or
-    /// publication succeeded.
+    /// The count includes generated container metadata and payload bytes. A
+    /// write call that fails is not counted, even if it leaves a partial prefix
+    /// in staging. Reaching `total_bytes` does not imply that validation,
+    /// promotion, or publication succeeded.
     pub const fn completed_bytes(&self) -> u64 {
         self.completed_bytes
     }
@@ -5796,14 +5794,14 @@ where
             &conversion.package.layout,
             &conversion.package.members,
             |written| {
-                if let Err(code) = check_cancelled(session) {
-                    callback_failure = Some(code);
-                    return Err(FormatError::OutputUnavailable);
-                }
                 completed = completed
                     .checked_add(written)
                     .ok_or(FormatError::ResourceLimit)?;
                 session.record_progress(completed);
+                if let Err(code) = check_cancelled(session) {
+                    callback_failure = Some(code);
+                    return Err(FormatError::OutputUnavailable);
+                }
                 Ok(())
             },
         ) {

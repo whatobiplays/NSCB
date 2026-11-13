@@ -406,6 +406,8 @@ pub(crate) fn build_pfs0_layout(members: &[(String, u64)]) -> Result<Pfs0WriteLa
 }
 
 /// Writes a deterministic PFS0 from verified spans in one source file.
+/// Reports the metadata block and each payload chunk through `on_chunk` after
+/// the corresponding output bytes have been written.
 #[cfg(target_os = "macos")]
 pub(crate) fn write_pfs0_from_source<W: Write>(
     writer: &mut W,
@@ -436,9 +438,12 @@ pub(crate) fn write_pfs0_from_source<W: Write>(
             return Err(FormatError::InvalidPackage);
         }
     }
+    let metadata_length =
+        u64::try_from(layout.metadata.len()).map_err(|_| FormatError::ResourceLimit)?;
     writer
         .write_all(&layout.metadata)
         .map_err(|_| FormatError::OutputUnavailable)?;
+    on_chunk(metadata_length)?;
     let mut buffer = [0_u8; COPY_CHUNK_SIZE];
     for member in members {
         source

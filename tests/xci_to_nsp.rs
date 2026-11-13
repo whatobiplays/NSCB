@@ -97,6 +97,39 @@ fn converts_synthetic_rights_free_application_and_preserves_member_bytes() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn successful_conversion_progress_includes_pfs0_metadata_exactly_once() {
+    let fixture = synthetic_xci::valid();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = write_fixture(directory.path(), &fixture);
+    let operation_plan = plan(&files).expect("eligible synthetic XCI plans");
+    let planned_output_length =
+        u64::try_from(fixture.package.len()).expect("synthetic NSP length fits u64");
+    let member_payload_length = fixture
+        .secure_entries
+        .iter()
+        .map(|entry| u64::try_from(entry.data_len).expect("member length fits u64"))
+        .sum::<u64>();
+    assert!(planned_output_length > member_payload_length);
+
+    let session = OperationSession::new();
+    let result = Engine::new().execute_operation(operation_plan, &session);
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    let progress = session
+        .current_operation()
+        .expect("terminal operation progress");
+    assert_eq!(progress.total_bytes(), Some(planned_output_length));
+    assert_eq!(progress.completed_bytes(), planned_output_length);
+    assert_eq!(
+        fs::metadata(&files.destination)
+            .expect("published NSP")
+            .len(),
+        planned_output_length
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn conversion_output_is_deterministic_and_logo_may_be_absent_or_empty() {
     let fixture = synthetic_xci::valid();
     let directory = tempfile::tempdir().expect("temporary directory");
