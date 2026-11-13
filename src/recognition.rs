@@ -1,6 +1,7 @@
 //! Bounded recognition of container families and archive representations.
 use crate::{ContainerProbeError, ContainerProbeErrorCode};
 use serde::Serialize;
+#[cfg(target_os = "macos")]
 use sha2::{Digest, Sha256};
 use std::{
     fmt,
@@ -251,10 +252,12 @@ struct Members {
     spans: Vec<(u64, u64)>,
     /// Name of each member in table order.
     names: Vec<String>,
+    #[cfg(target_os = "macos")]
     /// Stored prefix-hash fields for each member in table order.
     hashes: Vec<HfsHashFields>,
 }
 
+#[cfg(target_os = "macos")]
 struct HfsHashFields {
     hashed_size: u32,
     reserved: [u8; 8],
@@ -262,6 +265,7 @@ struct HfsHashFields {
 }
 
 /// A secure-partition member selected for the bounded XCI-to-NSP profile.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct XciSecureMember {
     pub(crate) name: String,
@@ -270,6 +274,7 @@ pub(crate) struct XciSecureMember {
 }
 
 /// Structurally validated direct members of one XCI secure partition.
+#[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct XciConversionSource {
     pub(crate) secure_members: Vec<XciSecureMember>,
@@ -361,6 +366,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         }
         let mut spans = Vec::new();
         let mut names_out = Vec::new();
+        #[cfg(target_os = "macos")]
         let mut hashes = Vec::new();
         spans
             .try_reserve_exact(count as usize)
@@ -368,6 +374,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         names_out
             .try_reserve_exact(count as usize)
             .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
+        #[cfg(target_os = "macos")]
         hashes
             .try_reserve_exact(count as usize)
             .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
@@ -377,8 +384,9 @@ impl<R: Read + Seek> Parser<'_, R> {
             let len = u64le(&r[8..16]);
             let name = u32le(&r[16..20]) as usize;
             let hashed = u32le(&r[20..24]);
+            let legacy_reserved_offset = u64le(&r[24..32]);
+            #[cfg(target_os = "macos")]
             let reserved: [u8; 8] = r[24..32].try_into().expect("fixed HFS0 field");
-            let legacy_reserved_offset = u64::from_le_bytes(reserved);
             if add(legacy_reserved_offset, hashed)? > len || off < previous {
                 return Err(err(MalformedInput));
             }
@@ -408,6 +416,7 @@ impl<R: Read + Seek> Parser<'_, R> {
                 return Err(err(TruncatedInput));
             }
             spans.push((s, e));
+            #[cfg(target_os = "macos")]
             hashes.push(HfsHashFields {
                 hashed_size: u32::try_from(hashed).map_err(|_| err(MalformedInput))?,
                 reserved,
@@ -418,6 +427,7 @@ impl<R: Read + Seek> Parser<'_, R> {
             header_size: size,
             spans,
             names: names_out,
+            #[cfg(target_os = "macos")]
             hashes,
         })
     }
@@ -502,6 +512,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         Ok(compressed)
     }
 
+    #[cfg(target_os = "macos")]
     fn xci_conversion_source(&mut self, end: u64) -> Result<XciConversionSource> {
         let header = self.read(0, end, 0x200)?;
         let root = u64le(&header[0x130..0x138]);
@@ -568,6 +579,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         Ok(XciConversionSource { secure_members })
     }
 
+    #[cfg(target_os = "macos")]
     fn verify_hfs_hashes(&mut self, members: &Members) -> Result<()> {
         if members.spans.len() != members.hashes.len() {
             return Err(err(MalformedInput));
@@ -588,6 +600,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         Ok(())
     }
 
+    #[cfg(target_os = "macos")]
     fn hash_prefix(&mut self, start: u64, end: u64, length: u64) -> Result<[u8; 32]> {
         if add(start, length)? > end {
             return Err(err(TruncatedInput));
@@ -897,6 +910,7 @@ impl<R: Read + Seek> Parser<'_, R> {
 /// The image must carry the `HEAD` marker at offset `0x100`. Conversion also
 /// checks HFS0 prefix hashes and reserved fields, rejects unsupported
 /// partition payloads, and refuses compressed card members.
+#[cfg(target_os = "macos")]
 pub(crate) fn inspect_xci_for_conversion<R: Read + Seek>(
     reader: &mut R,
     length: u64,
@@ -1988,6 +2002,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn parser_hash_prefix_respects_read_budget() {
         let bytes = [0_u8; 1];

@@ -43,6 +43,7 @@ pub struct NspSemanticQualificationRequest {
     input: PathBuf,
     key_file: PathBuf,
     cancellation: Option<crate::CancellationHandle>,
+    #[cfg(target_os = "macos")]
     expected_key_snapshot: Option<crate::file_identity::FileSnapshot>,
 }
 
@@ -53,11 +54,13 @@ impl NspSemanticQualificationRequest {
             input: input.into(),
             key_file: key_file.into(),
             cancellation: None,
+            #[cfg(target_os = "macos")]
             expected_key_snapshot: None,
         }
     }
 
     /// Binds qualification to the key-file snapshot captured by its operation plan.
+    #[cfg(target_os = "macos")]
     pub(crate) fn with_expected_key_snapshot(
         mut self,
         snapshot: crate::file_identity::FileSnapshot,
@@ -442,6 +445,7 @@ pub(crate) fn qualify(
 }
 
 /// Runs qualification and checks for cancellation at each checkpoint.
+#[cfg(target_os = "macos")]
 pub(crate) fn qualify_with_cancellation_probe<F>(
     request: NspSemanticQualificationRequest,
     mut is_cancelled: F,
@@ -460,6 +464,7 @@ where
 }
 
 /// Qualifies a bounded virtual package using the same rules as a path-backed NSP.
+#[cfg(target_os = "macos")]
 pub(crate) fn qualify_with_input<I: NspSemanticInput>(
     request: NspSemanticQualificationRequest,
     input: I,
@@ -569,6 +574,7 @@ where
         NspSemanticQualificationErrorCode::KeyFileUnavailable,
         NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
     )?;
+    #[cfg(target_os = "macos")]
     if request
         .expected_key_snapshot
         .as_ref()
@@ -1871,6 +1877,7 @@ mod tests {
         assert_eq!(error.code(), NspSemanticQualificationErrorCode::Cancelled);
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn expected_key_snapshot_rejects_a_replaced_key_file() {
         let input = TempFile::new(&two_member_pfs0());

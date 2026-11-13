@@ -1,6 +1,8 @@
 //! Conversion of the qualified synthetic base Application XCI profile.
 
-use crate::operation::{ConflictPolicy, OperationFailureCode};
+use crate::operation::ConflictPolicy;
+#[cfg(target_os = "macos")]
+use crate::operation::OperationFailureCode;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -10,6 +12,7 @@ pub struct XciToNspRequest {
     pub(crate) source: PathBuf,
     pub(crate) destination: PathBuf,
     pub(crate) workspace: PathBuf,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) key_file: PathBuf,
     pub(crate) conflict_policy: ConflictPolicy,
 }
