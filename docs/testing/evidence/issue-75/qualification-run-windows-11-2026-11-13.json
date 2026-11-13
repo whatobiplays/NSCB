@@ -1,0 +1,2564 @@
+{
+  "capture_date": "2026-11-13",
+  "diagnostic_patch_overlays": [
+    {
+      "bytes": 9588,
+      "patch_id": "base_initial",
+      "private_file": "base-diagnostic.patch",
+      "sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9"
+    },
+    {
+      "bytes": 9588,
+      "patch_id": "candidate_initial",
+      "private_file": "candidate-diagnostic.patch",
+      "sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e"
+    },
+    {
+      "bytes": 10098,
+      "patch_id": "base_cache_close_control",
+      "private_file": "base-diagnostic-retry.patch",
+      "sha256": "5c69bb44a20890fac2277e3eb72d77f66ca0f6583a4d2908810d0f9048c78e51"
+    },
+    {
+      "bytes": 10098,
+      "patch_id": "candidate_cache_close_control",
+      "private_file": "candidate-diagnostic-retry.patch",
+      "sha256": "a2d4742d6f8c8a441a216be64d9133c17fcdb380a74f2dcf6982c57df791a399"
+    },
+    {
+      "bytes": 10343,
+      "patch_id": "base_directory_path_check",
+      "private_file": "base-final-diagnostic.patch",
+      "sha256": "03d47f926d242a462c54dfd34435cfe97d9cbeea6bec33a29a1ca0692a2d0c87"
+    },
+    {
+      "bytes": 10343,
+      "patch_id": "candidate_directory_path_check",
+      "private_file": "candidate-final-diagnostic.patch",
+      "sha256": "1eaf0ed4724245f81d635842ece6a9b04fc5a20ca23f1a3b0ffb6cdfded60a18"
+    }
+  ],
+  "host": {
+    "architecture": "AMD64 / x86_64",
+    "build": "26200.9974",
+    "computer_name": "OBIGAMING",
+    "display_version": "25H2",
+    "platform_api": "Windows-11-10.0.26200-SP0",
+    "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "registry_product_name": "Windows 10 Pro",
+    "release": "Windows 11"
+  },
+  "integration_baseline": "a50bf383d16412a30f636a4011d43378974c0632",
+  "issue": 75,
+  "live_origin_main_at_bootstrap_and_prepublication": "a50bf383d16412a30f636a4011d43378974c0632",
+  "policy_repository": "https://github.com/danielbyon/development-process",
+  "policy_revision": "142422527de28b8e20dea1158d2f54d020dcdcd5",
+  "raw_capture_root_private": "%LOCALAPPDATA%\\NSCB\\qualification\\issue-75\\windows11-20261113T091610Z\\raw",
+  "raw_log_hash_algorithm": "SHA-256",
+  "raw_logs_published": false,
+  "runner": {
+    "command_prefix": [
+      "rtk",
+      "proxy",
+      "rustup.exe",
+      "run",
+      "1.98.1-x86_64-pc-windows-msvc",
+      "cargo"
+    ],
+    "isolated_roots_per_revision": {
+      "CARGO_HOME": "<revision-private-root>\\cargo-home",
+      "CARGO_TARGET_DIR": "<revision-private-root>\\cargo-target",
+      "NSCB_STATE_DIR": "<revision-private-root>\\state",
+      "TEMP": "<revision-private-root>\\temp",
+      "TMP": "<revision-private-root>\\tmp"
+    },
+    "provider_cache_and_split_trust": "all library fixtures used isolated temporary or test-local roots; no user cache or trust state was used",
+    "rust_backtrace": "unset for unmodified matrix; set to 1 only for directory-path confirmation instrumentation"
+  },
+  "runs": [
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 8350,
+        "private_file": "base-01-full-parallel.stderr.raw",
+        "sha256": "de0e46a2d92089c7703ad742b1fb78e095da9cd2af9906a2d65ed44df13e5f00"
+      },
+      "raw_stdout": {
+        "bytes": 25353,
+        "private_file": "base-01-full-parallel.stdout.raw",
+        "sha256": "a87680abc77aa0cbbd4d400273efce143c4f7d9e180d910e15ee0aaee1e8bf85"
+      },
+      "run_id": "base-01-full-parallel",
+      "sanitized_excerpt": "run_id: base-01-full-parallel\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\"]\nexit_code: 101\n--- stdout observations ---\nrunning 245 tests\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:530:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 6.02s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "91086acbb7a3bc58f7c914147f0714c7bda3f784aab2cb9ece46e84c0ccc8297",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 6.02s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-02-full-serial.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 25355,
+        "private_file": "base-02-full-serial.stdout.raw",
+        "sha256": "b655964e31df84a4e7bb6f4c1b2b73669f271e25a51d83acb148db15d1f91c1e"
+      },
+      "run_id": "base-02-full-serial",
+      "sanitized_excerpt": "run_id: base-02-full-serial\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"--test-threads=1\"]\nexit_code: 101\n--- stdout observations ---\nrunning 245 tests\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:530:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.09s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "719132b434c9b7feb885df37f564516c6d8b5290c7a6fcb74e7db1c2de6c5f64",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.09s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-03-directory.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 629,
+        "private_file": "base-03-directory.stdout.raw",
+        "sha256": "35ac8f6531675315c214009a39e506a6d24a153651474fbd08a36bab5bf17ae6"
+      },
+      "run_id": "base-03-directory",
+      "sanitized_excerpt": "run_id: base-03-directory\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:530:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.00s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "4e2db4d841ffe6bc4acb20957cd7d8514073dfe6576debb18e78782f8dc16588",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-04-cache-corrupt-orphan.stderr.raw",
+        "sha256": "50520ec7e89843e83f8caf0d824f67fe5c07353cc00f3c5b1f436c24c3d84bdf"
+      },
+      "raw_stdout": {
+        "bytes": 750,
+        "private_file": "base-04-cache-corrupt-orphan.stdout.raw",
+        "sha256": "ccf27219ba87bcd12b577c1289363a86a6d2eb0ce1d994af3d5ea05b5f2bfe14"
+      },
+      "run_id": "base-04-cache-corrupt-orphan",
+      "sanitized_excerpt": "run_id: base-04-cache-corrupt-orphan\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\nfailures:\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "f6224ef1b8ec32de1db368d72d705fa95cd2ac2982b19bae9e0d64876e3f8bf3",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-05-cache-interrupted-temp.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 778,
+        "private_file": "base-05-cache-interrupted-temp.stdout.raw",
+        "sha256": "0a601b0f56d6c3187728259dfc4cef0e5c4ce38a3005c309164a72779ae0d8de"
+      },
+      "run_id": "base-05-cache-interrupted-temp",
+      "sanitized_excerpt": "run_id: base-05-cache-interrupted-temp\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\nfailures:\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "e4366d803d2f0f919d0d3b1c1654a06e17d9f218d7a3bd3c5b8220d57ac5c913",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-06-cache-malformed-pointer.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 706,
+        "private_file": "base-06-cache-malformed-pointer.stdout.raw",
+        "sha256": "dce26334fc3065e5462352bf4ee814d37a69057484a3288df316e49b32e760b1"
+      },
+      "run_id": "base-06-cache-malformed-pointer",
+      "sanitized_excerpt": "run_id: base-06-cache-malformed-pointer\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "8df4bce4bebbb6544cd5b2ba344bfad7670e1c42ca60e526b55c8ac0afa0a0bb",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::tampered_cached_executable_is_not_reported_ready",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-07-cache-tampered-executable.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 666,
+        "private_file": "base-07-cache-tampered-executable.stdout.raw",
+        "sha256": "e47004630a63336e61656d5aa588c6688accebfe462403daca122fb9570411be"
+      },
+      "run_id": "base-07-cache-tampered-executable",
+      "sanitized_excerpt": "run_id: base-07-cache-tampered-executable\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::tampered_cached_executable_is_not_reported_ready\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\nfailures:\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "636c1531e739b0286ea7f90ab1f775d7503162eb91db18cdd4c319be0d6e9fc2",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-08-cache-missing-object.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 750,
+        "private_file": "base-08-cache-missing-object.stdout.raw",
+        "sha256": "12ec996e3ac0be0a776e5b7b020e3256cac28aca7500ecb423954e5e5163ff67"
+      },
+      "run_id": "base-08-cache-missing-object",
+      "sanitized_excerpt": "run_id: base-08-cache-missing-object\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\nfailures:\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "4438eebfbc5d0d6388883e9ce7025c98125eddb287f4fc1933f135c36fc6c43b",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "base-09-split-cleanup-lease.stderr.raw",
+        "sha256": "cf66016b7d4b6e6ef4e22b58fee21d595af09c7e62d9c79ac85c9195926e1c98"
+      },
+      "raw_stdout": {
+        "bytes": 732,
+        "private_file": "base-09-split-cleanup-lease.stdout.raw",
+        "sha256": "4e9963ef906bda0121342e62723354bb8532675518309962b5cbe1dbd1173647"
+      },
+      "run_id": "base-09-split-cleanup-lease",
+      "sanitized_excerpt": "run_id: base-09-split-cleanup-lease\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.02s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "f95af5f64a633aa0d04a3732b92d1edb4438d20b5367bb0c97f5cb868fe5e9d4",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.02s"
+    },
+    {
+      "cargo_arguments": [
+        "clippy",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 3846,
+        "private_file": "base-10-clippy.stderr.raw",
+        "sha256": "a6f75ec615c9f97eed3aa410a532ec79423a9b4032b370a6b597300b1ebe88d6"
+      },
+      "raw_stdout": {
+        "bytes": 0,
+        "private_file": "base-10-clippy.stdout.raw",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "run_id": "base-10-clippy",
+      "sanitized_excerpt": "run_id: base-10-clippy\nphase: unmodified_before_instrumentation\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"clippy\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"-D\",\"warnings\"]\nexit_code: 101\n--- stdout observations ---\n--- stderr observations ---\nerror: unused import: `std::os::windows::io::AsRawHandle`\n  --> src\\provider\\process.rs:16:5\n   |\n16 | use std::os::windows::io::AsRawHandle;\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n   |\n   = note: `-D unused-imports` implied by `-D warnings`\n   = help: to override `-D warnings` add `#[allow(unused_imports)]`\nerror: could not compile `nscb` (lib) due to 1 previous error\n",
+      "sanitized_excerpt_sha256": "55b45ef54a61980e4ba3af282b8c57113e3ac9942a9291d82bfcced98ddc17f8",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": null
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 8355,
+        "private_file": "candidate-01-full-parallel.stderr.raw",
+        "sha256": "0464a6d78472dcd39afba4e7e7905b16933183ed650e1e10e6cf222930449f68"
+      },
+      "raw_stdout": {
+        "bytes": 26795,
+        "private_file": "candidate-01-full-parallel.stdout.raw",
+        "sha256": "3b6b995303b98d5380fd35415b3b08e3363f69475db905c6fcc333c16194b793"
+      },
+      "run_id": "candidate-01-full-parallel",
+      "sanitized_excerpt": "run_id: candidate-01-full-parallel\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\"]\nexit_code: 101\n--- stdout observations ---\nrunning 261 tests\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\nfailures:\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:540:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 11.33s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "92174f8b7ec73d7e2a9870d186a5fdc158cac5c5407f66547271f9a0fdb717ae",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 11.33s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-02-full-serial.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 26797,
+        "private_file": "candidate-02-full-serial.stdout.raw",
+        "sha256": "673e22596b0c3bd790a0adc18ff3ab0d557971dfb50f4866a5945a48e7b351cb"
+      },
+      "run_id": "candidate-02-full-serial",
+      "sanitized_excerpt": "run_id: candidate-02-full-serial\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"--test-threads=1\"]\nexit_code: 101\n--- stdout observations ---\nrunning 261 tests\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\nfailures:\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:540:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.53s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "9353e4063dd365ba7539aab34e54394360f694d7e4432e445aaaa09b44f906f5",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.53s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-03-directory.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 629,
+        "private_file": "candidate-03-directory.stdout.raw",
+        "sha256": "e810d6bfe0bbba8cfd0446222baa3adb911deca0feae44bbee7153a2a6cdf24f"
+      },
+      "run_id": "candidate-03-directory",
+      "sanitized_excerpt": "run_id: candidate-03-directory\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:540:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "070ba7f0453190eed6ed61cd45f0e5c742a92ce20745c28a76f51a0868a47cc1",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-04-cache-corrupt-orphan.stderr.raw",
+        "sha256": "86eb03379eed050f1b71da1d605993bb0fa71b1fa1346b6b9c54662b6b160880"
+      },
+      "raw_stdout": {
+        "bytes": 750,
+        "private_file": "candidate-04-cache-corrupt-orphan.stdout.raw",
+        "sha256": "592658b44fddb936098d6646388caa5be7bf1ebe2365edeae2fe20c4b396925a"
+      },
+      "run_id": "candidate-04-cache-corrupt-orphan",
+      "sanitized_excerpt": "run_id: candidate-04-cache-corrupt-orphan\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\nfailures:\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "340e61bf6f5a14f25b7dac5e2f0bbd69e2b79966919e0db8a0f5949bbaf2facc",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-05-cache-interrupted-temp.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 778,
+        "private_file": "candidate-05-cache-interrupted-temp.stdout.raw",
+        "sha256": "f884079bebd1adc0ea22a5a35dde9b1d500fd14a61609b6d077ab9b8797c5a3d"
+      },
+      "run_id": "candidate-05-cache-interrupted-temp",
+      "sanitized_excerpt": "run_id: candidate-05-cache-interrupted-temp\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\nfailures:\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "0e46ffc5cc0bf558656edd18fab2264be643e20b8d142d314c11ad90449c5efa",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-06-cache-malformed-pointer.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 706,
+        "private_file": "candidate-06-cache-malformed-pointer.stdout.raw",
+        "sha256": "4d05f84a1aab2859ab39ccc47a76ad9c24f9cc36750fa22f9e39d0c69dfc9488"
+      },
+      "run_id": "candidate-06-cache-malformed-pointer",
+      "sanitized_excerpt": "run_id: candidate-06-cache-malformed-pointer\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "ce184fdff20fdfd9eb4a5faf360c23fac78a5af5e46750aba10801c487922a71",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::tampered_cached_executable_is_not_reported_ready",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-07-cache-tampered-executable.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 666,
+        "private_file": "candidate-07-cache-tampered-executable.stdout.raw",
+        "sha256": "901ab761cc2922884cb89a767a045ff68ff0b8cc78717d707979e5e900097558"
+      },
+      "run_id": "candidate-07-cache-tampered-executable",
+      "sanitized_excerpt": "run_id: candidate-07-cache-tampered-executable\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::tampered_cached_executable_is_not_reported_ready\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\nfailures:\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "87e000e3060f17fb4df7aead32ad424096cbc9f456ad02b807a2195e48a9a823",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-08-cache-missing-object.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 750,
+        "private_file": "candidate-08-cache-missing-object.stdout.raw",
+        "sha256": "31c58687f7f393b378100115f9219a1fcba075260c8c8c00953898b6a303cee4"
+      },
+      "run_id": "candidate-08-cache-missing-object",
+      "sanitized_excerpt": "run_id: candidate-08-cache-missing-object\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\nfailures:\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "7119626ff8a0bb5507a826549549f5c86b812e3a313a91e3119c5656ad38dac9",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4408,
+        "private_file": "candidate-09-split-cleanup-lease.stderr.raw",
+        "sha256": "c45b098fa8103cb25fe223de60de6b8c874d9b6044aef1761a0cfd9a611dede0"
+      },
+      "raw_stdout": {
+        "bytes": 732,
+        "private_file": "candidate-09-split-cleanup-lease.stdout.raw",
+        "sha256": "d8caffa395b450171cc15ea35be7d776c695960e991b1b4bc2f93b84f88ea09f"
+      },
+      "run_id": "candidate-09-split-cleanup-lease",
+      "sanitized_excerpt": "run_id: candidate-09-split-cleanup-lease\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\nfailures:\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.02s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "e861b16e36daa9fedb129531213756038b24e427a9d1f101a2e5e2b7ff7ee35e",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.02s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "test_allocator::tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 0,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4366,
+        "private_file": "candidate-10-candidate-test-allocator.stderr.raw",
+        "sha256": "f7703a1937fae989f08b17f3ce767e017b346c68bfa16a82fa313013cf3fff26"
+      },
+      "raw_stdout": {
+        "bytes": 459,
+        "private_file": "candidate-10-candidate-test-allocator.stdout.raw",
+        "sha256": "4843b42851e04dcb3596dbafdf1e7b43429454f7b843102c82b361a7e11c4e95"
+      },
+      "run_id": "candidate-10-candidate-test-allocator",
+      "sanitized_excerpt": "run_id: candidate-10-candidate-test-allocator\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"test_allocator::tests\",\"--\",\"--test-threads=1\"]\nexit_code: 0\n--- stdout observations ---\nrunning 4 tests\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 257 filtered out; finished in 0.00s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "11e4592c02e1aa4cedccba5f49d22188c5120dddae491ece9a6612d56fa0504e",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 257 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "clippy",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_before_instrumentation",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 3851,
+        "private_file": "candidate-11-clippy.stderr.raw",
+        "sha256": "38ded074f1811ff1b09cade7a3c40d55bac33e20f65839f07a3b83b9f7ba5e52"
+      },
+      "raw_stdout": {
+        "bytes": 0,
+        "private_file": "candidate-11-clippy.stdout.raw",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "run_id": "candidate-11-clippy",
+      "sanitized_excerpt": "run_id: candidate-11-clippy\nphase: unmodified_before_instrumentation\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"clippy\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"-D\",\"warnings\"]\nexit_code: 101\n--- stdout observations ---\n--- stderr observations ---\nerror: unused import: `std::os::windows::io::AsRawHandle`\n  --> src\\provider\\process.rs:16:5\n   |\n16 | use std::os::windows::io::AsRawHandle;\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n   |\n   = note: `-D unused-imports` implied by `-D warnings`\n   = help: to override `-D warnings` add `#[allow(unused_imports)]`\nerror: could not compile `nscb` (lib) due to 1 previous error\n",
+      "sanitized_excerpt_sha256": "af4d96b0ea3120c7491d52a85b5742125ebf167e226f3a6d650de544d11a0e27",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": null
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-directory.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4841,
+        "private_file": "base-13-postrestore-directory.stderr.raw",
+        "sha256": "138fec5d7a5e19f0d55c43d3d0fcd2808a2efe3c447070abaa299d7818ebb06d"
+      },
+      "raw_stdout": {
+        "bytes": 282,
+        "private_file": "base-13-postrestore-directory.stdout.raw",
+        "sha256": "d338ad2e59ec2498dcf6d33b79107b5a7b9c10f42b3c6cc82c6955b8c327c029"
+      },
+      "run_id": "base-13-postrestore-directory",
+      "sanitized_excerpt": "run_id: base-13-postrestore-directory\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:530:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n",
+      "sanitized_excerpt_sha256": "1b943ca377cf16ffdbbbdb592ce293c359d58ab8874f99239672b12de3b6be5a",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-cache-corrupt-orphan.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4768,
+        "private_file": "base-13-postrestore-cache-corrupt-orphan.stderr.raw",
+        "sha256": "51f2b295f901d5ecdb7ab8df9fb112b56fce3059f433f327739499ed91506cef"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "base-13-postrestore-cache-corrupt-orphan.stdout.raw",
+        "sha256": "2240983ed4dd2a25e01285da9901cf583acbb549f6fa03e7014c50a4df131122"
+      },
+      "run_id": "base-13-postrestore-cache-corrupt-orphan",
+      "sanitized_excerpt": "run_id: base-13-postrestore-cache-corrupt-orphan\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "e4b0c6a5989021f17853c92de2a2ec89bd5cfca3dadcfc30d1369f767ce7e764",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-cache-interrupted-temp.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4776,
+        "private_file": "base-13-postrestore-cache-interrupted-temp.stderr.raw",
+        "sha256": "59b502e19583249ba328869f4ebcb6dc2657a5213d5a71ef173de167bfb20b5a"
+      },
+      "raw_stdout": {
+        "bytes": 362,
+        "private_file": "base-13-postrestore-cache-interrupted-temp.stdout.raw",
+        "sha256": "ed0e9b3be61b8ee42a28b3ddca4ef761f729adf549677c07a6cac96c50875ac2"
+      },
+      "run_id": "base-13-postrestore-cache-interrupted-temp",
+      "sanitized_excerpt": "run_id: base-13-postrestore-cache-interrupted-temp\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "ec95a0cff0b8d3b34b20e91852089732d9e0bcd8cc2192a1a02941d37243c866",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-cache-malformed-pointer.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4758,
+        "private_file": "base-13-postrestore-cache-malformed-pointer.stderr.raw",
+        "sha256": "8e714eb9eb68a50ca274c121f6b15e7c489af8314dfcb40bc0d18f35f113d502"
+      },
+      "raw_stdout": {
+        "bytes": 326,
+        "private_file": "base-13-postrestore-cache-malformed-pointer.stdout.raw",
+        "sha256": "bce59cc2b66e515727e3bae70afac8a3d8919d3705c40a3945e635bab4298fcf"
+      },
+      "run_id": "base-13-postrestore-cache-malformed-pointer",
+      "sanitized_excerpt": "run_id: base-13-postrestore-cache-malformed-pointer\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "8c167134016d21c92d46b02acff0ac5e3b6d6851ed9dc8ace6df26958296eef7",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::tampered_cached_executable_is_not_reported_ready",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-cache-tampered-executable.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4748,
+        "private_file": "base-13-postrestore-cache-tampered-executable.stderr.raw",
+        "sha256": "037863406bf9d6efbe546c63c8cb2f1d48f4cb2735925dd40fc42ee6e5ca5472"
+      },
+      "raw_stdout": {
+        "bytes": 306,
+        "private_file": "base-13-postrestore-cache-tampered-executable.stdout.raw",
+        "sha256": "ff37848caa41bd47c773179690e2c702d733fbb0bd319a4c85344143c976792b"
+      },
+      "run_id": "base-13-postrestore-cache-tampered-executable",
+      "sanitized_excerpt": "run_id: base-13-postrestore-cache-tampered-executable\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::tampered_cached_executable_is_not_reported_ready\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "7b510ce101e3ecae235b34c428905c4df1f43928358eafeca690a9346fed6ad8",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-cache-missing-object.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4769,
+        "private_file": "base-13-postrestore-cache-missing-object.stderr.raw",
+        "sha256": "6b8c253bacb0cf51149d767a7ca7901ddd4f8599bc1e56830c5e199dfa642f75"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "base-13-postrestore-cache-missing-object.stdout.raw",
+        "sha256": "3cbffcd9813970d801cbb83670e8a5f421725c7c3fbfa7456c835e59ba4b8d49"
+      },
+      "run_id": "base-13-postrestore-cache-missing-object",
+      "sanitized_excerpt": "run_id: base-13-postrestore-cache-missing-object\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "97a801a3b1650a06baa63601a9258e4a4e99f0135a6010d94fe09e05b2136589",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-13-postrestore-split-cleanup-lease.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4763,
+        "private_file": "base-13-postrestore-split-cleanup-lease.stderr.raw",
+        "sha256": "87465a4da9005c62d171db01571a66cabb5b041281f360f20a28adab68365605"
+      },
+      "raw_stdout": {
+        "bytes": 340,
+        "private_file": "base-13-postrestore-split-cleanup-lease.stdout.raw",
+        "sha256": "b33e45e6dd4ec5f6cddc3a55b59e8ce78fe4199460d8a6f9a1b5c7653cf35423"
+      },
+      "run_id": "base-13-postrestore-split-cleanup-lease",
+      "sanitized_excerpt": "run_id: base-13-postrestore-split-cleanup-lease\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\nfailures:\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.03s\n--- stderr observations ---\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\n",
+      "sanitized_excerpt_sha256": "4cb5235cc37aa25a0f6bd555b76acbf5eac57d080b399320f7418185a7fee8e7",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.03s"
+    },
+    {
+      "cargo_arguments": [
+        "clippy",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-20-postrestore-clippy.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 3846,
+        "private_file": "base-20-postrestore-clippy.stderr.raw",
+        "sha256": "83e89c03e3ac14fd0a042b11b17107b553a9866363d8817381caf75c7a03738b"
+      },
+      "raw_stdout": {
+        "bytes": 0,
+        "private_file": "base-20-postrestore-clippy.stdout.raw",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "run_id": "base-20-postrestore-clippy",
+      "sanitized_excerpt": "run_id: base-20-postrestore-clippy\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"clippy\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"-D\",\"warnings\"]\nexit_code: 101\n--- stdout observations ---\n--- stderr observations ---\nerror: unused import: `std::os::windows::io::AsRawHandle`\n  --> src\\provider\\process.rs:16:5\n   |\n16 | use std::os::windows::io::AsRawHandle;\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n   |\n   = note: `-D unused-imports` implied by `-D warnings`\n   = help: to override `-D warnings` add `#[allow(unused_imports)]`\nerror: could not compile `nscb` (lib) due to 1 previous error\n",
+      "sanitized_excerpt_sha256": "1cf72207a5ad330d251fc04c328445ab39e66a3b33e26fbc375c7b4dfe7e917d",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": null
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-30-postrestore-full-parallel.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4480,
+        "private_file": "base-30-postrestore-full-parallel.stderr.raw",
+        "sha256": "798a4ab706e5a2762230d028f071e5ec0d7ac38f0c95d56a9486c6624cb1d7f2"
+      },
+      "raw_stdout": {
+        "bytes": 25354,
+        "private_file": "base-30-postrestore-full-parallel.stdout.raw",
+        "sha256": "24b831d132d936ca13f75488faf2dd6ddbac7a7f18529c45a68fadb929c4512a"
+      },
+      "run_id": "base-30-postrestore-full-parallel",
+      "sanitized_excerpt": "run_id: base-30-postrestore-full-parallel\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\"]\nexit_code: 101\n--- stdout observations ---\nrunning 245 tests\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:530:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 5.81s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "04349fdce5a20e19b11888db39839d726d8cc813410b1d340b4317b715c8826b",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 5.81s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "base-31-postrestore-full-serial.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4480,
+        "private_file": "base-31-postrestore-full-serial.stderr.raw",
+        "sha256": "e207818229d500c76662d94eaeb7cfb290caa79ebfe4f8c971b7a6849905ed59"
+      },
+      "raw_stdout": {
+        "bytes": 25354,
+        "private_file": "base-31-postrestore-full-serial.stdout.raw",
+        "sha256": "9305fda02dab51315c892d9d31f865e795806d1be1d1182a809bf7775c3bb6ad"
+      },
+      "run_id": "base-31-postrestore-full-serial",
+      "sanitized_excerpt": "run_id: base-31-postrestore-full-serial\nphase: unmodified_after_restore\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"--test-threads=1\"]\nexit_code: 101\n--- stdout observations ---\nrunning 245 tests\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:530:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 12.33s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "85d2af755d2047097cda3bd0e5ef2e1a67ccc5f87e7385dd5fb67c993e63213e",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 234 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 12.33s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-directory.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4851,
+        "private_file": "candidate-13-postrestore-directory.stderr.raw",
+        "sha256": "135f679cf2df2b16cc86f07138f21e29c8736a5e0ede8e4e1e731f08932d098d"
+      },
+      "raw_stdout": {
+        "bytes": 282,
+        "private_file": "candidate-13-postrestore-directory.stdout.raw",
+        "sha256": "07f9458dc36ba4f354a2aa2f5e374a2675db9992aa78fc0a314e49cf1c26a1ac"
+      },
+      "run_id": "candidate-13-postrestore-directory",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-directory\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s\n--- stderr observations ---\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:540:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n",
+      "sanitized_excerpt_sha256": "45d25481b87a4be90493b7f5cda95a2521d8c48802da71f7e41f9f230b3c296d",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-cache-corrupt-orphan.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4774,
+        "private_file": "candidate-13-postrestore-cache-corrupt-orphan.stderr.raw",
+        "sha256": "1195265f4bc63c2490041e6859c7a9aff44292f063f05734e75918ae23ba3989"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "candidate-13-postrestore-cache-corrupt-orphan.stdout.raw",
+        "sha256": "be2d748e2f10a0b53a63a2c7f12e464a9330b5ec6522a35cc790947fd1110c95"
+      },
+      "run_id": "candidate-13-postrestore-cache-corrupt-orphan",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-cache-corrupt-orphan\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "f7a119b9c19f1d1f00dd1937a716639d0abf5289ef4a238ace2e0a5b0dec617f",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-cache-interrupted-temp.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4781,
+        "private_file": "candidate-13-postrestore-cache-interrupted-temp.stderr.raw",
+        "sha256": "694677e944c47c256980259db864631db3bdcad5ec453f8d39890aac8ce74cbb"
+      },
+      "raw_stdout": {
+        "bytes": 362,
+        "private_file": "candidate-13-postrestore-cache-interrupted-temp.stdout.raw",
+        "sha256": "9836fbea4ed53c0ec35600ba7181c695d35edfb9222e5174cf6975e9ee313feb"
+      },
+      "run_id": "candidate-13-postrestore-cache-interrupted-temp",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-cache-interrupted-temp\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "c65cf1edd62781507a8ff7d26d6434f101c76a8a6f67a97d117f15b7962102df",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-cache-malformed-pointer.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4763,
+        "private_file": "candidate-13-postrestore-cache-malformed-pointer.stderr.raw",
+        "sha256": "449f2f6b004fa27db950bcb95ebb228fae01f0468035f8f8ec272bb81b71384a"
+      },
+      "raw_stdout": {
+        "bytes": 326,
+        "private_file": "candidate-13-postrestore-cache-malformed-pointer.stdout.raw",
+        "sha256": "85d04c085d543d9bdd021861af122985162d858ccaf02c311d81a5628f24372a"
+      },
+      "run_id": "candidate-13-postrestore-cache-malformed-pointer",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-cache-malformed-pointer\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.06s\n--- stderr observations ---\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "eca767da73ce192ddb1e3f340a330ed8042f8c09a8f95f46dd2ef07c887ab3f9",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.06s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::tampered_cached_executable_is_not_reported_ready",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-cache-tampered-executable.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4753,
+        "private_file": "candidate-13-postrestore-cache-tampered-executable.stderr.raw",
+        "sha256": "fdfb095d877962952df8fbf19c70ffd39dbd0b3a2708493099d13bdedc49526b"
+      },
+      "raw_stdout": {
+        "bytes": 306,
+        "private_file": "candidate-13-postrestore-cache-tampered-executable.stdout.raw",
+        "sha256": "5b6866cdf46b2cd368719933b691cae3cf1461c1abfb70c0bd2b8d9bb79c9104"
+      },
+      "run_id": "candidate-13-postrestore-cache-tampered-executable",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-cache-tampered-executable\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::tampered_cached_executable_is_not_reported_ready\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "00df59ade34dae373291058fbc6b5ece9c970162396befdb98f986ffcf34d1bc",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-cache-missing-object.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4773,
+        "private_file": "candidate-13-postrestore-cache-missing-object.stderr.raw",
+        "sha256": "3778af1d49618874df28769f3d3ac6a650b8ef83b9b7ff8e6824ad2011a7a19b"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "candidate-13-postrestore-cache-missing-object.stdout.raw",
+        "sha256": "a6a9f596d3dd01a495a0081fe311b5b9c37b295c23c863061769299f64c24f23"
+      },
+      "run_id": "candidate-13-postrestore-cache-missing-object",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-cache-missing-object\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "69df3070f5b54f475d012a0f37f6256399cd2236d9d8c3d3615e5d7470f6a10d",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-13-postrestore-split-cleanup-lease.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4768,
+        "private_file": "candidate-13-postrestore-split-cleanup-lease.stderr.raw",
+        "sha256": "ea65a9218143a68089a338aaf2225c6a5a3f41afeefcda0014806040ccb25403"
+      },
+      "raw_stdout": {
+        "bytes": 340,
+        "private_file": "candidate-13-postrestore-split-cleanup-lease.stdout.raw",
+        "sha256": "fd8f609551df90da2385b4f4892f750a22ef0d7ae18c4f5adaf63b81c6b172b3"
+      },
+      "run_id": "candidate-13-postrestore-split-cleanup-lease",
+      "sanitized_excerpt": "run_id: candidate-13-postrestore-split-cleanup-lease\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\nfailures:\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.02s\n--- stderr observations ---\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\n",
+      "sanitized_excerpt_sha256": "09b9c6a4a9bbb1718faab97fadb0a31dadbd817023145d654bee2252b6ba617d",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.02s"
+    },
+    {
+      "cargo_arguments": [
+        "clippy",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-20-postrestore-clippy.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 3851,
+        "private_file": "candidate-20-postrestore-clippy.stderr.raw",
+        "sha256": "9a15a42871ae3bf6f76bd3bec6e286bb82289aecae8f092b375aedc47e4944c2"
+      },
+      "raw_stdout": {
+        "bytes": 0,
+        "private_file": "candidate-20-postrestore-clippy.stdout.raw",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "run_id": "candidate-20-postrestore-clippy",
+      "sanitized_excerpt": "run_id: candidate-20-postrestore-clippy\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"clippy\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"-D\",\"warnings\"]\nexit_code: 101\n--- stdout observations ---\n--- stderr observations ---\nerror: unused import: `std::os::windows::io::AsRawHandle`\n  --> src\\provider\\process.rs:16:5\n   |\n16 | use std::os::windows::io::AsRawHandle;\n   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n   |\n   = note: `-D unused-imports` implied by `-D warnings`\n   = help: to override `-D warnings` add `#[allow(unused_imports)]`\nerror: could not compile `nscb` (lib) due to 1 previous error\n",
+      "sanitized_excerpt_sha256": "1eb2b14fb0acce975753567c097902f7b70df8bb17e7172c3e5b796394d98895",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": null
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-30-postrestore-full-parallel.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4485,
+        "private_file": "candidate-30-postrestore-full-parallel.stderr.raw",
+        "sha256": "f5eca6918a4e7fd7714543f8b41cb2922303426d93bdac43df8f12b47ec0dcbf"
+      },
+      "raw_stdout": {
+        "bytes": 26796,
+        "private_file": "candidate-30-postrestore-full-parallel.stdout.raw",
+        "sha256": "9600e4f70d956617065c76fb320517b71a4e4c4395607f54725d85c4b4e262d8"
+      },
+      "run_id": "candidate-30-postrestore-full-parallel",
+      "sanitized_excerpt": "run_id: candidate-30-postrestore-full-parallel\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\"]\nexit_code: 101\n--- stdout observations ---\nrunning 261 tests\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\nfailures:\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:540:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 6.87s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "e1746c7b53950d00d108acd7b8bd0eeed419098c8b9f313ed0cc991858a75d81",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 6.87s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 5,
+        "private_file": "candidate-31-postrestore-full-serial.exit",
+        "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+      },
+      "raw_stderr": {
+        "bytes": 4485,
+        "private_file": "candidate-31-postrestore-full-serial.stderr.raw",
+        "sha256": "5ac8dd38d1b657136a4bf1c05da2ff60b50fcfc3cb80274bb4f5d9a0bd90cd78"
+      },
+      "raw_stdout": {
+        "bytes": 26797,
+        "private_file": "candidate-31-postrestore-full-serial.stdout.raw",
+        "sha256": "34ed834325a2f481fdf7972f1f382ffe48c2b8d89864d8e2ecc7d67c7370ddbe"
+      },
+      "run_id": "candidate-31-postrestore-full-serial",
+      "sanitized_excerpt": "run_id: candidate-31-postrestore-full-serial\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"--\",\"--test-threads=1\"]\nexit_code: 101\n--- stdout observations ---\nrunning 261 tests\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\nfailures:\n---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2179:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2199:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2163:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2052:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2255:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:540:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2448:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.35s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "ff8cfc8fa51362df7c2c138bd68e2c51d9a0d68cfeb4143efacd07c599dcc3fd",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 13.35s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "test_allocator::tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 0,
+      "exit_code_basis": "The test result line reports success; a separate exact post-restore repetition recorded the per-run process exit code in candidate-33-postrestore-test-allocator-exitcapture.",
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4443,
+        "private_file": "candidate-32-postrestore-test-allocator.stderr.raw",
+        "sha256": "e867c605df775efe436e2a3dad5029811e47adbcee7e63e5db077d5e4fb94706"
+      },
+      "raw_stdout": {
+        "bytes": 459,
+        "private_file": "candidate-32-postrestore-test-allocator.stdout.raw",
+        "sha256": "4843b42851e04dcb3596dbafdf1e7b43429454f7b843102c82b361a7e11c4e95"
+      },
+      "run_id": "candidate-32-postrestore-test-allocator",
+      "sanitized_excerpt": "run_id: candidate-32-postrestore-test-allocator\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"test_allocator::tests\",\"--\",\"--test-threads=1\"]\nexit_code: 0\n--- stdout observations ---\nrunning 4 tests\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 257 filtered out; finished in 0.00s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "8e8783754cc95145517be2ae448cfc12b6a8bb3e3458dd4c77b92f511d8e9cb5",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 257 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4826,
+        "private_file": "base-instr-directory.stderr.raw",
+        "sha256": "76e5d82fe77e98a6a4ffdf402ac7e8065135d69f142632d377c45ee09e4230ba"
+      },
+      "raw_stdout": {
+        "bytes": 282,
+        "private_file": "base-instr-directory.stdout.raw",
+        "sha256": "4a6f75a9a2624d9c2287f50bf7faf2edc6167df4aa3ec4018b3878580dbee912"
+      },
+      "run_id": "base-instr-directory",
+      "sanitized_excerpt": "run_id: base-instr-directory\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.00s\n--- stderr observations ---\nISSUE75_DIAG directory_open kind=NotFound raw_os=Some(3)\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:535:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n",
+      "sanitized_excerpt_sha256": "01a4dee85a0357534f9154b6b0bafb543cb4b5161f113d8dc9fac2496171ca5a",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4784,
+        "private_file": "base-instr-04-cache-corrupt-orphan.stderr.raw",
+        "sha256": "5c51c9ce7f8381c0e64395a566305f8358ddaac0501ef5f41b090aa215f37d5c"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "base-instr-04-cache-corrupt-orphan.stdout.raw",
+        "sha256": "2240983ed4dd2a25e01285da9901cf583acbb549f6fa03e7014c50a4df131122"
+      },
+      "run_id": "base-instr-04-cache-corrupt-orphan",
+      "sanitized_excerpt": "run_id: base-instr-04-cache-corrupt-orphan\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2227:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "4d0818c05c90e09f7437ca01f149c894ab171788a516a0d9f84af46cabb65657",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4791,
+        "private_file": "base-instr-05-cache-interrupted-temp.stderr.raw",
+        "sha256": "810a0a40cebd52e3f6ebb9cca21505ff7c8c2449adf62fbf3449aaea5fb738a3"
+      },
+      "raw_stdout": {
+        "bytes": 362,
+        "private_file": "base-instr-05-cache-interrupted-temp.stdout.raw",
+        "sha256": "ed0e9b3be61b8ee42a28b3ddca4ef761f729adf549677c07a6cac96c50875ac2"
+      },
+      "run_id": "base-instr-05-cache-interrupted-temp",
+      "sanitized_excerpt": "run_id: base-instr-05-cache-interrupted-temp\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2247:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "13270f130033f66d3c00944017952a31b0d3ac845b0d463a2418f7e28713c962",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4773,
+        "private_file": "base-instr-06-cache-malformed-pointer.stderr.raw",
+        "sha256": "09fc36c3a1eeb31bc5d43f1bb8a67c45c26b99406c958c95664b8f1c7a62f790"
+      },
+      "raw_stdout": {
+        "bytes": 326,
+        "private_file": "base-instr-06-cache-malformed-pointer.stdout.raw",
+        "sha256": "bce59cc2b66e515727e3bae70afac8a3d8919d3705c40a3945e635bab4298fcf"
+      },
+      "run_id": "base-instr-06-cache-malformed-pointer",
+      "sanitized_excerpt": "run_id: base-instr-06-cache-malformed-pointer\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2211:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "c089ec8a7f97e1ef7063f7bcabbfc13777da9e179335e461f60a3f171f2a4cc2",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::tampered_cached_executable_is_not_reported_ready",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4762,
+        "private_file": "base-instr-07-cache-tampered-executable.stderr.raw",
+        "sha256": "cb4789100d02f0556ed0f0350f88625f57e9467df6b521a1f789b99208c27a8f"
+      },
+      "raw_stdout": {
+        "bytes": 306,
+        "private_file": "base-instr-07-cache-tampered-executable.stdout.raw",
+        "sha256": "ff37848caa41bd47c773179690e2c702d733fbb0bd319a4c85344143c976792b"
+      },
+      "run_id": "base-instr-07-cache-tampered-executable",
+      "sanitized_excerpt": "run_id: base-instr-07-cache-tampered-executable\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::tampered_cached_executable_is_not_reported_ready\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2303:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "6c2889cb621a789dcad43c2c59a55a4accfb3f950d8af020c60cba7b3abe1bbd",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4784,
+        "private_file": "base-instr-08-cache-missing-object.stderr.raw",
+        "sha256": "5a024fead62cb1463a6e61a2bface2f98a757500c034c9b0107ff16442dbc96e"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "base-instr-08-cache-missing-object.stdout.raw",
+        "sha256": "3cbffcd9813970d801cbb83670e8a5f421725c7c3fbfa7456c835e59ba4b8d49"
+      },
+      "run_id": "base-instr-08-cache-missing-object",
+      "sanitized_excerpt": "run_id: base-instr-08-cache-missing-object\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2100:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "6e93d3e9fe1d09b1cac036f37b9282ff9400c651eef80bc4ae2a69e0531123a1",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "6c3da636fa9296239a98a397d39a4c62b5d5763456b15890bc4166dfab6ddeb9",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4800,
+        "private_file": "base-instr-split.stderr.raw",
+        "sha256": "c2b1b7e9344c5096044dff370fab2d712a0a2f398d9a5bea3dd1a1f45c761939"
+      },
+      "raw_stdout": {
+        "bytes": 340,
+        "private_file": "base-instr-split.stdout.raw",
+        "sha256": "b33e45e6dd4ec5f6cddc3a55b59e8ce78fe4199460d8a6f9a1b5c7653cf35423"
+      },
+      "run_id": "base-instr-split",
+      "sanitized_excerpt": "run_id: base-instr-split\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\nfailures:\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.03s\n--- stderr observations ---\nISSUE75_DIAG split_io stage=acquire_cleanup_store_lock.try_lock_exclusive kind=Uncategorized raw_os=Some(33)\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2467:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\n",
+      "sanitized_excerpt_sha256": "760b336682f41cb3f2f3ffd08460088dac8d1b693c6521beb645723f97181cdb",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.03s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4831,
+        "private_file": "candidate-instr-directory.stderr.raw",
+        "sha256": "6340b2170ced75756d93d7987a97b75f12d3690a4b1cff64eee8ccbffa6faa28"
+      },
+      "raw_stdout": {
+        "bytes": 282,
+        "private_file": "candidate-instr-directory.stdout.raw",
+        "sha256": "07f9458dc36ba4f354a2aa2f5e374a2675db9992aa78fc0a314e49cf1c26a1ac"
+      },
+      "run_id": "candidate-instr-directory",
+      "sanitized_excerpt": "run_id: candidate-instr-directory\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s\n--- stderr observations ---\nISSUE75_DIAG directory_open kind=NotFound raw_os=Some(3)\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:545:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n",
+      "sanitized_excerpt_sha256": "dc5d0d0d3fb941496db45140c283a3ea43bde57087a7f80afe005fbe76e96137",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.00s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4784,
+        "private_file": "candidate-instr-cache-corrupt-orphan.stderr.raw",
+        "sha256": "c2a09aea32d74610f37bc02f04ac178150bba2221ccf7cecb80169b27cff0f2b"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "candidate-instr-cache-corrupt-orphan.stdout.raw",
+        "sha256": "be2d748e2f10a0b53a63a2c7f12e464a9330b5ec6522a35cc790947fd1110c95"
+      },
+      "run_id": "candidate-instr-cache-corrupt-orphan",
+      "sanitized_excerpt": "run_id: candidate-instr-cache-corrupt-orphan\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (PID) panicked at src\\provider\\cache.rs:2227:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "f65a2b878d4b77f0cffc6b055ec1400f94fe9b842c10065b0c1f06993e72fad5",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4791,
+        "private_file": "candidate-instr-cache-interrupted-temp.stderr.raw",
+        "sha256": "81004373ea9e0506294599c7e73d46d6cc57601e7391e414d4f1cbcd83bc7fea"
+      },
+      "raw_stdout": {
+        "bytes": 362,
+        "private_file": "candidate-instr-cache-interrupted-temp.stdout.raw",
+        "sha256": "9836fbea4ed53c0ec35600ba7181c695d35edfb9222e5174cf6975e9ee313feb"
+      },
+      "run_id": "candidate-instr-cache-interrupted-temp",
+      "sanitized_excerpt": "run_id: candidate-instr-cache-interrupted-temp\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (PID) panicked at src\\provider\\cache.rs:2247:57:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "c346765ed973833d6f8e8117214c6c28196502e183bbe0c5dfad4ea9248b361f",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4773,
+        "private_file": "candidate-instr-cache-malformed-pointer.stderr.raw",
+        "sha256": "95dfc92fffc6c21576293f584fcf07e0bb37f3d44c18e7a3c60a880679ed3cc0"
+      },
+      "raw_stdout": {
+        "bytes": 326,
+        "private_file": "candidate-instr-cache-malformed-pointer.stdout.raw",
+        "sha256": "594a3effbfb70720f6581f89ba6514a50938144a55b1c59f00ad471fefc98f8a"
+      },
+      "run_id": "candidate-instr-cache-malformed-pointer",
+      "sanitized_excerpt": "run_id: candidate-instr-cache-malformed-pointer\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2211:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "29c50f08b78b8da08e9f9305a468f4d18999785a60c76e23e53d6a98ce527a1c",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::tampered_cached_executable_is_not_reported_ready",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4763,
+        "private_file": "candidate-instr-cache-tampered-executable.stderr.raw",
+        "sha256": "5720e76a790bdb7896d068c16d0244500444f75cdbc068067142ca03df5bd952"
+      },
+      "raw_stdout": {
+        "bytes": 306,
+        "private_file": "candidate-instr-cache-tampered-executable.stdout.raw",
+        "sha256": "5b6866cdf46b2cd368719933b691cae3cf1461c1abfb70c0bd2b8d9bb79c9104"
+      },
+      "run_id": "candidate-instr-cache-tampered-executable",
+      "sanitized_excerpt": "run_id: candidate-instr-cache-tampered-executable\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::tampered_cached_executable_is_not_reported_ready\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::tampered_cached_executable_is_not_reported_ready\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (PID) panicked at src\\provider\\cache.rs:2303:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "7f29dc90cf6a7a440194a85b36237a86f9fc596b421c72fdc8e96f55488d63ac",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4783,
+        "private_file": "candidate-instr-cache-missing-object.stderr.raw",
+        "sha256": "74b55924451bec42387c949928ecd643e42cbae36b1e8278af964a608026571c"
+      },
+      "raw_stdout": {
+        "bytes": 348,
+        "private_file": "candidate-instr-cache-missing-object.stdout.raw",
+        "sha256": "a6a9f596d3dd01a495a0081fe311b5b9c37b295c23c863061769299f64c24f23"
+      },
+      "run_id": "candidate-instr-cache-missing-object",
+      "sanitized_excerpt": "run_id: candidate-instr-cache-missing-object\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nthread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2100:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "0e4f50385e75ce8466b4f91787db506dfd0abec3f665208cdccd4be5c2184da3",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "23a212a8a0c447204822bc8a0c23fd089a95a4eae105b842f5097825eddcc39e",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4800,
+        "private_file": "candidate-instr-split.stderr.raw",
+        "sha256": "45f9adb7e644ca8d9403e23d04d8c2fd4172e41ffd98a299e34081bf39246ef3"
+      },
+      "raw_stdout": {
+        "bytes": 340,
+        "private_file": "candidate-instr-split.stdout.raw",
+        "sha256": "fd8f609551df90da2385b4f4892f750a22ef0d7ae18c4f5adaf63b81c6b172b3"
+      },
+      "run_id": "candidate-instr-split",
+      "sanitized_excerpt": "run_id: candidate-instr-split\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED\nfailures:\nfailures:\n    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.02s\n--- stderr observations ---\nISSUE75_DIAG split_io stage=acquire_cleanup_store_lock.try_lock_exclusive kind=Uncategorized raw_os=Some(33)\nthread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (PID) panicked at src\\split_trust.rs:2467:72:\ncalled `Result::unwrap()` on an `Err` value: Unavailable\n",
+      "sanitized_excerpt_sha256": "a4ef7e273ecdd83042a544b1f9c375e11137ff574116035b4f2d0d5d53b99017",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.02s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "5c69bb44a20890fac2277e3eb72d77f66ca0f6583a4d2908810d0f9048c78e51",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4989,
+        "private_file": "base-instr-cache-rename-control.stderr.raw",
+        "sha256": "e4f0f5097f5918de492a93f4cdda2e715d063f16e2171b6779b0e12eefaf5afe"
+      },
+      "raw_stdout": {
+        "bytes": 326,
+        "private_file": "base-instr-cache-rename-control.stdout.raw",
+        "sha256": "bce59cc2b66e515727e3bae70afac8a3d8919d3705c40a3945e635bab4298fcf"
+      },
+      "run_id": "base-instr-cache-rename-control",
+      "sanitized_excerpt": "run_id: base-instr-cache-rename-control\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nISSUE75_DIAG cache_rename source_exists=true destination_exists=false\nISSUE75_DIAG cache_rename retry_after_close=success\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2221:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "f8f2f18132d6bad39b8ea9c738de32825e2db65df9447954af6d678c1a48d4b2",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "a2d4742d6f8c8a441a216be64d9133c17fcdb380a74f2dcf6982c57df791a399",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 4994,
+        "private_file": "candidate-instr-cache-rename-control.stderr.raw",
+        "sha256": "b5ba4e98a3409df294f329e37f7c50742136a8e42652e009718844d729ef8de1"
+      },
+      "raw_stdout": {
+        "bytes": 326,
+        "private_file": "candidate-instr-cache-rename-control.stdout.raw",
+        "sha256": "594a3effbfb70720f6581f89ba6514a50938144a55b1c59f00ad471fefc98f8a"
+      },
+      "run_id": "candidate-instr-cache-rename-control",
+      "sanitized_excerpt": "run_id: candidate-instr-cache-rename-control\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED\nfailures:\nfailures:\n    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s\n--- stderr observations ---\nISSUE75_DIAG cache_io stage=install_object.rename kind=PermissionDenied raw_os=Some(5)\nISSUE75_DIAG cache_rename source_exists=true destination_exists=false\nISSUE75_DIAG cache_rename retry_after_close=success\nthread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (PID) panicked at src\\provider\\cache.rs:2221:52:\ncalled `Result::unwrap()` on an `Err` value: InternalIo\n",
+      "sanitized_excerpt_sha256": "a09d8788cfabf7e3da3c2793a5100b83824a8501031c8732a5bd038965ae2849",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.01s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "03d47f926d242a462c54dfd34435cfe97d9cbeea6bec33a29a1ca0692a2d0c87",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 14050,
+        "private_file": "base-instr-directory-path.stderr.raw",
+        "sha256": "fb9b5288946e248697b975e11d60d84f348f433428bb394176f6a726faa1a1c1"
+      },
+      "raw_stdout": {
+        "bytes": 282,
+        "private_file": "base-instr-directory-path.stdout.raw",
+        "sha256": "b07945f3356d52abd8eb804b88fc71797708c4de113f558cac4ee5a89cf312e1"
+      },
+      "run_id": "base-instr-directory-path",
+      "sanitized_excerpt": "run_id: base-instr-directory-path\nphase: instrumented_diagnostic_only\nsource_revision: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.06s\n--- stderr observations ---\nISSUE75_DIAG directory_path=[BASE_PRIVATE_ROOT]\\env\\tmp\\ exists=true metadata=Ok(true)\nISSUE75_DIAG directory_open kind=NotFound raw_os=Some(3)\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:537:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n",
+      "sanitized_excerpt_sha256": "b7f5b63eed96f10cbd58d4a65c304a17f4f12363fcddbc86c017a7d186fadd81",
+      "source_revision": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 244 filtered out; finished in 0.06s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "provider::tests::a_directory_is_not_opened_as_a_regular_file",
+        "--",
+        "--exact",
+        "--nocapture"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 101,
+      "instrumentation_patch_sha256": "1eaf0ed4724245f81d635842ece6a9b04fc5a20ca23f1a3b0ffb6cdfded60a18",
+      "phase": "instrumented_diagnostic_only",
+      "raw_exit_capture": null,
+      "raw_stderr": {
+        "bytes": 14065,
+        "private_file": "candidate-instr-directory-path.stderr.raw",
+        "sha256": "596a02eb957501680770123cf0980cebf5eea0aaf08d179c2906f7c81f49ab84"
+      },
+      "raw_stdout": {
+        "bytes": 282,
+        "private_file": "candidate-instr-directory-path.stdout.raw",
+        "sha256": "8ac10d99c6d8d5e285280110b02930ef15dc556be816fc40ec95e03de10954d4"
+      },
+      "run_id": "candidate-instr-directory-path",
+      "sanitized_excerpt": "run_id: candidate-instr-directory-path\nphase: instrumented_diagnostic_only\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"provider::tests::a_directory_is_not_opened_as_a_regular_file\",\"--\",\"--exact\",\"--nocapture\"]\nexit_code: 101\n--- stdout observations ---\nrunning 1 test\ntest provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED\nfailures:\nfailures:\n    provider::tests::a_directory_is_not_opened_as_a_regular_file\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.05s\n--- stderr observations ---\nISSUE75_DIAG directory_path=[CANDIDATE_PRIVATE_ROOT]\\env\\tmp\\ exists=true metadata=Ok(true)\nISSUE75_DIAG directory_open kind=NotFound raw_os=Some(3)\nthread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (PID) panicked at src\\provider\\mod.rs:547:9:\nassertion `left == right` failed\n  left: NotFound\n right: InvalidInput\n",
+      "sanitized_excerpt_sha256": "3fa6d5e5f7f7e6fc498dc7dd3a73c37ac7d83a8deb45c5f108b8727f87ec8f9f",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 260 filtered out; finished in 0.05s"
+    },
+    {
+      "cargo_arguments": [
+        "test",
+        "--locked",
+        "--no-default-features",
+        "--lib",
+        "test_allocator::tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "executed_command_prefix": [
+        "rtk",
+        "proxy",
+        "rustup.exe",
+        "run",
+        "1.98.1-x86_64-pc-windows-msvc",
+        "cargo"
+      ],
+      "exit_code": 0,
+      "exit_code_basis": "Direct per-run sidecar captured by a delayed-expansion batch variable after this exact Cargo command.",
+      "instrumentation_patch_sha256": null,
+      "phase": "unmodified_after_restore",
+      "raw_exit_capture": {
+        "bytes": 3,
+        "private_file": "candidate-33-postrestore-test-allocator-exitcapture.exit",
+        "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+      },
+      "raw_stderr": {
+        "bytes": 4443,
+        "private_file": "candidate-33-postrestore-test-allocator-exitcapture.stderr.raw",
+        "sha256": "24a486f859f6863487459e3f891bc538050b43bd19ddfa79332f5a3f39f4bc11"
+      },
+      "raw_stdout": {
+        "bytes": 459,
+        "private_file": "candidate-33-postrestore-test-allocator-exitcapture.stdout.raw",
+        "sha256": "4843b42851e04dcb3596dbafdf1e7b43429454f7b843102c82b361a7e11c4e95"
+      },
+      "run_id": "candidate-33-postrestore-test-allocator-exitcapture",
+      "sanitized_excerpt": "run_id: candidate-33-postrestore-test-allocator-exitcapture\nphase: unmodified_after_restore\nsource_revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4\ncargo_arguments: [\"test\",\"--locked\",\"--no-default-features\",\"--lib\",\"test_allocator::tests\",\"--\",\"--test-threads=1\"]\nexit_code: 0\n--- stdout observations ---\nrunning 4 tests\ntest test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok\ntest test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok\ntest test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok\ntest test_allocator::tests::refusal_state_is_isolated_between_threads ... ok\ntest result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 257 filtered out; finished in 0.00s\n--- stderr observations ---\n",
+      "sanitized_excerpt_sha256": "0a12aabe73a2b69e31db5c2dc627e703965395411ddfedc7f336bdab77cc0c59",
+      "source_revision": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "test_result_line": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 257 filtered out; finished in 0.00s"
+    }
+  ],
+  "schema_version": 1,
+  "source_file_sha256": {
+    "Cargo.lock": "efbaf094a72ec521b1ffea750c4b67147fc0a625588c62d38dda2fe7add429ad",
+    "Cargo.toml": "ede5ddb628ebb1e3ee54257b2861ac6f0655d014bf9ea6f3d7a4f7be3e393846",
+    "base": {
+      "src/lib.rs": "282c1ade786b2ef0f3f1ba814a15624ddea13ad36860b146e80db38670993f23",
+      "src/provider/cache.rs": "0f426d70a252e05d6a7774c7d0b227d4083b7e7c6a288e5f07a05726877fec71",
+      "src/provider/mod.rs": "c5d18a91fc0a1666593211891dc60da3c51df2e649f14d261310be79d91f8b40",
+      "src/provider/process.rs": "5aee8593d21e14b090a976e8c2d9dfc6168493251d9c67df213cd1bfcfc11c8a",
+      "src/split_trust.rs": "d27d80da63b1c2d9240fc2c29c29c190c6e7afeba36f05f3bf0d4a2ce553e83a",
+      "src/test_allocator.rs": null
+    },
+    "candidate": {
+      "src/lib.rs": "31332e9d6926da6108cd9a83c9501781459e265bb571cc7021646429c54dc582",
+      "src/provider/cache.rs": "0f426d70a252e05d6a7774c7d0b227d4083b7e7c6a288e5f07a05726877fec71",
+      "src/provider/mod.rs": "34c1d451b0d8acca9fe50b9e2b7540be97b1ed4c52a4640c0d8c7aa0e618f177",
+      "src/provider/process.rs": "5aee8593d21e14b090a976e8c2d9dfc6168493251d9c67df213cd1bfcfc11c8a",
+      "src/split_trust.rs": "d27d80da63b1c2d9240fc2c29c29c190c6e7afeba36f05f3bf0d4a2ce553e83a",
+      "src/test_allocator.rs": "a5b3ca27542017379350b48e0d7833c8beb5f001ff6ef4e867c459373a2bfee7"
+    },
+    "rust-toolchain.toml": "b4e4cb7ba9fa3a14de40aca12e00726d10f01eeec14d11b66e65c8bdfbcddf06"
+  },
+  "source_issue": "https://github.com/whatobiplays/NSCB/issues/75",
+  "source_revisions": {
+    "base": {
+      "commit": "bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc",
+      "tree": "7ce878845687d55089fb98e57c8f8a46e9d93e25"
+    },
+    "candidate": {
+      "commit": "0878126cf35f769a70bd74a1ad054be1bb70edd4",
+      "tree": "90741884c4cf9eaf57aaaf7faa1e9714e49930e9"
+    }
+  },
+  "toolchain": {
+    "cargo": "1.98.1 (797e8a9bc 2026-08-05)",
+    "clippy": "0.1.98 (48a229ceae 2026-09-01)",
+    "llvm": "22.1.8",
+    "msvc_compiler": "19.51.36260",
+    "msvc_tools_directory_version": "14.51.36231",
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "rustc_commit_hash": "48a229ceaefd4985c50990b14116b6d856af0985",
+    "rustc_host": "x86_64-pc-windows-msvc",
+    "vcvars_script_short_path": "C:\\PROGRA~2\\MICROS~3\\18\\BUILDT~1\\VC\\AUXILI~1\\Build\\vcvars64.bat"
+  },
+  "windows_error_codes_verified_from_local_sdk": {
+    "ERROR_ACCESS_DENIED": 5,
+    "ERROR_LOCK_VIOLATION": 33,
+    "ERROR_PATH_NOT_FOUND": 3,
+    "sdk_header_version": "10.0.26100.0"
+  }
+}
