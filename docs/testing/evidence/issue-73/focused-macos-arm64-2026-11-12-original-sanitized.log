@@ -1,3 +1,6 @@
+# Sanitized derivative of the original focused capture. Not byte-identical to the private raw file.
+# Redacted repository and user-home paths; stripped trailing horizontal whitespace and terminal blank lines.
+# Original displayed command lines are retained; their argv and exit statuses are unverified. See the corrected capture.
 NSCB Issue #73 focused validation transcript
 Baseline HEAD: bb1c6a8a5bd067ad49e3fab04f28fc181c6352fc
 Host: macOS 27.0.1 build 26A434, arm64
@@ -85,7 +88,7 @@ $ rustup run 1.98.1 cargo test test --locked --no-default-features --lib nsp_sem
    Compiling idna v1.1.0
    Compiling url v2.5.8
    Compiling ureq v2.12.1
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 12.52s
      Running unittests src/lib.rs (target/debug/deps/nscb-9d5835181e496295)
 
@@ -135,7 +138,7 @@ EXIT_CODE=0
 
 ===== CI semantic integration tests =====
 $ rustup run 1.98.1 cargo test test --locked --no-default-features --test nsp_semantic_qualification
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 2.54s
      Running tests/nsp_semantic_qualification.rs (target/debug/deps/nsp_semantic_qualification-09abf93392ce4551)
 
@@ -261,4 +264,3 @@ test pfs0::tests::parses_payload_relative_spans_without_reading_payload_bytes ..
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 521 filtered out; finished in 0.00s
 
 EXIT_CODE=0
-

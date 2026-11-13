@@ -138,9 +138,12 @@ Limits are part of this initial profile, not Nintendo format limits:
 | Hash block size | `0x200`–`0x100000` |
 | CNMT file | exactly `0x88` bytes |
 
-All format offsets and lengths use checked arithmetic. Allocation uses
-fallible reservation. Cancellation is checked during source hashing,
-hierarchical-hash verification, and between member checks.
+All format offsets and lengths use checked arithmetic. The qualifier uses
+fallible reservation for its explicitly tagged bounded buffers and vectors.
+Standard-library path canonicalization and copying also allocate, but those
+path-buffer requests are not covered by the reservation wrapper or refusal
+tests and remain `NOT_EVIDENCED`. Cancellation is checked during source
+hashing, hierarchical-hash verification, and between member checks.
 
 ## Allocation bounds and failure handling
 

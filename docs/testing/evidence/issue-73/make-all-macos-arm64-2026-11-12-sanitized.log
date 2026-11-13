@@ -1,12 +1,14 @@
+# Sanitized derivative of the original make-all capture. Not byte-identical to the private raw file.
+# Redacted repository, Rustup, Cargo, and user-home paths; stripped trailing horizontal whitespace and terminal blank lines.
 PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_content_policy.py
 Content policy passed for the Git index and working tree.
-env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo check --locked --all-targets --all-features
+env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo check --locked --all-targets --all-features
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.09s
-env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo check --locked --lib --no-default-features
+env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo check --locked --lib --no-default-features
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
-env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo fmt --all -- --check
-env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo clippy --locked --all-targets --all-features -- -D warnings
-    Checking nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo fmt --all -- --check
+env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo clippy --locked --all-targets --all-features -- -D warnings
+    Checking nscb v0.1.0 (<REPO_ROOT>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.14s
 PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_content_policy.py'
 .....................................................
@@ -20,7 +22,7 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_clea
 Ran 11 tests in 262.040s
 
 OK
-env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo build --locked --features standalone-job-history
+env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo build --locked --features standalone-job-history
    Compiling cfg-if v1.0.5
    Compiling stable_deref_trait v1.2.1
    Compiling zeroize v1.9.1
@@ -138,26 +140,26 @@ env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/U
    Compiling num-bigint-dig v0.8.6
    Compiling rsa v0.9.10
    Compiling ureq v2.12.1
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.81s
    Compiling ppv-lite86 v0.2.21
    Compiling rand_chacha v0.3.1
    Compiling rand v0.8.5
    Compiling num-bigint-dig v0.8.6
    Compiling rsa v0.9.10
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 13.60s
      Running unittests src/lib.rs (target/debug/deps/nscb-27b71f55801e8759)
 embedded library tests: 522
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 6.25s
      Running tests/job_history_cli.rs (target/debug/deps/job_history_cli-bb0a9256296fb7cb)
 standalone job_history_cli tests: 27
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.77s
      Running tests/cli_subprocess.rs (target/debug/deps/cli_subprocess-7f9813026d636eaa)
 standalone cli_subprocess tests: 30
-RUST_TEST_THREADS=1 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --locked --lib --no-default-features
+RUST_TEST_THREADS=1 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --locked --lib --no-default-features
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.05s
      Running unittests src/lib.rs (target/debug/deps/nscb-27b71f55801e8759)
 
@@ -688,8 +690,8 @@ test verification::tests::verification_detects_retargeted_source_symlinks ... ok
 
 test result: ok. 518 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 47.99s
 
-RUST_TEST_THREADS=1 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --locked --features standalone-job-history
-   Compiling nscb v0.1.0 (/Users/daniel/.codex/worktrees/issue-73-nsp-semantic-qualification/NSCB)
+RUST_TEST_THREADS=1 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --locked --features standalone-job-history
+   Compiling nscb v0.1.0 (<REPO_ROOT>)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 16.21s
      Running unittests src/lib.rs (target/debug/deps/nscb-b95326a3165ffa3a)
 
@@ -1387,7 +1389,7 @@ test standalone::history::tests::slot_identity_is_unchanged_by_admission_and_sur
 test standalone::history::tests::slot_registry_is_bounded_stable_and_leaves_legacy_locks_untouched ... ok
 test standalone::history::tests::symlinked_slot_does_not_redirect_admission_from_healthy_slots ... ok
 test standalone::history::tests::v1_migration_backup_includes_a_writer_waiting_to_commit ... ok
-test standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries ... 
+test standalone::history::tests::v1_migration_process_crash_before_commit_preserves_backup_and_retries ...
 running 1 test
 test standalone::history::tests::child_v1_migration_crash_injection ... ok
 test standalone::history::tests::v2_migration_fails_closed_when_an_active_job_has_no_legacy_lock_file ... ok
@@ -1395,7 +1397,7 @@ test standalone::history::tests::v2_migration_marks_abandoned_active_jobs_interr
 test standalone::history::tests::v2_migration_never_interrupts_a_job_with_a_live_legacy_lock ... ok
 test standalone::history::tests::v2_migration_rolls_back_when_backup_parent_sync_fails ... ok
 test standalone::history::tests::v2_migration_succeeds_when_parent_directory_sync_is_unsupported ... ok
-test standalone::history::tests::v3_migration_process_crash_rolls_back_and_reopens_safely ... 
+test standalone::history::tests::v3_migration_process_crash_rolls_back_and_reopens_safely ...
 running 1 test
 test standalone::history::tests::child_v3_migration_crash_injection ... ok
 test standalone::history::tests::v3_to_v4_migration_preserves_history_and_creates_batch_evidence_schema ... ok
@@ -1907,7 +1909,7 @@ test src/split_operation.rs - split_operation::SplitReceiptCommitState (line 247
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s
 
-RUST_TEST_THREADS=1 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="/Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" /Users/daniel/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --locked --features standalone-job-history --test job_history_cli --test cli_subprocess
+RUST_TEST_THREADS=1 env -u RUSTC_WRAPPER -u RUSTC_WORKSPACE_WRAPPER RUSTUP_TOOLCHAIN=1.98.1 RUSTC=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc RUSTFMT=<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/rustfmt PATH="<RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin:$PATH" <RUSTUP_HOME>/toolchains/1.98.1-aarch64-apple-darwin/bin/cargo test --locked --features standalone-job-history --test job_history_cli --test cli_subprocess
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
      Running tests/cli_subprocess.rs (target/debug/deps/cli_subprocess-7f9813026d636eaa)
 
@@ -1977,4 +1979,3 @@ test running_transition_failure_prevents_filesystem_mutation ... ok
 test unavailable_history_fails_before_filesystem_mutation ... ok
 
 test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.48s
-
