@@ -12,6 +12,7 @@ use crate::operation::{
 use crate::pfs0;
 use crate::split_operation::{SplitPlan, SplitRequest};
 use crate::split_trust::SplitTrustWriter;
+use crate::xci_to_nsp::XciToNspRequest;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
@@ -76,6 +77,18 @@ impl Engine {
         request: MultiContentSplitRequest,
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_multi_content_split(request)
+    }
+
+    /// Resolves a rights-free base Application XCI into a planned NSP output.
+    ///
+    /// The XCI partitions, HFS0 prefix hashes, and secure members are checked
+    /// before the existing NSP semantic qualifier assigns member roles. The
+    /// operation preserves source NCA bytes and is available only on macOS.
+    pub fn plan_xci_to_nsp(
+        &self,
+        request: XciToNspRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_xci_to_nsp(request)
     }
 
     /// Resolves an explicit regular source and outer bundle destination into a

@@ -494,6 +494,7 @@ pub(crate) fn item_state(job_state: &str) -> &'static str {
 pub(crate) fn operation_outcome(outcome: OperationOutcome) -> &'static str {
     match outcome {
         OperationOutcome::Copied => "copied",
+        OperationOutcome::Converted => "converted",
         OperationOutcome::AlreadyUpToDate => "already_up_to_date",
         OperationOutcome::Skipped => "skipped",
         _ => "unknown",

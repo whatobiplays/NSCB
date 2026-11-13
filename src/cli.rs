@@ -570,6 +570,7 @@ fn run_with_control(
     if args.first().is_some_and(|argument| {
         argument == OsStr::new("multi-content-build")
             || argument == OsStr::new("multi-content-split")
+            || argument == OsStr::new("xci-to-nsp")
     }) {
         return run_multi_content_command(args, engine, stdout, stderr);
     }
@@ -695,6 +696,15 @@ enum MultiContentInvocation {
         json: bool,
         jsonl: bool,
     },
+    XciToNsp {
+        source: PathBuf,
+        destination: PathBuf,
+        workspace: PathBuf,
+        key_file: PathBuf,
+        conflict_policy: ConflictPolicy,
+        json: bool,
+        jsonl: bool,
+    },
 }
 
 #[derive(Serialize)]
@@ -721,13 +731,16 @@ struct MultiContentEventDocument<'a> {
 fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvocation, ()> {
     let command = args.first().and_then(|value| value.to_str()).ok_or(())?;
     let is_build = command == "multi-content-build";
-    if !is_build && command != "multi-content-split" {
+    let is_split = command == "multi-content-split";
+    let is_xci_to_nsp = command == "xci-to-nsp";
+    if !is_build && !is_split && !is_xci_to_nsp {
         return Err(());
     }
 
     let mut sources = Vec::new();
     let mut destination = None;
     let mut destination_directory = None;
+    let mut key_file = None;
     let mut workspace = None;
     let mut conflict_policy = ConflictPolicy::Fail;
     let mut conflict_policy_seen = false;
@@ -738,7 +751,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
         let option = args[index].to_str().ok_or(())?;
         index += 1;
         match option {
-            "--source" | "--output" | "--output-directory" | "--workspace"
+            "--source" | "--output" | "--output-directory" | "--workspace" | "--keys"
             | "--conflict-policy" => {
                 let value = args.get(index).ok_or(())?;
                 if value.is_empty() {
@@ -747,11 +760,14 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                 index += 1;
                 match option {
                     "--source" => sources.push(PathBuf::from(value)),
-                    "--output" if is_build && destination.is_none() => {
+                    "--output" if (is_build || is_xci_to_nsp) && destination.is_none() => {
                         destination = Some(PathBuf::from(value));
                     }
                     "--output-directory" if !is_build && destination_directory.is_none() => {
                         destination_directory = Some(PathBuf::from(value));
+                    }
+                    "--keys" if is_xci_to_nsp && key_file.is_none() => {
+                        key_file = Some(PathBuf::from(value));
                     }
                     "--workspace" if workspace.is_none() => {
                         workspace = Some(PathBuf::from(value));
@@ -787,7 +803,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
             json,
             jsonl,
         })
-    } else {
+    } else if is_split {
         if sources.len() != 1 || destination.is_some() {
             return Err(());
         }
@@ -795,6 +811,19 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
             source: sources.remove(0),
             destination_directory: destination_directory.ok_or(())?,
             workspace,
+            conflict_policy,
+            json,
+            jsonl,
+        })
+    } else {
+        if sources.len() != 1 || destination_directory.is_some() {
+            return Err(());
+        }
+        Ok(MultiContentInvocation::XciToNsp {
+            source: sources.remove(0),
+            destination: destination.ok_or(())?,
+            workspace,
+            key_file: key_file.ok_or(())?,
             conflict_policy,
             json,
             jsonl,
@@ -818,7 +847,7 @@ fn run_multi_content_command(
             return EXIT_USAGE;
         }
     };
-    let (plan, json, jsonl, verb) = match invocation {
+    let (plan, json, jsonl, verb, operation_label, result_kind) = match invocation {
         MultiContentInvocation::Build {
             sources,
             destination,
@@ -834,6 +863,8 @@ fn run_multi_content_command(
             json,
             jsonl,
             "build",
+            "multi-content",
+            "multi_content.job_result",
         ),
         MultiContentInvocation::Split {
             source,
@@ -850,6 +881,27 @@ fn run_multi_content_command(
             json,
             jsonl,
             "split",
+            "multi-content",
+            "multi_content.job_result",
+        ),
+        MultiContentInvocation::XciToNsp {
+            source,
+            destination,
+            workspace,
+            key_file,
+            conflict_policy,
+            json,
+            jsonl,
+        } => (
+            engine.plan_xci_to_nsp(
+                nscb::XciToNspRequest::new(source, destination, workspace, key_file)
+                    .with_conflict_policy(conflict_policy),
+            ),
+            json,
+            jsonl,
+            "convert",
+            "xci-to-nsp",
+            "xci_to_nsp.job_result",
         ),
     };
     let machine_requested = json || jsonl;
@@ -863,7 +915,7 @@ fn run_multi_content_command(
                     exit_for_operation_failure(error.code()),
                 );
             }
-            let _ = writeln!(stderr, "multi-content {verb} failed: {}", error.code());
+            let _ = writeln!(stderr, "{operation_label} {verb} failed: {}", error.code());
             return exit_for_operation_failure(error.code());
         }
     };
@@ -879,7 +931,7 @@ fn run_multi_content_command(
             }
             let _ = writeln!(
                 stderr,
-                "multi-content {verb} could not install signal handlers"
+                "{operation_label} {verb} could not install signal handlers"
             );
             return EXIT_INTERNAL;
         }
@@ -932,7 +984,7 @@ fn run_multi_content_command(
         };
         let document = MultiContentJobDocument {
             schema_version: 1,
-            kind: "multi_content.job_result",
+            kind: result_kind,
             nscb_version: env!("CARGO_PKG_VERSION"),
             plan: &snapshot,
             session: completion.snapshot(),
@@ -945,13 +997,14 @@ fn run_multi_content_command(
         let outcome = match result.outcome() {
             Some(nscb::OperationOutcome::Built) => "built",
             Some(nscb::OperationOutcome::Split) => "split",
+            Some(nscb::OperationOutcome::Converted) => "converted",
             Some(nscb::OperationOutcome::AlreadyUpToDate) => "already up to date",
             Some(nscb::OperationOutcome::Skipped) => "skipped",
             _ => "completed",
         };
         if writeln!(
             stdout,
-            "multi-content {verb} {outcome}: {}",
+            "{operation_label} {verb} {outcome}: {}",
             snapshot.destination().display()
         )
         .is_err()
@@ -959,7 +1012,11 @@ fn run_multi_content_command(
             return report_output_failure(stderr);
         }
     } else if let Some(failure) = result.failure() {
-        let _ = writeln!(stderr, "multi-content {verb} failed: {}", failure.code());
+        let _ = writeln!(
+            stderr,
+            "{operation_label} {verb} failed: {}",
+            failure.code()
+        );
     }
 
     match result.state() {
@@ -980,8 +1037,13 @@ fn multi_content_usage(args: &[OsString]) -> &'static str {
         .is_some_and(|value| value == OsStr::new("multi-content-build"))
     {
         "usage: multi-content-build --source PACKAGE [--source PACKAGE...] --output PACKAGE --workspace DIR [--conflict-policy fail|replace|skip] [--json|--jsonl]"
-    } else {
+    } else if args
+        .first()
+        .is_some_and(|value| value == OsStr::new("multi-content-split"))
+    {
         "usage: multi-content-split --source PACKAGE --output-directory DIR --workspace DIR [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+    } else {
+        "usage: xci-to-nsp --source XCI --output NSP --workspace DIR --keys FILE [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     }
 }
 
@@ -4128,6 +4190,13 @@ fn exit_for_operation_failure(code: OperationFailureCode) -> i32 {
         | OperationFailureCode::InvalidContentPackage
         | OperationFailureCode::UnsupportedContentProfile
         | OperationFailureCode::AmbiguousContentGrouping
+        | OperationFailureCode::InvalidXciImage
+        | OperationFailureCode::UnsupportedXciProfile
+        | OperationFailureCode::KeyFileUnavailable
+        | OperationFailureCode::KeyFileMalformed
+        | OperationFailureCode::RequiredKeyMissing
+        | OperationFailureCode::KeyFileChanged
+        | OperationFailureCode::KeyOrSectionIntegrityFailure
         | OperationFailureCode::InsufficientContentEvidence
         | OperationFailureCode::ResourceLimitExceeded => EXIT_INPUT,
         OperationFailureCode::Cancelled => EXIT_CANCELLED,

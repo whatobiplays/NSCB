@@ -364,6 +364,8 @@ pub enum OperationOutcome {
     Built,
     /// Component packages were split and published as one directory.
     Split,
+    /// A qualified secure-partition member set was published as an NSP.
+    Converted,
 }
 
 /// Stable identity of the operation represented by an immutable plan.
@@ -377,6 +379,8 @@ pub enum OperationKind {
     MultiContentBuild,
     /// Separation of a supported package by byte-derived ProgramId.
     MultiContentSplit,
+    /// Conversion of a qualified base Application XCI into an NSP.
+    XciToNsp,
 }
 
 /// A stable category for planning, execution, and publication failures.
@@ -398,6 +402,20 @@ pub enum OperationFailureCode {
     UnsupportedContentProfile,
     /// Package member ownership cannot be established from supported byte evidence.
     AmbiguousContentGrouping,
+    /// The source is not a structurally valid XCI image.
+    InvalidXciImage,
+    /// The XCI or its members do not match the conversion profile.
+    UnsupportedXciProfile,
+    /// The key file could not be opened or read as a regular file.
+    KeyFileUnavailable,
+    /// The key file is malformed or contains conflicting recognized keys.
+    KeyFileMalformed,
+    /// A required key is missing from the key file.
+    RequiredKeyMissing,
+    /// The key file changed after the plan was created.
+    KeyFileChanged,
+    /// Key material and encrypted section data failed an integrity check.
+    KeyOrSectionIntegrityFailure,
     /// The inputs do not establish at least two distinct logical ProgramId groups.
     InsufficientContentEvidence,
     /// A bounded parser or operation metadata limit was exceeded.
@@ -473,6 +491,13 @@ impl OperationFailureCode {
             Self::InvalidContentPackage => "invalid_content_package",
             Self::UnsupportedContentProfile => "unsupported_content_profile",
             Self::AmbiguousContentGrouping => "ambiguous_content_grouping",
+            Self::InvalidXciImage => "invalid_xci_image",
+            Self::UnsupportedXciProfile => "unsupported_xci_profile",
+            Self::KeyFileUnavailable => "key_file_unavailable",
+            Self::KeyFileMalformed => "key_file_malformed",
+            Self::RequiredKeyMissing => "required_key_missing",
+            Self::KeyFileChanged => "key_file_changed",
+            Self::KeyOrSectionIntegrityFailure => "key_or_section_integrity_failure",
             Self::InsufficientContentEvidence => "insufficient_content_evidence",
             Self::ResourceLimitExceeded => "resource_limit_exceeded",
             Self::DestinationCollision => "destination_collision",
@@ -1408,6 +1433,8 @@ pub struct OperationPlan {
     published_recovery_name: Option<OsString>,
     #[cfg(target_os = "macos")]
     multi_content: Option<MultiContentPlan>,
+    #[cfg(target_os = "macos")]
+    xci_to_nsp: Option<XciToNspPlan>,
 }
 
 impl OperationPlan {
@@ -1797,6 +1824,7 @@ enum ExecutionCheckpoint {
     SourceEvidenceReadChunk,
     BeforeCompletion,
     BeforePromotion,
+    XciToNspSemanticVerification,
     FinalValidationHashChunk,
     AfterFinalDestinationValidation,
     AfterFinalSourceValidation,
@@ -2304,6 +2332,15 @@ enum MultiContentPlan {
 }
 
 #[cfg(target_os = "macos")]
+struct XciToNspPlan {
+    package: crate::xci_to_nsp::XciToNspPackagePlan,
+    key_file: ResolvedFile,
+    key_baseline: FileEvidence,
+    output_length: u64,
+    output_sha256: Sha256Digest,
+}
+
+#[cfg(target_os = "macos")]
 const MAX_MULTI_CONTENT_SOURCES: usize = 65_536;
 #[cfg(target_os = "macos")]
 const MAX_MULTI_CONTENT_MEMBERS: usize = 65_536;
@@ -2386,6 +2423,137 @@ pub(crate) fn plan_multi_content_split(
     {
         plan_multi_content_split_unix(request)
     }
+}
+
+/// Plans conversion of one qualified base Application XCI into a PFS0 NSP.
+pub(crate) fn plan_xci_to_nsp(
+    request: crate::xci_to_nsp::XciToNspRequest,
+) -> Result<OperationPlan, OperationError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        plan_xci_to_nsp_unix(request)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn plan_xci_to_nsp_unix(
+    request: crate::xci_to_nsp::XciToNspRequest,
+) -> Result<OperationPlan, OperationError> {
+    let source = resolve_file(&request.source, OperationFailureCode::SourceUnavailable)?;
+    let key_file = resolve_file(&request.key_file, OperationFailureCode::KeyFileUnavailable)?;
+    if source.path == key_file.path {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+
+    validate_file_route(&source, None).map_err(OperationError::new)?;
+    validate_file_route(&key_file, None).map_err(OperationError::new)?;
+    let source_directory = open_directory(&source.parent)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let key_directory = open_directory(&key_file.parent)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    let mut source_evidence_file = open_file_at(&source_directory, &source.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let source_baseline = inspect_file(&mut source_evidence_file)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let mut key_handle = open_file_at(&key_directory, &key_file.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    let key_baseline = inspect_file(&mut key_handle)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    if key_baseline.snapshot.len > crate::key_file::MAX_KEY_FILE_BYTES {
+        return Err(OperationError::new(
+            OperationFailureCode::ResourceLimitExceeded,
+        ));
+    }
+    if key_baseline.identity == source_baseline.identity {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+
+    let mut qualification_source = open_file_at(&source_directory, &source.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    verify_file_evidence(&mut qualification_source, &source_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    let package = crate::xci_to_nsp::qualify_xci(
+        qualification_source,
+        &source.path,
+        source_baseline.snapshot.len,
+        &key_file.path,
+        source_baseline.snapshot.clone(),
+        key_baseline.snapshot.clone(),
+    )
+    .map_err(OperationError::new)?;
+
+    let mut digest_source = open_file_at(&source_directory, &source.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    verify_file_evidence(&mut digest_source, &source_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    let mut digest_writer = ContentDigestWriter::new();
+    crate::multi_content_format::write_pfs0_from_source(
+        &mut digest_writer,
+        &mut digest_source,
+        &package.layout,
+        &package.members,
+        |_| Ok(()),
+    )
+    .map_err(|error| {
+        OperationError::new(match error {
+            FormatError::ResourceLimit => OperationFailureCode::ResourceLimitExceeded,
+            FormatError::SourceUnavailable => OperationFailureCode::SourceChanged,
+            FormatError::OutputUnavailable => OperationFailureCode::WriteFailed,
+            FormatError::InvalidPackage
+            | FormatError::UnsupportedProfile
+            | FormatError::DuplicateMember
+            | FormatError::AmbiguousGrouping => OperationFailureCode::ValidationFailed,
+        })
+    })?;
+    verify_file_evidence(&mut digest_source, &source_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    verify_file_evidence(&mut key_handle, &key_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileChanged))?;
+    let output = digest_writer.finish();
+    if output.length != package.layout.length {
+        return Err(OperationError::new(OperationFailureCode::ValidationFailed));
+    }
+
+    let copy_request = CopyThroughRequest::new(
+        request.source.clone(),
+        request.destination.clone(),
+        request.workspace.clone(),
+    )
+    .with_conflict_policy(request.conflict_policy);
+    let mut plan =
+        plan_copy_through_unix_for_output(copy_request, Some((output.length, output.sha256)))?;
+    if plan.source_baseline != source_baseline {
+        return Err(OperationError::new(OperationFailureCode::SourceChanged));
+    }
+    if plan.destination.path == key_file.path
+        || plan.snapshot.destination_lock_path == key_file.path
+        || plan
+            .destination_baseline
+            .as_ref()
+            .is_some_and(|baseline| baseline.identity == key_baseline.identity)
+    {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    verify_file_evidence(&mut key_handle, &key_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileChanged))?;
+
+    plan.snapshot.operation_kind = OperationKind::XciToNsp;
+    plan.xci_to_nsp = Some(XciToNspPlan {
+        package,
+        key_file,
+        key_baseline,
+        output_length: output.length,
+        output_sha256: output.sha256,
+    });
+    Ok(plan)
 }
 
 #[cfg(target_os = "macos")]
@@ -3165,6 +3333,7 @@ fn plan_multi_content_build_unix(
         backup_name,
         published_recovery_name,
         multi_content: Some(MultiContentPlan::Build(source)),
+        xci_to_nsp: None,
     })
 }
 
@@ -3380,6 +3549,7 @@ fn plan_multi_content_split_unix(
             destination_baseline,
             staged_directory_name,
         }),
+        xci_to_nsp: None,
     })
 }
 
@@ -3415,6 +3585,14 @@ fn run_copy_planning_checkpoint() {
 
 #[cfg(target_os = "macos")]
 fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, OperationError> {
+    plan_copy_through_unix_for_output(request, None)
+}
+
+#[cfg(target_os = "macos")]
+fn plan_copy_through_unix_for_output(
+    request: CopyThroughRequest,
+    expected_output: Option<(u64, Sha256Digest)>,
+) -> Result<OperationPlan, OperationError> {
     reject_split_input(&request.source)?;
     let source = resolve_file(&request.source, OperationFailureCode::SourceUnavailable)?;
     let destination = resolve_destination_file(&request.destination)?;
@@ -3505,23 +3683,29 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
         return Err(OperationError::new(OperationFailureCode::UnsafePath));
     }
 
+    let (expected_output_length, expected_output_sha256) =
+        expected_output.unwrap_or((source_baseline.snapshot.len, source_baseline.sha256));
     let already_up_to_date = if let Some(existing) = &destination_baseline {
-        if existing.snapshot.len == source_baseline.snapshot.len
-            && existing.sha256 == source_baseline.sha256
+        if existing.snapshot.len == expected_output_length
+            && existing.sha256 == expected_output_sha256
         {
-            let mut destination_file = open_file_at(&destination_directory, &destination.name)
-                .map_err(|_| OperationError::new(OperationFailureCode::DestinationChanged))?;
-            let identical = files_equal(
-                &mut source_file,
-                &mut destination_file,
-                source_baseline.snapshot.len,
-            )
-            .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
-            verify_file_evidence(&mut source_file, &source_baseline)
+            if expected_output.is_some() {
+                true
+            } else {
+                let mut destination_file = open_file_at(&destination_directory, &destination.name)
+                    .map_err(|_| OperationError::new(OperationFailureCode::DestinationChanged))?;
+                let identical = files_equal(
+                    &mut source_file,
+                    &mut destination_file,
+                    source_baseline.snapshot.len,
+                )
                 .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
-            verify_destination_evidence(&mut destination_file, existing)
-                .map_err(OperationError::new)?;
-            identical
+                verify_file_evidence(&mut source_file, &source_baseline)
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+                verify_destination_evidence(&mut destination_file, existing)
+                    .map_err(OperationError::new)?;
+                identical
+            }
         } else {
             false
         }
@@ -3589,14 +3773,14 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
             planned_artifacts.push(PlannedArtifact {
                 role: OperationArtifactRole::StagedOutput,
                 path: stage_directory_path.join(&planned_stage_file),
-                expected_length: Some(source_baseline.snapshot.len),
-                expected_sha256: Some(source_baseline.sha256),
+                expected_length: Some(expected_output_length),
+                expected_sha256: Some(expected_output_sha256),
             });
             planned_artifacts.push(PlannedArtifact {
                 role: OperationArtifactRole::PublishedDestination,
                 path: destination.path.clone(),
-                expected_length: Some(source_baseline.snapshot.len),
-                expected_sha256: Some(source_baseline.sha256),
+                expected_length: Some(expected_output_length),
+                expected_sha256: Some(expected_output_sha256),
             });
             stage_directory_name = Some(planned_stage_directory);
             stage_file_name = Some(planned_stage_file);
@@ -3610,8 +3794,8 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
                     planned_artifacts.push(PlannedArtifact {
                         role: OperationArtifactRole::StagedOutput,
                         path: stage_directory_path.join(&planned_recovery),
-                        expected_length: Some(source_baseline.snapshot.len),
-                        expected_sha256: Some(source_baseline.sha256),
+                        expected_length: Some(expected_output_length),
+                        expected_sha256: Some(expected_output_sha256),
                     });
                     published_recovery_name = Some(planned_recovery);
                     let planned_backup =
@@ -3679,6 +3863,8 @@ fn plan_copy_through_unix(request: CopyThroughRequest) -> Result<OperationPlan, 
         published_recovery_name,
         #[cfg(target_os = "macos")]
         multi_content: None,
+        #[cfg(target_os = "macos")]
+        xci_to_nsp: None,
     })
 }
 
@@ -4795,15 +4981,19 @@ where
     H: FnMut(ExecutionCheckpoint),
 {
     let mut milestones = vec![OperationMilestone::Planned];
-    let total_bytes = plan
-        .multi_content
-        .as_ref()
-        .map(|multi_content| match multi_content {
-            MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. } => {
-                source.total_member_bytes
-            }
-        })
-        .unwrap_or(plan.source_baseline.snapshot.len);
+    let total_bytes =
+        plan.xci_to_nsp
+            .as_ref()
+            .map(|conversion| conversion.output_length)
+            .or_else(|| {
+                plan.multi_content
+                    .as_ref()
+                    .map(|multi_content| match multi_content {
+                        MultiContentPlan::Build(source)
+                        | MultiContentPlan::Split { source, .. } => source.total_member_bytes,
+                    })
+            })
+            .unwrap_or(plan.source_baseline.snapshot.len);
     let admission = session.admit_with_cancellation(cancellation, Some(total_bytes));
     let mut admission = match admission {
         Ok(admission) => admission,
@@ -5020,13 +5210,19 @@ fn check_storage_capacity(
     } else {
         None
     };
-    let staged_length = match plan.multi_content.as_ref() {
-        Some(MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. }) => source
-            .outputs
-            .iter()
-            .try_fold(0_u64, |total, output| total.checked_add(output.length))
-            .ok_or(OperationFailureCode::ResourceLimitExceeded)?,
-        None => plan.source_baseline.snapshot.len,
+    let staged_length = if let Some(conversion) = &plan.xci_to_nsp {
+        conversion.output_length
+    } else {
+        match plan.multi_content.as_ref() {
+            Some(MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. }) => {
+                source
+                    .outputs
+                    .iter()
+                    .try_fold(0_u64, |total, output| total.checked_add(output.length))
+                    .ok_or(OperationFailureCode::ResourceLimitExceeded)?
+            }
+            None => plan.source_baseline.snapshot.len,
+        }
     };
     let available = available_space_on_open_directory(workspace_directory)?;
     ensure_storage_capacity(
@@ -5076,13 +5272,22 @@ fn multi_content_build_output(plan: &OperationPlan) -> Option<&ContentOutputEvid
 }
 
 #[cfg(target_os = "macos")]
+fn xci_to_nsp(plan: &OperationPlan) -> Option<&XciToNspPlan> {
+    plan.xci_to_nsp.as_ref()
+}
+
+#[cfg(target_os = "macos")]
 fn planned_staged_output(plan: &OperationPlan) -> (u64, Sha256Digest) {
-    multi_content_build_output(plan)
-        .map(|output| (output.length, output.sha256))
-        .unwrap_or((
-            plan.source_baseline.snapshot.len,
-            plan.source_baseline.sha256,
-        ))
+    if let Some(conversion) = xci_to_nsp(plan) {
+        (conversion.output_length, conversion.output_sha256)
+    } else {
+        multi_content_build_output(plan)
+            .map(|output| (output.length, output.sha256))
+            .unwrap_or((
+                plan.source_baseline.snapshot.len,
+                plan.source_baseline.sha256,
+            ))
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -5107,6 +5312,61 @@ fn validate_staged_content_package(
         Ok(())
     } else {
         Err(OperationFailureCode::ValidationFailed)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn verify_xci_to_nsp_key(plan: &OperationPlan) -> Result<(), OperationFailureCode> {
+    let Some(conversion) = xci_to_nsp(plan) else {
+        return Ok(());
+    };
+    validate_file_route(&conversion.key_file, None)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    let directory = open_directory(&conversion.key_file.parent)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    if handle_identity(&directory) != Some(conversion.key_file.parent_identity) {
+        return Err(OperationFailureCode::KeyFileChanged);
+    }
+    let mut key_file = open_file_at(&directory, &conversion.key_file.name)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    verify_file_evidence(&mut key_file, &conversion.key_baseline)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)
+}
+
+#[cfg(target_os = "macos")]
+fn validate_xci_to_nsp_package(
+    path: &Path,
+    plan: &OperationPlan,
+    session: &OperationSession,
+    checkpoint: &mut impl FnMut(ExecutionCheckpoint),
+) -> Result<(), OperationFailureCode> {
+    check_cancelled(session)?;
+    let conversion = xci_to_nsp(plan).ok_or(OperationFailureCode::StalePlan)?;
+    verify_xci_to_nsp_key(plan)?;
+    let qualification = crate::nsp_semantic_qualification::qualify_with_cancellation_probe(
+        crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+            path,
+            &conversion.key_file.path,
+        ),
+        || {
+            checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
+            session.cancellation_requested().unwrap_or(true)
+        },
+    );
+    check_cancelled(session)?;
+    let result =
+        qualification.map_err(|error| crate::xci_to_nsp::map_qualification_error(error.code()))?;
+    verify_xci_to_nsp_key(plan)?;
+    if result.source_sha256 != conversion.output_sha256 {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    match result.outcome {
+        crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::Qualified(facts)
+            if facts == conversion.package.facts =>
+        {
+            Ok(())
+        }
+        _ => Err(OperationFailureCode::ValidationFailed),
     }
 }
 
@@ -5244,6 +5504,7 @@ where
     let source_file = &mut source_guard.file;
     verify_file_evidence(source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
+    verify_xci_to_nsp_key(plan)?;
     let mut destination_directory = destination_anchor_directory;
     if plan.destination.creation_parent.is_some() {
         validate_file_route(&plan.destination, None)
@@ -5288,6 +5549,7 @@ where
     }
     if plan.skipped {
         verify_source_entry(plan, &source_directory)?;
+        verify_xci_to_nsp_key(plan)?;
         validate_plan_routes(
             plan,
             workspace_runtime_identity,
@@ -5329,6 +5591,7 @@ where
     )?;
     verify_source_entry(plan, &source_directory)?;
     ensure_destination_baseline(plan, &destination_directory)?;
+    verify_xci_to_nsp_key(plan)?;
     if plan.snapshot.conflict_policy == ConflictPolicy::Fail
         && plan.destination_baseline.is_some()
         && !plan.already_up_to_date
@@ -5336,7 +5599,9 @@ where
         return Err(OperationFailureCode::DestinationConflict);
     }
 
-    if plan.already_up_to_date && multi_content_build_output(plan).is_some() {
+    if plan.already_up_to_date
+        && (multi_content_build_output(plan).is_some() || xci_to_nsp(plan).is_some())
+    {
         verify_source_entry(plan, &source_directory)?;
         validate_plan_routes(
             plan,
@@ -5356,6 +5621,16 @@ where
         {
             return Err(OperationFailureCode::DestinationChanged);
         }
+        if xci_to_nsp(plan).is_some() {
+            validate_xci_to_nsp_package(&plan.destination.path, plan, session, checkpoint)?;
+            verify_source_entry(plan, &source_directory)?;
+            verify_destination_entry(
+                &destination_directory,
+                &plan.destination.name,
+                expected_destination,
+            )?;
+        }
+        verify_xci_to_nsp_key(plan)?;
         check_cancelled(session)?;
         checkpoint(ExecutionCheckpoint::BeforeCompletion);
         if !session
@@ -5510,7 +5785,45 @@ where
         cleanup_artifact_retained,
     )?;
     let stage_name = stage_file_name.to_os_string();
-    let produced = producer(source_file, &mut stage_file, session);
+    let produced = if let Some(conversion) = xci_to_nsp(plan) {
+        verify_xci_to_nsp_key(plan)?;
+        check_cancelled(session)?;
+        let mut completed = 0_u64;
+        let mut callback_failure = None;
+        match crate::multi_content_format::write_pfs0_from_source(
+            &mut stage_file,
+            source_file,
+            &conversion.package.layout,
+            &conversion.package.members,
+            |written| {
+                if let Err(code) = check_cancelled(session) {
+                    callback_failure = Some(code);
+                    return Err(FormatError::OutputUnavailable);
+                }
+                completed = completed
+                    .checked_add(written)
+                    .ok_or(FormatError::ResourceLimit)?;
+                session.record_progress(completed);
+                Ok(())
+            },
+        ) {
+            Ok(()) => Ok(()),
+            Err(_) if callback_failure.is_some() => {
+                Err(callback_failure.unwrap_or(OperationFailureCode::Cancelled))
+            }
+            Err(FormatError::SourceUnavailable) => Err(OperationFailureCode::SourceChanged),
+            Err(FormatError::ResourceLimit) => Err(OperationFailureCode::ResourceLimitExceeded),
+            Err(FormatError::OutputUnavailable) => Err(OperationFailureCode::WriteFailed),
+            Err(
+                FormatError::InvalidPackage
+                | FormatError::UnsupportedProfile
+                | FormatError::DuplicateMember
+                | FormatError::AmbiguousGrouping,
+            ) => Err(OperationFailureCode::ValidationFailed),
+        }
+    } else {
+        producer(source_file, &mut stage_file, session)
+    };
     let stage_after_production = inspect_file(&mut stage_file);
     match &stage_after_production {
         Ok(observed) => update_artifact_evidence(
@@ -5561,6 +5874,7 @@ where
         return Err(OperationFailureCode::ValidationFailed);
     }
     if multi_content_build_output(plan).is_none()
+        && xci_to_nsp(plan).is_none()
         && !files_equal_with_checkpoint(
             source_file,
             &mut stage_file,
@@ -5582,6 +5896,15 @@ where
     }
     if let Some(expected) = multi_content_build_output(plan) {
         validate_staged_content_package(&stage_directory_path.join(&stage_name), expected)?;
+    }
+    if xci_to_nsp(plan).is_some() {
+        validate_xci_to_nsp_package(
+            &stage_directory_path.join(&stage_name),
+            plan,
+            session,
+            checkpoint,
+        )?;
+        verify_source_entry(plan, &source_directory)?;
     }
     update_artifact_evidence(
         artifacts,
@@ -5642,6 +5965,7 @@ where
     )?;
     verify_source_entry(plan, &source_directory)?;
     ensure_destination_baseline(plan, &destination_directory)?;
+    verify_xci_to_nsp_key(plan)?;
     let mut current_stage = open_file_at(&stage_directory, &stage_name)
         .map_err(|_| OperationFailureCode::ValidationFailed)?;
     verify_file_evidence(&mut current_stage, &staged)
@@ -5649,6 +5973,7 @@ where
 
     checkpoint(ExecutionCheckpoint::BeforePromotion);
     verify_source_entry(plan, &source_directory)?;
+    verify_xci_to_nsp_key(plan)?;
     let destination_artifact_directory = destination_directory
         .try_clone()
         .map_err(|_| OperationFailureCode::WriteFailed)?;
@@ -5679,7 +6004,9 @@ where
     if let Some(milestone) = milestones.last().copied() {
         session.record_milestone(milestone);
     }
-    if multi_content_build_output(plan).is_some() && result == OperationOutcome::Copied {
+    if xci_to_nsp(plan).is_some() && result == OperationOutcome::Copied {
+        Ok(OperationOutcome::Converted)
+    } else if multi_content_build_output(plan).is_some() && result == OperationOutcome::Copied {
         Ok(OperationOutcome::Built)
     } else {
         Ok(result)
@@ -10903,6 +11230,179 @@ mod tests {
     fn plan(source: &Path, destination: &Path, workspace: &Path) -> OperationPlan {
         plan_copy_through(CopyThroughRequest::new(source, destination, workspace))
             .expect("create operation plan")
+    }
+
+    fn xci_fixture_plan() -> (TempDir, PathBuf, PathBuf, OperationPlan) {
+        let fixture = crate::test_synthetic_xci::valid();
+        let root = tempfile::tempdir().expect("create XCI operation fixture");
+        let source = root.path().join("source.bin");
+        let destination = root.path().join("destination.bin");
+        let key_file = root.path().join("keys.dat");
+        let workspace = root.path().join("workspace");
+        fs::write(&source, &fixture.image).expect("write XCI source");
+        fs::write(&key_file, &fixture.key_file).expect("write key fixture");
+        fs::create_dir(&workspace).expect("create XCI workspace");
+        let plan = plan_xci_to_nsp(crate::xci_to_nsp::XciToNspRequest::new(
+            &source,
+            &destination,
+            &workspace,
+            &key_file,
+        ))
+        .expect("create XCI conversion plan");
+        (root, destination, workspace, plan)
+    }
+
+    #[test]
+    fn xci_staged_output_corruption_is_rejected_with_retained_evidence() {
+        let (_root, destination, workspace, plan) = xci_fixture_plan();
+        let stage_path = workspace
+            .join(
+                plan.stage_directory_name
+                    .as_ref()
+                    .expect("planned stage directory"),
+            )
+            .join(plan.stage_file_name.as_ref().expect("planned stage file"));
+        let mut corrupted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion && !corrupted {
+                    corrupted = true;
+                    let mut stage = OpenOptions::new()
+                        .write(true)
+                        .open(&stage_path)
+                        .expect("open staged output for injected corruption");
+                    stage
+                        .write_all(b"staged-output-corruption")
+                        .expect("corrupt staged output");
+                    stage.sync_all().expect("sync corrupt staged output");
+                }
+            },
+        );
+
+        assert!(corrupted);
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::ValidationFailed)
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            result.cleanup_warning().map(|warning| warning.code()),
+            Some(OperationFailureCode::CleanupIncomplete)
+        );
+        assert!(result.cleanup_artifact_retained());
+        let retained = retained_artifact(&result, OperationArtifactRole::StagedOutput);
+        assert!(retained.retained());
+        assert_eq!(retained.path(), fs::canonicalize(&stage_path).unwrap());
+        assert_eq!(retained.length(), retained.recorded_length());
+        assert_ne!(retained.sha256(), retained.recorded_sha256());
+        assert!(
+            fs::read(&stage_path)
+                .unwrap()
+                .starts_with(b"staged-output-corruption")
+        );
+        let remaining = fs::read_dir(&workspace).unwrap().count();
+        assert_eq!(
+            remaining, 1,
+            "preserve the staging directory for reconciliation"
+        );
+    }
+
+    #[test]
+    fn xci_destination_race_is_not_overwritten_and_retains_cleanup_evidence() {
+        let (_root, destination, workspace, plan) = xci_fixture_plan();
+        let competing_bytes = b"competing destination bytes";
+        let mut raced = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::AtomicPromotionStarted && !raced {
+                    raced = true;
+                    fs::write(&destination, competing_bytes)
+                        .expect("install competing destination at publication boundary");
+                }
+            },
+        );
+
+        assert!(raced);
+        assert_eq!(result.state(), JobState::Failed);
+        assert_ne!(result.outcome(), Some(OperationOutcome::Converted));
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::DestinationChanged)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), competing_bytes);
+        assert_eq!(
+            result.cleanup_warning().map(|warning| warning.code()),
+            Some(OperationFailureCode::CleanupIncomplete)
+        );
+        assert!(result.cleanup_artifact_retained());
+        let staged = retained_artifact(&result, OperationArtifactRole::StagedOutput);
+        assert!(staged.retained());
+        assert!(staged.path().is_file());
+        let canonical_destination = fs::canonicalize(&destination).unwrap();
+        let competitor = destination_competitor(&result, &canonical_destination);
+        assert!(competitor.retained());
+        assert_eq!(fs::read(competitor.path()).unwrap(), competing_bytes);
+        assert_eq!(fs::read_dir(workspace).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn xci_cancellation_before_promotion_does_not_publish_the_package() {
+        let (root, destination, _workspace, plan) = xci_fixture_plan();
+        let source = root.path().join("source.bin");
+        let source_before = fs::read(&source).expect("read source before execution");
+        let session = OperationSession::new();
+        let cancellation_session = session.clone();
+        let mut accepted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion && !accepted {
+                    accepted = cancellation_session.cancel();
+                }
+            },
+        );
+
+        assert!(accepted);
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(result.outcome(), None);
+        assert!(!destination.exists());
+        assert_eq!(fs::read(source).unwrap(), source_before);
+    }
+
+    #[test]
+    fn xci_cancellation_during_semantic_verification_stops_before_promotion() {
+        let (_root, destination, _workspace, plan) = xci_fixture_plan();
+        let session = OperationSession::new();
+        let cancellation_session = session.clone();
+        let mut accepted = false;
+
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::XciToNspSemanticVerification && !accepted {
+                    accepted = cancellation_session.cancel();
+                }
+            },
+        );
+
+        assert!(accepted);
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::Cancelled)
+        );
+        assert!(!destination.exists());
     }
 
     #[test]
