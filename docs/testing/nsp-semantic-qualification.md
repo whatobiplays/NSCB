@@ -9,19 +9,19 @@ means that some required evidence is still missing; it is not a pass.
 | --- | --- | --- |
 | PAC-1 — Positive semantics | PASS | `qualifies_byte_backed_two_member_profile_despite_misleading_names` checks profile id `rights_free_base_application_v1`, byte-derived roles, exact member digests and sizes, source digest, deterministic repeat results, and unchanged input bytes. `verifies_multiple_hash_table_entries_and_a_partial_final_block` covers multiple table entries and a partial last block. hactool and NSTool independently read the synthetic NCA/PFS0; NSTool also displayed the expected Application CNMT and Program row. |
 | PAC-2 — Negative semantics | PASS | The integration suite covers plain PFS0, misleading names, one or extra outer members, empty outer members, trailing, leading, and inter-member unreferenced payload at the outer level, the same unreferenced-payload cases in Program PFS0, trailing unreferenced Meta PFS0 payload, and valid reversed outer table order. It also covers duplicate Meta/Program roles, truncated and unsupported CNMT, unsupported section and key-generation profiles, nonzero RightsId, missing and malformed key prerequisites, wrong header key (`invalid_nca_header`), wrong key-area key (`key_or_section_integrity_failure`), Meta/Program title mismatch, and Program row hash, ContentId, size, type, IdOffset, and title-ID mismatches. |
-| PAC-3 — Boundary safety | UNVERIFIED | Existing range, bounded-I/O, mutation, cancellation, and sanitized-read-failure tests remain. Test-only GlobalAlloc refusal is now attributed and observed at all 12 explicit bounded reservation sites, including the recorded site, occurrence, expected layout, actual layout, and single refusal. Standard-library path-buffer allocations remain `NOT_EVIDENCED`. The `usize::MAX` capacity-overflow case reaches the reservation wrapper but records no GlobalAlloc refusal. Genuine operating-system memory pressure is `NOT_RUN`, and the owner-approved same-handle snapshot still cannot detect a hostile writer that restores all observed metadata. PAC-3 awaits owner review of those limitations. |
+| PAC-3 — Boundary safety | PASS — owner accepted for the supported profile | Existing range, bounded-I/O, mutation, cancellation, and sanitized-read-failure tests remain. Test-only GlobalAlloc refusal is attributed and observed at all 12 explicit bounded reservation sites, including the recorded site, occurrence, expected layout, actual layout, and single refusal. Standard-library path-buffer allocations remain `NOT_EVIDENCED`. The `usize::MAX` capacity-overflow case reaches the reservation wrapper but records no GlobalAlloc refusal. Genuine operating-system memory pressure is `NOT_RUN`, and the owner-approved same-handle snapshot still cannot detect a hostile writer that restores all observed metadata. Owner accepted these limits for the supported profile on 2026-11-12; acceptance does not erase them. |
 | PAC-4 — API and compatibility | PASS | `make all` passed on macOS 27.0.1 arm64. The public change is additive and Engine-only, with no CLI/TUI qualification command. A separate unrestricted `cargo test --no-default-features` invocation fails in the existing `multi_content_operations` CLI integration test because the `nscb` binary requires `standalone-job-history`; the Makefile's supported no-default gate tests the library and runs integration tests with that feature. |
-| PAC-5 — Native qualification | UNVERIFIED | The current host is macOS 27.0.1 build `26A434`, arm64. Prior PR CI run `43205172852` passed on macOS 15 arm64, Windows Server 2025 x86_64, Linux glibc x86_64, and Linux glibc arm64. No qualifying Windows 11 x86_64 host was available for this run, so FUP-2 is `NOT_RUN`. Windows Server 2025, cross-compilation, and architecture-emulated execution do not substitute. |
-| PAC-6 — Review and format evidence | PASS | Pinned hactool, NSTool, and hacPack source references and synthetic-reader results are documented. The corrected candidate passed independent full-diff and correction-delta reviews and the final direct ChatGPT reassessment recorded below. |
+| PAC-5 — Native qualification | PASS for the supported profile's focused native Windows 11 x86_64 suite | Run on `OBIGAMING`, Windows 11 Pro 25H2 build `26200.9974`, using native `x86_64-pc-windows-msvc` Rust. All six requested commands and applicable focused NCA mapping and allocator-refusal tests passed at `0878126cf35f769a70bd74a1ad054be1bb70edd4`. The supplemental full-library run had seven failures and strict Clippy found an unused import; both are recorded in the [Windows run record](evidence/issue-73/qualification-run-windows-11-2026-11-12.md) and remain visible for final readiness review. Windows Server 2025, cross-compilation, and architecture-emulated execution do not substitute. |
+| PAC-6 — Review and format evidence | PASS for the earlier reviewed candidate; current Windows evidence delta independently reviewed | Pinned hactool, NSTool, and hacPack source references and synthetic-reader results are documented. The corrected v9 candidate passed independent full-diff and correction-delta reviews and final direct ChatGPT reassessment. The Windows evidence delta passed independent standards/evidence-hygiene and requirements reviews; final ChatGPT readiness review remains pending under FUP-4. |
 
 ## Issue #73 follow-up crosswalk
 
 | Follow-up | Status | Evidence and remaining decision |
 | --- | --- | --- |
-| FUP-1 — Allocator exhaustion / PAC-3 | Twelve tagged reservation sites evidenced; path-buffer requests `NOT_EVIDENCED`; PAC-3 remains `UNVERIFIED` | Each tagged site is targeted with a one-shot, per-thread failpoint that records its site, occurrence, expected layout, actual layout, and one refusal. Standard-library path buffers in `open_snapshot_file` are not site-tagged and remain `NOT_EVIDENCED`. The separate `usize::MAX` case records an unrepresentable layout and no injected refusal; it does not claim observed OS pressure. Genuine operating-system resource pressure is `NOT_RUN`; owner disposition of that residual and the preserved snapshot limitation is still required. |
-| FUP-2 — Native Windows 11 x86_64 / PAC-5 | `NOT_RUN`; PAC-5 remains `UNVERIFIED` | The available host is macOS 27.0.1 arm64. No qualifying Windows 11 x86_64 host was available. A native x86_64 virtualized guest on a native x86_64 host is acceptable with host provenance; architecture-emulated x64 on ARM64 is excluded. Issue #73 stays open. |
-| FUP-3 — Durable evidence and PAC crosswalk | Recorded | The [Issue #73 run record](evidence/issue-73/qualification-run-2026-11-12.md) links sanitized repository transcripts and records the host/process limits, exact environment and commands, results, and hashes. Byte-preserved original transcripts remain in a private local archive. The record keeps allocator refusal, capacity overflow, path-buffer `NOT_EVIDENCED`, and OS pressure as separate statuses. The original Issue #71 exception and snapshot threat model remain in the existing records. |
-| FUP-4 — Independent and direct review | Recorded | The full-candidate review, v8-to-v9 correction-delta review, and final direct ChatGPT reassessment are bound to their exact snapshots below. |
+| FUP-1 — Allocator exhaustion / PAC-3 | PASS — owner accepted for the supported profile | Each of the 12 tagged sites is targeted with a one-shot, per-thread failpoint that records its site, occurrence, expected layout, actual layout, and one refusal. Standard-library path buffers in `open_snapshot_file` remain `NOT_EVIDENCED`. The separate `usize::MAX` case records an unrepresentable layout and no injected refusal; it does not claim observed OS pressure. Genuine operating-system resource pressure remains `NOT_RUN`. The owner accepted these limits on 2026-11-12; the snapshot threat model remains unchanged. |
+| FUP-2 — Native Windows 11 x86_64 / PAC-5 | PASS for the supported profile's focused native suite | The six requested commands and applicable focused NCA mapping and allocator-refusal tests passed on `OBIGAMING` at source `0878126cf35f769a70bd74a1ad054be1bb70edd4`. Supplemental full-library and strict-Clippy failures are disclosed in the [Windows run record](evidence/issue-73/qualification-run-windows-11-2026-11-12.md). Windows Server, cross-compilation, and architecture-emulated x64 are not counted. |
+| FUP-3 — Durable evidence and PAC crosswalk | Updated | The [Windows Issue #73 run record](evidence/issue-73/qualification-run-windows-11-2026-11-12.md) links sanitized transcripts and records host/process facts, exact commands, results, and separate raw/sanitized hashes. Byte-preserved originals remain in a private local archive. Allocator refusal, capacity overflow, path-buffer `NOT_EVIDENCED`, and OS pressure remain separate statuses. The original Issue #71 exception and snapshot threat model remain intact. |
+| FUP-4 — Independent and direct review | Independent evidence-delta review PASS; final ChatGPT readiness review pending | Non-authoring standards/evidence-hygiene and requirements reviews passed for this Windows evidence delta. Prior source and evidence reviews below are historical records for their recorded snapshots. |
 
 ## Issue #73 review record
 
@@ -42,8 +42,7 @@ performed.
 
 The prior PR candidate's claim that final ChatGPT source review had completed is withdrawn.
 The earlier ChatGPT review covered snapshot `6dd3572392d0ff375ce30847da3a7f64e7b733c16b64018cb700c778880911e7`; it missed F2 and is recorded as preliminary.
-The corrected full candidate `ee9be9c51159332a1161f6df2037ab81e748bc0e65ddd6d18b045b2030a63a0b` passed independent review, correction-delta review, and final direct ChatGPT reassessment.
-PAC-6 is `PASS`; FUP-4 is `Recorded`.
+The corrected full candidate `ee9be9c51159332a1161f6df2037ab81e748bc0e65ddd6d18b045b2030a63a0b` passed independent review, correction-delta review, and final direct ChatGPT reassessment. For that earlier candidate, PAC-6 was `PASS` and FUP-4 was recorded. The current Windows evidence delta passed independent standards/evidence-hygiene and requirements reviews; final ChatGPT readiness review remains pending.
 
 ### Independent review provenance
 
@@ -72,13 +71,18 @@ Mew's source/docs review and Eevee's evidence review cover the original PR paths
 
 Averroes passed the full v9 review, and Mew passed the v8-to-v9 provenance delta review. The standards review found no documented-rule breach; it noted one possible duplicate mapping as a judgment call. The spec review found no source-level mismatch. The final direct ChatGPT reassessment found no remaining source or evidence-provenance finding.
 
-PAC-6 is `PASS` and FUP-4 is `Recorded`. PAC-3 and PAC-5 remain `UNVERIFIED`; FUP-2 remains `NOT_RUN`.
+The prior review history above describes the earlier v9 candidate and its
+reviews. The current Windows evidence delta passed independent
+standards/evidence-hygiene and requirements reviews. Final ChatGPT readiness
+review remains pending.
 
 FUP-1 coverage note: the twelve refusal cases exercise the explicitly tagged
 fallible reservations. `open_snapshot_file` also obtains canonical paths and
 copies requested paths through standard-library APIs. Those `PathBuf`
 allocation requests are not tagged and remain `NOT_EVIDENCED`; no allocator
-failpoint is claimed for them. PAC-3 remains `UNVERIFIED`.
+failpoint is claimed for them. The owner accepted PAC-3 for the supported
+profile with these limitations; genuine operating-system memory pressure
+remains `NOT_RUN`.
 
 ## Relationship to Issue #47
 
@@ -88,13 +92,14 @@ functional and safety testing on macOS arm64, Windows 11 x86_64, Linux glibc
 qualification. Issue #47 also requires responder versions, MTP capabilities,
 driver and permission setup, helper hashes and licenses, synthetic-fixture
 coverage, and sanitized physical-device qualification evidence. This Issue #73
-work provides only partial software-test evidence for the macOS arm64 row. It
-does not establish the other host results or those responder/provider and
+work provides partial software-test evidence for the macOS arm64 and Windows
+11 x86_64 rows. The Windows run covers the supported semantic-qualifier
+profile and discloses its supplemental full-library failures; it does not
+establish Issue #47's full platform workload or its responder/provider and
 physical-device requirements. Issue #47's v1 universal-capability and
 conditional DBI0 gates also remain separate; this task changes no advertised
-capabilities. A future qualifying Windows 11 run may contribute to that row,
-but it would not complete Issue #47, which remains open. No Issue #47
-acceptance is claimed as complete here.
+capabilities. This Windows evidence does not complete Issue #47, which remains
+open. No Issue #47 acceptance is claimed as complete here.
 
 ## Prior independent review record
 
@@ -260,9 +265,11 @@ harness tests 4 passed. The four allocation mapping regressions passed for
 Inspection, Verification, Recognition, and multi-content parsing. Separate
 checks passed for the typed/sanitized qualifier refusal, capacity-overflow
 classification, NCA member read sanitization, and generic PFS0 payload spans.
-These local runs do not substitute for the other native CI runners or FUP-2.
+These local macOS runs do not substitute for the other native CI runners. The
+Windows 11 result is recorded in the [Windows run
+record](evidence/issue-73/qualification-run-windows-11-2026-11-12.md).
 
-Before merge readiness, run and record:
+Before broader platform qualification is complete, run and record:
 
 ```sh
 make all
@@ -271,16 +278,18 @@ make all
 Native runs must execute the semantic unit and integration tests on macOS 15+
 arm64, Windows 11 x86_64, Linux x86_64 with glibc 2.35+, and Linux aarch64
 with glibc 2.35+. Record the OS version, architecture, libc floor where
-applicable, Rust toolchain, commands, and test counts for each host. An
-unavailable host remains `NOT_RUN`; do not count cross-compilation or
+applicable, Rust toolchain, commands, and test counts for each host. The
+macOS arm64 and focused Windows 11 x86_64 runs are recorded; Linux x86_64 and
+Linux aarch64 remain `NOT_RUN` here. Do not count cross-compilation or
 emulation as native evidence.
 
 ## FUP-2 Windows 11 x86_64 procedure
 
-FUP-2 is `NOT_RUN` for this change because no qualifying Windows 11 x86_64
-host was available in the execution environment. The available host is macOS
-27.0.1, build `26A434`, arm64. Windows Server 2025 CI does not satisfy this
-requirement.
+FUP-2's native Windows 11 x86_64 run was completed on `OBIGAMING` at source
+`0878126cf35f769a70bd74a1ad054be1bb70edd4`. The full host/toolchain evidence,
+all commands, outcomes, failures, and hashes are in the
+[Windows run record](evidence/issue-73/qualification-run-windows-11-2026-11-12.md).
+Windows Server 2025 CI does not satisfy this requirement.
 
 Run the tests from a native Windows 11 x86_64 PowerShell session. Record the
 edition, version, build, OS architecture, processor architecture, and whether
@@ -302,12 +311,11 @@ configuration. A guest report alone does not establish host provenance. Accept
 hardware virtualization on a native x86_64 host; reject x86_64 emulation on an
 ARM64 host.
 
-From the clean, approved source commit, record `git rev-parse HEAD`,
-`git status --porcelain`, the SHA-256 of `Cargo.lock`,
-`rustup show active-toolchain`, `rustc --version --verbose`, and
-`cargo --version`. The Rust host target must be
-`x86_64-pc-windows-msvc`. Capture the commands and their complete output in a
-PowerShell transcript, then run:
+The clean source commit, tree state, Cargo.lock hash, rustup toolchain,
+`rustc -vV`, Cargo version, and MSVC availability were recorded. The Rust
+host target was `x86_64-pc-windows-msvc`. Original command metadata and raw
+stdout/stderr remain byte-preserved in the private archive; published logs
+are sanitized. The run executed:
 
 ```powershell
 cargo test --locked --no-default-features --lib nsp_semantic_qualification::tests::
@@ -318,6 +326,12 @@ cargo test --locked --no-default-features --lib reservation -- --test-threads=1
 cargo test --locked --no-default-features --lib test_allocator::tests:: -- --test-threads=1
 ```
 
-Record test counts, ignored tests, failures, and skips. No cross-compiled or
-architecture-emulated run can close FUP-2. Until this evidence exists,
-PAC-5 remains `UNVERIFIED` and Issue #73 stays open.
+The six required commands all passed (48 passing test executions, no failed,
+ignored, or skipped tests). Applicable focused NCA mapping and end-to-end
+allocator-refusal checks also passed. A supplemental full-library run failed
+seven tests and strict Clippy found an unused import; both were rerun or
+isolated where practical and are disclosed in the linked run record. This
+supports PAC-5 for the defined supported-profile focused suite, while the
+supplemental findings remain for final readiness review. No cross-compiled or
+architecture-emulated run is counted. Issue #73 remains open pending the final
+ChatGPT readiness review.

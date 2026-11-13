@@ -1,0 +1,462 @@
+Repository: whatobiplays/NSCB
+Issue / PR: #73 / #74
+Policy revision: 142422527de28b8e20dea1158d2f54d020dcdcd5
+Source revision: 0878126cf35f769a70bd74a1ad054be1bb70edd4
+Command: cargo test --locked --no-default-features --lib -- --test-threads=1
+Exact cargo argv: ["test","--locked","--no-default-features","--lib","--","--test-threads=1"]
+Capture wrapper argv: rtk proxy cargo test --locked --no-default-features --lib -- --test-threads=1
+Working directory: <REPO_ROOT>
+Start UTC: 2026-11-13T05:28:29.7739297+00:00
+End UTC: 2026-11-13T05:28:39.0594281+00:00
+Exit status: 101
+Test results: passed=250; failed=7; ignored=4; skipped=0; measured=0; filtered_out=0
+Raw stdout SHA-256: de7a8d0df54d4b41e8bba804c8192ed0c360597ed36cff989ad4f0af5dbecc51
+Raw stderr SHA-256: b523a34d0087e14a742184863cd1862b952cfdb3623ffd620c82f5d0d7880c7d
+Sanitization: user-home and worktree paths redacted in this derivative; original raw streams are unchanged.
+
+===== STDOUT =====
+
+running 261 tests
+test engine::tests::copy_batch_capabilities_fail_closed_on_unqualified_platforms ... ok
+test engine::tests::helper_execution_limit_is_shared_by_an_explicit_host_session ... ok
+test error::tests::error_codes_have_stable_json_names_and_sanitized_messages ... ok
+test file_identity::tests::reports_identity_and_length ... ok
+test input_resolution::tests::aggregate_input_list_entry_and_byte_budgets_are_enforced ... ok
+test input_resolution::tests::batch_resolution_checks_cancellation_between_base_directory_validations ... ok
+test input_resolution::tests::batch_resolution_rejects_a_canonical_member_probe_error_for_a_direct_directory ... ok
+test input_resolution::tests::batch_resolution_rejects_a_canonical_member_probe_error_for_an_input_list ... ok
+test input_resolution::tests::batch_resolution_rejects_an_adjacent_sidecar_probe_error_for_a_direct_directory ... ok
+test input_resolution::tests::batch_resolution_rejects_an_adjacent_sidecar_probe_error_for_an_input_list ... ok
+test input_resolution::tests::batch_resolution_rejects_unavailable_direct_split_qualification ... ok
+test input_resolution::tests::batch_resolution_rejects_unavailable_input_list_split_qualification ... ok
+test input_resolution::tests::control_observes_a_bound_invocation_cancellation_handle ... ok
+test input_resolution::tests::directory_append_failure_preserves_later_ordered_sibling ... ok
+test input_resolution::tests::directory_scan_failure_preserves_later_ordered_sibling ... ok
+test input_resolution::tests::directory_scan_observes_cancellation_between_entries ... ok
+test input_resolution::tests::fresh_control_reports_no_active_split_input ... ok
+test input_resolution::tests::later_ordinary_scan_failure_stays_item_local_after_a_split_candidate ... ok
+test input_resolution::tests::qualified_split_does_not_make_a_later_ordinary_append_failure_global ... ok
+test input_resolution::tests::schema_parser_tolerates_unknown_optional_fields_but_requires_v1_semantics ... ok
+test input_resolution::tests::single_resolution_rejects_an_item_local_directory_failure ... ok
+test input_resolution::tests::traversal_limits_are_finite_and_documented_constants ... ok
+test inspection::tests::every_code_has_a_unique_wire_name_and_consistent_class ... ok
+test inspection::tests::every_stable_error_has_the_documented_exit_class ... ok
+test inspection::tests::memory_monitoring_status_reports_disabled_and_unavailable_thresholds ... ok
+test inspection::tests::nca_profile_enumerates_each_supported_dimension ... ok
+test inspection::tests::program_ids_serialize_as_sixteen_lowercase_hex_digits ... ok
+test inspection::tests::unsupported_prerequisites_are_not_provider_execution_failures ... ok
+test key_file::qualification_tests::conflicting_application_key_definitions_are_rejected_without_values ... ok
+test key_file::qualification_tests::key_file_reader_enforces_the_shared_size_limit_and_sanitizes_io_errors ... ok
+test key_file::qualification_tests::missing_key_material_is_distinct_from_malformed_key_material ... ok
+test key_file::qualification_tests::reads_both_explicit_keys_and_redacts_the_application_key_debug_form ... ok
+test multi_content_format::tests::nca_allocation_failure_maps_to_multi_content_resource_limit ... ok
+test multi_content_format::tests::parses_and_sorts_exact_program_groups_and_hashes_members ... ok
+test multi_content_format::tests::rejects_case_aliases_and_path_like_outer_member_names ... ok
+test multi_content_format::tests::rejects_duplicate_outer_member_names ... ok
+test multi_content_format::tests::rejects_duplicate_program_and_content_index_pairs ... ok
+test multi_content_format::tests::rejects_malformed_inner_partition_pfs0_framing ... ok
+test multi_content_format::tests::rejects_non_program_and_encrypted_nca_headers ... ok
+test multi_content_format::tests::rejects_reserved_ids_and_zero_size_members_as_ambiguous_or_empty ... ok
+test multi_content_format::tests::rejects_truncated_outer_and_nca_inputs ... ok
+test multi_content_format::tests::rejects_unsupported_partition_layout_and_crypto ... ok
+test multi_content_format::tests::streams_large_member_in_bounded_chunks_and_propagates_callback_errors ... ok
+test multi_content_format::tests::writer_rejects_a_member_whose_digest_no_longer_matches ... ok
+test multi_content_format::tests::writes_sorted_deterministic_pfs0_and_round_trips_member_evidence ... ok
+test nca::tests::accepts_both_documented_descriptor_reserved_byte_conventions ... ok
+test nca::tests::encrypted_header_is_decrypted_only_with_the_supplied_header_key ... ok
+test nca::tests::malformed_partition_order_and_size_are_rejected ... ok
+test nca::tests::parses_four_supported_partitions_and_preserves_key_alias_facts ... ok
+test nca::tests::partition_indices_keep_descriptor_order_and_skip_absent_entries ... ok
+test nca::tests::partition_layout_is_validated_separately_from_header_syntax ... ok
+test nca::tests::partition_reservation_refusal_is_typed ... ok
+test nca::tests::plaintext_nca_header_is_typed_unsupported_input ... ok
+test nca::tests::reads_effective_generation_signature_and_kaek_from_encrypted_header ... ok
+test nca::tests::rejects_descriptor_bytes_outside_the_supported_reserved_convention ... ok
+test nca::tests::span_reservation_refusal_is_typed_and_inspection_mapped ... ok
+test nca::tests::unsupported_or_extended_partition_metadata_remains_visible_to_policy ... ok
+test nsp_semantic_qualification::tests::actual_bounded_qualifier_reservations_refuse_with_sanitized_errors ... ok
+test nsp_semantic_qualification::tests::allocation_reservation_failure_maps_to_a_typed_error ... ok
+test nsp_semantic_qualification::tests::bounded_reader_checks_parent_ranges_and_limits_reads_and_seeks ... ok
+test nsp_semantic_qualification::tests::bounded_reader_propagates_parent_io_errors ... ok
+test nsp_semantic_qualification::tests::cancellation_after_the_final_source_hash_chunk_is_reported ... ok
+test nsp_semantic_qualification::tests::ctr_counter_uses_reversed_section_ctr_and_absolute_section_block ... ok
+test nsp_semantic_qualification::tests::input_size_limit_accepts_its_boundary_and_rejects_the_next_byte ... ok
+test nsp_semantic_qualification::tests::key_byte_reservation_refusal_is_typed_and_site_attributed ... ok
+test nsp_semantic_qualification::tests::nca_member_source_read_failure_is_sanitized_and_typed ... ok
+test nsp_semantic_qualification::tests::section_regions_accept_only_checked_nonoverlapping_ranges ... ok
+test nsp_semantic_qualification::tests::source_mutation_after_hashing_returns_changed_input_error ... ok
+test operation::copy_batch_aggregation_tests::accepted_cancellation_does_not_hide_publication_uncertainty ... ok
+test operation::copy_batch_aggregation_tests::all_failed_batch_with_uncertain_item_uses_publication_uncertainty ... ok
+test operation::copy_batch_aggregation_tests::checkpoint_failure_takes_precedence_over_publication_uncertainty ... ok
+test operation::copy_batch_aggregation_tests::completed_batch_with_uncertain_item_promotes_publication_uncertainty ... ok
+test operation::copy_batch_aggregation_tests::completed_mixed_batch_with_uncertain_item_is_failed ... ok
+test operation::copy_batch_aggregation_tests::completion_error_does_not_replace_publication_uncertainty ... ok
+test operation::copy_batch_aggregation_tests::skipped_items_do_not_count_as_successes_when_classifying_a_batch ... ok
+test operation::incomplete_retained_storage_tests::retained_storage_is_unknown_when_only_a_retained_staging_directory_is_inventoried ... ok
+test partition_fs::tests::accepts_normalized_paths_and_tracks_tree_paths ... ok
+test partition_fs::tests::accepts_valid_nested_paths ... ok
+test partition_fs::tests::enforces_segment_and_global_entry_budgets ... ok
+test partition_fs::tests::generated_paths_obey_the_cumulative_path_byte_limit ... ok
+test partition_fs::tests::name_byte_budget_accumulates_across_partitions ... ok
+test partition_fs::tests::partition_prefixes_distinguish_identical_member_names ... ok
+test partition_fs::tests::path_byte_budget_accumulates_across_partitions ... ok
+test partition_fs::tests::rejects_duplicate_and_non_normalized_names ... ok
+test partition_fs::tests::rejects_file_and_directory_hierarchy_conflicts ... ok
+test pfs0::tests::accepts_an_empty_container_and_zero_length_entry_at_payload_end ... ok
+test pfs0::tests::accepts_the_entry_and_string_table_limits ... ok
+test pfs0::tests::accepts_the_maximum_name_length_and_rejects_a_longer_name ... ok
+test pfs0::tests::bounds_total_copied_filename_bytes_across_repeated_entries ... ok
+test pfs0::tests::caller_metadata_limit_is_checked_before_reading_declared_tables ... ok
+test pfs0::tests::enforces_entry_and_string_table_limits_before_reading_declared_tables ... ok
+test pfs0::tests::injected_entry_and_span_reservation_refusals_map_to_resource_limits ... ok
+test pfs0::tests::injected_metadata_reservation_refusal_is_observed_at_its_site ... ok
+test pfs0::tests::maps_non_eof_reader_failures_to_sanitized_input_errors ... ok
+test pfs0::tests::parses_payload_relative_spans_without_reading_payload_bytes ... ok
+test pfs0::tests::rejects_empty_names ... ok
+test pfs0::tests::rejects_entry_arithmetic_overflow_out_of_bounds_and_overlap ... ok
+test pfs0::tests::rejects_incomplete_entry_tables_and_string_tables ... ok
+test pfs0::tests::rejects_invalid_string_table_termination_utf8_offsets_and_boundaries ... ok
+test pfs0::tests::rejects_reserved_header_and_entry_bits ... ok
+test pfs0::tests::rejects_short_headers_and_unrecognized_magic ... ok
+test pfs0::tests::second_filename_reservation_can_be_refused_without_hitting_the_first ... ok
+test provider::cache::tests::archive_digest_is_checked_before_installation ... ok
+test provider::cache::tests::archive_symlink_metadata_is_rejected_without_publishing_cache_entries ... ok
+test provider::cache::tests::cache_root_must_be_absolute ... ok
+test provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity ... FAILED
+test provider::cache::tests::exact_single_regular_member_is_accepted_by_the_pinned_layout_parser ... ok
+test provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations ... FAILED
+test provider::cache::tests::lookup_rejects_directory_enumeration_over_the_cap ... ok
+test provider::cache::tests::lookup_rejects_more_than_the_pointer_candidate_cap ... ok
+test provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact ... FAILED
+test provider::cache::tests::malformed_pointer_is_not_selected ... ok
+test provider::cache::tests::missing_cache_is_a_prerequisite ... ok
+test provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact ... FAILED
+test provider::cache::tests::pinned_archive_from_explicit_path_installs_exact_verified_bytes ... ok
+test provider::cache::tests::tampered_cached_executable_is_not_reported_ready ... FAILED
+test provider::cache::tests::unsafe_parent_indirection_is_rejected ... ok
+test provider::download::tests::cancellation_is_checked_before_any_network_request ... ok
+test provider::download::tests::diagnostic_fetch_reports_only_pinned_archive_length_and_digest ... ignored, bounded manual qualification against the pinned GitHub release
+test provider::download::tests::https_policy_allows_the_github_cdn_and_rejects_downgrades ... ok
+test provider::download::tests::redirect_budget_is_explicit_and_bounded ... ok
+test provider::download::tests::redirect_without_location_or_beyond_budget_fails_closed ... ok
+test provider::download::tests::successful_redirect_response_is_followed_before_validating_its_empty_body ... ok
+test provider::keys::tests::absent_or_malformed_aliases_are_typed_prerequisites ... ok
+test provider::keys::tests::both_recognized_aliases_produce_the_same_key ... ok
+test provider::keys::tests::conflicting_aliases_fail_without_repeating_the_values ... ok
+test provider::keys::tests::header_key_alias_accepts_an_all_zero_key ... ok
+test provider::keys::tests::key_file_size_is_bounded ... ok
+test provider::keys::tests::matching_all_zero_alias_definitions_follow_the_duplicate_policy ... ok
+test provider::keys::tests::nca_header_key_alias_accepts_an_all_zero_key ... ok
+test provider::keys::tests::partially_read_key_buffer_is_cleared_on_io_failure ... ok
+test provider::keys::tests::sanitized_all_zero_keyset_is_exact_and_debug_output_is_redacted ... ok
+test provider::keys::tests::sanitized_file_contains_only_the_header_key ... ok
+test provider::keys::tests::sanitized_key_encoding_is_cleared_for_prefix_key_and_newline_write_failures ... ok
+test provider::keys::tests::unrelated_keys_comments_and_case_are_accepted ... ok
+test provider::keys::tests::zero_and_nonzero_alias_definitions_conflict_in_either_order ... ok
+test provider::manifest::tests::artifact_names_and_urls_stay_within_the_pinned_release ... ok
+test provider::manifest::tests::manifest_pins_the_exact_release_and_targets ... ok
+test provider::manifest::tests::only_macos_arm64_is_qualified_for_this_operation ... ok
+test provider::nstool::tests::accepts_four_partitions_and_many_files ... ok
+test provider::nstool::tests::accepts_optional_rights_id_and_signature_warning ... ok
+test provider::nstool::tests::conflicting_kaek_sdk_and_partition_fields_are_rejected ... ok
+test provider::nstool::tests::every_repeated_provider_field_is_rejected_even_when_identical ... ok
+test provider::nstool::tests::expanded_tree_paths_are_bounded_independently_of_input_name_bytes ... ok
+test provider::nstool::tests::newline_storm_is_rejected_by_the_bounded_line_count ... ok
+test provider::nstool::tests::parses_captured_nstool_1_9_2_output ... ok
+test provider::nstool::tests::rejects_stderr_and_spoofed_tree_paths ... ok
+test provider::nstool::tests::rejects_unknown_output_semantics ... ok
+test provider::nstool::tests::rejects_unreadable_or_unqualified_partition_warnings ... ok
+test provider::nstool::tests::standalone_pinned_nstool_accepts_zero_header_key_and_reports_differential_generations ... ignored, manual standalone check; requires checksum-verified pinned NSTool in NSCB_STANDALONE_NSTOOL
+test provider::nstool::tests::tree_name_byte_budget_accepts_exact_limit_and_rejects_one_byte_over ... ok
+test provider::tests::a_directory_is_not_opened_as_a_regular_file ... FAILED
+test provider::tests::memory_monitoring_policy_and_status_are_available_without_preflight ... ok
+test provider::tests::nca_allocation_failure_is_an_internal_inspection_failure ... ok
+test provider::tests::parser_profile_failures_remain_prerequisite_failures ... ok
+test provider::tests::plaintext_nca_is_rejected_by_target_independent_input_preparation ... ok
+test provider::tests::provider_failure_code_preserves_the_stable_classification ... ok
+test recognition::tests::aggregate_member_budget_does_not_reset_in_nested_archive ... ok
+test recognition::tests::cumulative_limits_and_sanitized_failures ... ok
+test recognition::tests::empty_xci_root_does_not_establish_required_partition_hierarchy ... ok
+test recognition::tests::extensions_never_admit_or_reclassify_bytes ... ok
+test recognition::tests::hfs_hash_target_and_parent_bounds_are_validated ... ok
+test recognition::tests::nca_allocation_failure_maps_to_a_recognition_resource_limit ... ok
+test recognition::tests::ncz_preserved_readable_nca_header_is_not_a_standalone_claim ... ok
+test recognition::tests::ncz_truncation_lists_offsets_and_frames_are_checked ... ok
+test recognition::tests::overlapping_hfs_member_spans_are_rejected_directly_and_nested ... ok
+test recognition::tests::parser_work_budget_counts_ncz_descriptors_frames_and_blocks ... ok
+test recognition::tests::parser_work_budget_is_cumulative_across_nested_ncz_parses ... ok
+test recognition::tests::parser_work_budget_preserves_concatenated_frames ... ok
+test recognition::tests::parser_work_ceiling_is_below_the_metadata_budget_maximum ... ok
+test recognition::tests::pfs0_member_with_incomplete_nca3_header_keeps_proven_structure ... ok
+test recognition::tests::pfs0_member_with_inconsistent_nca3_header_keeps_proven_structure ... ok
+test recognition::tests::pfs0_member_with_unsupported_nca_profile_keeps_the_established_frame ... ok
+test recognition::tests::positive_top_level_mapping_and_ticket_independence ... ok
+test recognition::tests::readable_nca_checks_authoritative_hash_layer_layout ... ok
+test recognition::tests::unknown_and_polyglot_ambiguity_fail_closed ... ok
+test recognition::tests::xci_compressed_card_bounds_page_and_valid_data_end_by_declared_size ... ok
+test recognition::tests::xci_compressed_card_page_bound_follows_declared_rom_size ... ok
+test recognition::tests::xci_compressed_card_rejects_rom_area_page_after_valid_data_end ... ok
+test recognition::tests::xci_compressed_card_rejects_rom_area_page_beyond_declared_capacity ... ok
+test recognition::tests::xci_compressed_card_rejects_zero_rom_area_page ... ok
+test recognition::tests::xci_compressed_card_tolerates_the_copied_source_page_address ... ok
+test recognition::tests::xci_logo_partition_is_optional_but_known ... ok
+test recognition::tests::xci_missing_required_root_partitions_is_not_a_supported_profile ... ok
+test recognition::tests::xci_ordinary_card_requires_the_documented_secure_area_page ... ok
+test recognition::tests::xci_partition_member_must_be_a_bounded_hfs0 ... ok
+test recognition::tests::xci_root_must_sit_at_the_documented_placement ... ok
+test recognition::tests::xci_root_partitions_must_use_unique_known_names ... ok
+test recognition::tests::xci_unsupported_nested_nca_profile_does_not_invalidate_card_structure ... ok
+test recognition::tests::zstd_without_content_size_checks_derivable_raw_and_rle_totals ... ok
+test sha256::tests::invalid_spellings_are_rejected ... ok
+test sha256::tests::known_vector_round_trips_as_lowercase_hex ... ok
+test sha256::tests::serializes_as_hex_string ... ok
+test split_manifest::tests::accepts_one_and_multiple_contiguous_segments ... ok
+test split_manifest::tests::deterministic_writer_emits_parser_accepted_source_backed_manifest ... ok
+test split_manifest::tests::enforces_bounds_and_zero_length_rejection ... ok
+test split_manifest::tests::rejects_cumulative_segment_length_overflow ... ok
+test split_manifest::tests::rejects_inconsistent_sizes_hashes_names_and_duplicate_keys ... ok
+test split_manifest::tests::rejects_versions_features_and_malformed_shapes ... ok
+test split_manifest::tests::stores_the_declared_source_digest ... ok
+test split_operation::tests::private_test_segment_size_seam_preserves_nonempty_tail_rules ... ok
+test split_operation::tests::production_segment_boundaries_use_checked_fixed_size_arithmetic ... ok
+test split_operation::tests::zero_source_and_zero_segment_size_fail_without_a_zero_length_tail ... ok
+test split_reader::tests::detects_replacement_and_same_size_mutation ... ok
+test split_reader::tests::empty_reads_and_eof_are_exact ... ok
+test split_reader::tests::every_offset_returns_the_same_logical_bytes ... ok
+test split_reader::tests::pfs0_probe_reads_metadata_across_physical_segments ... ok
+test split_reader::tests::premature_eof_before_the_declared_extent_is_rejected ... ok
+test split_reader::tests::reads_across_boundaries_and_seeks_to_valid_offsets ... ok
+test split_reader::tests::rejects_invalid_and_overflowing_seeks ... ok
+test split_reader::tests::rejects_symlinks_special_files_and_size_mismatch ... ok
+test split_reader::tests::short_reads_crossing_a_segment_boundary_preserve_exact_bytes ... ok
+test split_reader::tests::short_underlying_reads_are_completed_without_exposing_partial_output ... ok
+test split_reader::tests::truncation_after_open_fails_before_exposing_short_logical_bytes ... ok
+test split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking ... FAILED
+test split_trust::tests::cleanup_lease_holds_and_releases_the_cross_process_store_lock ... ok
+test split_trust::tests::cleanup_lease_recovers_a_pending_receipt_before_manifest_lookup ... ok
+test split_trust::tests::cleanup_lease_refuses_corrupt_store_state ... ok
+test split_trust::tests::cleanup_lease_requires_known_never_committed_authoritative_state ... ok
+test split_trust::tests::concurrent_issuance_and_revocation_leave_a_decodable_revision ... ok
+test split_trust::tests::copied_store_root_without_continuity_fails_closed ... ok
+test split_trust::tests::cross_process_contention_worker ... ignored, launched by cross_process_issue_and_revoke_contention_preserves_revocation
+test split_trust::tests::cross_process_issuance_worker ... ignored, launched by cross_process_stale_issuance_cannot_overwrite_revocation
+test split_trust::tests::cross_process_issue_and_revoke_contention_preserves_revocation ... ok
+test split_trust::tests::cross_process_stale_issuance_cannot_overwrite_revocation ... ok
+test split_trust::tests::dangling_and_indexed_corruption_fail_closed_but_valid_orphans_are_inert ... ok
+test split_trust::tests::empty_authority_only_recovery_requires_an_exact_journal_match ... ok
+test split_trust::tests::explicit_restoration_preserves_a_later_local_revocation ... ok
+test split_trust::tests::explicit_state_root_must_be_absolute ... ok
+test split_trust::tests::first_use_creates_missing_ancestor_directories ... ok
+test split_trust::tests::interrupted_commit_journal_is_replayed_before_reading ... ok
+test split_trust::tests::interrupted_first_use_bootstrap_recreates_an_empty_anchor ... ok
+test split_trust::tests::interrupted_restoration_completes_through_the_commit_journal ... ok
+test split_trust::tests::issue_commit_scope_holds_store_lock_through_caller_transition ... ok
+test split_trust::tests::issue_lookup_revoke_and_missing_store_are_distinct ... ok
+test split_trust::tests::lost_root_restoration_preserves_local_revocation_and_restores_receipts ... ok
+test split_trust::tests::lost_root_restoration_rejects_a_snapshot_missing_a_current_issued_receipt ... ok
+test split_trust::tests::missing_native_environment_is_unavailable_not_invalid_configuration ... ok
+test split_trust::tests::pending_journal_at_the_same_generation_must_match_the_anchor ... ok
+test split_trust::tests::pending_journal_cannot_recreate_a_missing_continuity_anchor ... ok
+test split_trust::tests::planning_lookup_cancellation_interrupts_store_lock_wait_without_leaking ... ok
+test split_trust::tests::recovery_lookup_cancellation_interrupts_store_lock_wait_without_leaking ... ok
+test split_trust::tests::restoration_rebuilds_a_lost_store_root_from_its_snapshot ... ok
+test split_trust::tests::restoration_rejects_foreign_or_newer_snapshots ... ok
+test split_trust::tests::revoking_an_unknown_manifest_records_a_durable_tombstone ... ok
+test split_trust::tests::rolled_back_authority_file_disagrees_with_continuity ... ok
+test split_trust::tests::trust_store_errors_have_stable_codes ... ok
+test strict_json::tests::preserves_fields_and_computes_depth ... ok
+test strict_json::tests::rejects_duplicate_keys_at_every_depth ... ok
+test strict_json::tests::rejects_malformed_utf8_and_trailing_documents ... ok
+test test_allocator::tests::refusal_scope_disarms_when_the_action_unwinds ... ok
+test test_allocator::tests::refusal_state_is_isolated_between_threads ... ok
+test test_allocator::tests::refuses_only_the_target_site_once_and_records_its_layout ... ok
+test test_allocator::tests::unobserved_target_stays_armed_until_the_scope_cleans_it_up ... ok
+test verification::tests::cancellation_after_opening_inputs_returns_no_result ... ok
+test verification::tests::every_verification_error_uses_a_documented_exit_class ... ok
+test verification::tests::nca_allocation_failure_maps_to_verification_allocation_failed ... ok
+test verification::tests::npdm_parser_accepts_canonical_layout_and_exposes_the_untrusted_modulus ... ok
+test verification::tests::npdm_parser_rejects_oversized_lengths_and_malformed_layouts ... ok
+test verification::tests::revalidate_detects_mutation_and_path_replacement_conflicts ... ok
+test verification::tests::verification_detects_path_replacement_for_every_source ... ok
+
+failures:
+
+---- provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity stdout ----
+
+thread 'provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity' (2480) panicked at src\provider\cache.rs:2179:52:
+called `Result::unwrap()` on an `Err` value: InternalIo
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations stdout ----
+
+thread 'provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations' (10464) panicked at src\provider\cache.rs:2199:57:
+called `Result::unwrap()` on an `Err` value: InternalIo
+
+---- provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact stdout ----
+
+thread 'provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact' (2808) panicked at src\provider\cache.rs:2163:52:
+called `Result::unwrap()` on an `Err` value: InternalIo
+
+---- provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact stdout ----
+
+thread 'provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact' (28908) panicked at src\provider\cache.rs:2052:52:
+called `Result::unwrap()` on an `Err` value: InternalIo
+
+---- provider::cache::tests::tampered_cached_executable_is_not_reported_ready stdout ----
+
+thread 'provider::cache::tests::tampered_cached_executable_is_not_reported_ready' (7660) panicked at src\provider\cache.rs:2255:52:
+called `Result::unwrap()` on an `Err` value: InternalIo
+
+---- provider::tests::a_directory_is_not_opened_as_a_regular_file stdout ----
+
+thread 'provider::tests::a_directory_is_not_opened_as_a_regular_file' (16620) panicked at src\provider\mod.rs:540:9:
+assertion `left == right` failed
+  left: NotFound
+ right: InvalidInput
+
+---- split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking stdout ----
+
+thread 'split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking' (18156) panicked at src\split_trust.rs:2448:72:
+called `Result::unwrap()` on an `Err` value: Unavailable
+
+
+failures:
+    provider::cache::tests::corrupt_orphan_object_is_repaired_without_losing_the_archive_identity
+    provider::cache::tests::interrupted_temporary_entries_are_cleaned_without_removing_valid_generations
+    provider::cache::tests::malformed_newest_pointer_falls_back_to_last_valid_artifact
+    provider::cache::tests::new_pointer_with_missing_object_falls_back_to_previous_valid_artifact
+    provider::cache::tests::tampered_cached_executable_is_not_reported_ready
+    provider::tests::a_directory_is_not_opened_as_a_regular_file
+    split_trust::tests::cleanup_lease_cancellation_interrupts_store_lock_wait_without_leaking
+
+test result: FAILED. 250 passed; 7 failed; 4 ignored; 0 measured; 0 filtered out; finished in 9.00s
+
+
+
+===== STDERR =====
+warning: unused imports: `ProcessFailure` and `run`
+   --> src\provider\process.rs:557:17
+    |
+557 |     use super::{ProcessFailure, ProcessLimits, run};
+    |                 ^^^^^^^^^^^^^^                 ^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::inspection::CancellationHandle`
+   --> src\provider\process.rs:558:9
+    |
+558 |     use crate::inspection::CancellationHandle;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::ffi::OsString`
+   --> src\provider\process.rs:559:9
+    |
+559 |     use std::ffi::OsString;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs`
+   --> src\provider\process.rs:560:9
+    |
+560 |     use std::fs;
+    |         ^^^^^^^
+
+warning: unused import: `Path`
+   --> src\provider\process.rs:561:21
+    |
+561 |     use std::path::{Path, PathBuf};
+    |                     ^^^^
+
+warning: unused import: `std::sync::Arc`
+   --> src\provider\process.rs:562:9
+    |
+562 |     use std::sync::Arc;
+    |         ^^^^^^^^^^^^^^
+
+warning: unused import: `AtomicUsize`
+   --> src\provider\process.rs:563:40
+    |
+563 |     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    |                                        ^^^^^^^^^^^
+
+warning: unused import: `Instant`
+   --> src\provider\process.rs:564:31
+    |
+564 |     use std::time::{Duration, Instant};
+    |                               ^^^^^^^
+
+warning: unused imports: `PreparedInputs`, `WatchedFile`, `execute_in`, `inspect_with_containment`, `nstool`, `prepare_inputs_with`, and `process`
+   --> src\provider\mod.rs:489:9
+    |
+489 |         PreparedInputs, ProviderFailure, WatchedFile, classify_parse_error, execute_in,
+    |         ^^^^^^^^^^^^^^                   ^^^^^^^^^^^                        ^^^^^^^^^^
+490 |         inspect_with_containment, nstool, open_regular, prepare_inputs, prepare_inputs_with,
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^                                ^^^^^^^^^^^^^^^^^^^
+491 |         process,
+    |         ^^^^^^^
+
+warning: unused imports: `CancellationHandle` and `validate_provider_report`
+   --> src\provider\mod.rs:494:9
+    |
+494 |         CancellationHandle, InspectionErrorCode, InspectionHost, InspectionRequest,
+    |         ^^^^^^^^^^^^^^^^^^
+495 |         MemoryMonitoringPolicy, validate_provider_report,
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+   --> src\provider\mod.rs:501:9
+    |
+501 |     use std::path::PathBuf;
+    |         ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Duration` and `Instant`
+   --> src\provider\mod.rs:502:21
+    |
+502 |     use std::time::{Duration, Instant};
+    |                     ^^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::os::windows::io::AsRawHandle`
+  --> src\provider\process.rs:16:5
+   |
+16 | use std::os::windows::io::AsRawHandle;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `synthetic_supported_nca` is never used
+   --> src\nca.rs:399:15
+    |
+399 | pub(crate) fn synthetic_supported_nca() -> Vec<u8> {
+    |               ^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `uncontained_test_limits` is never used
+   --> src\provider\process.rs:103:19
+    |
+101 | impl ProcessLimits {
+    | ------------------ associated function in this implementation
+102 |     #[cfg(test)]
+103 |     pub(crate) fn uncontained_test_limits(
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: static `NEXT_SCRIPT` is never used
+   --> src\provider\process.rs:566:12
+    |
+566 |     static NEXT_SCRIPT: AtomicU64 = AtomicU64::new(1);
+    |            ^^^^^^^^^^^
+
+warning: function `workdir` is never used
+   --> src\provider\process.rs:621:8
+    |
+621 |     fn workdir() -> PathBuf {
+    |        ^^^^^^^
+
+warning: function `test_limits` is never used
+   --> src\provider\process.rs:626:8
+    |
+626 |     fn test_limits(deadline: Duration, stdout: usize, stderr: usize) -> ProcessLimits {
+    |        ^^^^^^^^^^^
+
+warning: `nscb` (lib test) generated 18 warnings (run `cargo fix --lib -p nscb --tests` to apply 12 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src\lib.rs (target\debug\deps\nscb-3f2a31f6309dccf7.exe)
+error: test failed, to rerun pass `--lib`
+
