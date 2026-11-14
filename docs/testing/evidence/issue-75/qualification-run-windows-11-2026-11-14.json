@@ -577,12 +577,22 @@
     "src/provider/mod.rs": "067316d9584c7f89f95b24038d7c6ba64d3063a80e9d061f65b120b30d5a8085",
     ".github/workflows/ci.yml": "a6b959e593f8d34e263c154099ea293be1eb7414a9ec9fa55154b83a939f6abc"
   },
+  "source_file_hash_provenance": {
+    "algorithm": "SHA-256",
+    "input": "Windows working-tree file bytes at candidate_source_revision 5877bae6c05c86e03bf29e887387fb8885064376, checked out with core.autocrlf=true and CRLF line endings; these are not Git blob content hashes.",
+    "core_autocrlf": true,
+    "line_endings": "CRLF",
+    "is_git_blob_hash": false,
+    "qualified_source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+    "qualified_git_tree": "df26baaae5e81a60781a5819f912d0b456356a33",
+    "reproduction_procedure": "See qualification-run-windows-11-2026-11-14.md#source-file-hash-basis-and-reproduction"
+  },
   "sanitized_log": {
     "path": "qualification-run-windows-11-2026-11-14.sanitized.log",
     "bytes": 1521,
     "sha256": "67bcce35498febf3ed4339b6479e0db871e652043ccf22b00705a56b35e759d2"
   },
-  "report_sha256": "f7711f12a173daf4397ea92e90089d4b51fee425dc1a51dec4145e06662acd17",
+  "report_sha256": "839c7824e634e394379db32118928f3fc83a6bcb8927fbef5eb721cc73721f95",
   "ci_jobs_added": [
     "Windows Server 2025 full cargo test --locked --no-default-features --lib",
     "Windows Server 2025 cargo clippy --locked --no-default-features --lib -- -D warnings",

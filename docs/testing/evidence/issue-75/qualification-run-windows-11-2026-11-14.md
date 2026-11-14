@@ -42,6 +42,44 @@ The committed source revision was then tested on OBIGAMING:
 
 Each command ran from the task worktree with the selected MSVC toolchain. The complete raw stdout and stderr, command runners, exit sidecars, and UTC markers remain private under `%LOCALAPPDATA%\NSCB\qualification\issue-75\windows11-20261114T055937Z\`. They were not committed. The JSON manifest records SHA-256 digests for the raw qualification outputs and the sanitized log.
 
+## Source file hash basis and reproduction
+
+The JSON manifest's `source_file_sha256` values are SHA-256 hashes of the Windows working-tree file bytes at the tested source revision `5877bae6c05c86e03bf29e887387fb8885064376`. Git was configured with `core.autocrlf=true`, so these checked-out files have CRLF line endings. The recorded values are not Git blob content hashes and remain unchanged.
+
+To reproduce them, use a clean Windows checkout with `core.autocrlf=true`, check out the qualified source revision, and verify its identity and configuration from the repository root:
+
+```powershell
+git rev-parse HEAD
+# 5877bae6c05c86e03bf29e887387fb8885064376
+git rev-parse 'HEAD^{tree}'
+# df26baaae5e81a60781a5819f912d0b456356a33
+git config --get core.autocrlf
+# true
+```
+
+Then hash the exact working-tree bytes (do not hash `git show` or Git blob output):
+
+```powershell
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    foreach ($path in @('src/provider/mod.rs', '.github/workflows/ci.yml')) {
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $digest = -join ($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') })
+        "{0} {1}" -f $path, $digest
+    }
+}
+finally {
+    $sha.Dispose()
+}
+```
+
+Expected output:
+
+```text
+src/provider/mod.rs 067316d9584c7f89f95b24038d7c6ba64d3063a80e9d061f65b120b30d5a8085
+.github/workflows/ci.yml a6b959e593f8d34e263c154099ea293be1eb7414a9ec9fa55154b83a939f6abc
+```
+
 ## CI and platform boundaries
 
 The workflow adds separate Windows Server 2025 jobs for the full no-default-features library suite and strict library Clippy, both pinned and host-checked as Rust 1.98.1 MSVC. It also adds a hosted macOS 15 ARM64 `make all` job. These are GitHub-hosted checks and are not evidence from OBIGAMING; their results are recorded by the draft PR checks.
