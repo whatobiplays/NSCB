@@ -11,6 +11,11 @@
 //! the host filesystem's qualified atomic rename or link operations.
 
 mod allocation;
+#[expect(
+    dead_code,
+    reason = "The qualifier remains outside the existing NSP, Verification, and conversion flows."
+)]
+mod control_nca_qualification;
 mod engine;
 mod error;
 mod file_identity;
@@ -20,6 +25,7 @@ mod key_file;
 #[cfg(any(target_os = "macos", test))]
 mod multi_content_format;
 mod nca;
+mod nca_crypto;
 mod nsp_semantic_qualification;
 mod operation;
 mod partition_fs;
