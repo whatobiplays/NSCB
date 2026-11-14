@@ -12,8 +12,6 @@ use std::ffi::OsString;
 use std::io::{self, Read};
 #[cfg(target_os = "macos")]
 use std::os::unix::process::CommandExt;
-#[cfg(windows)]
-use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;

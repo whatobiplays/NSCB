@@ -606,7 +606,7 @@ impl LocalSplitTrustStore {
             match lock.try_lock_exclusive() {
                 Ok(()) => break,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if is_retryable_lock_contention(&error) => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(_) => return Err(SplitTrustStoreError::Unavailable),
@@ -758,7 +758,7 @@ impl LocalSplitTrustStore {
             match lock.try_lock_exclusive() {
                 Ok(()) => break,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                Err(error) if is_retryable_lock_contention(&error) => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(_) => return Err(SplitTrustStoreError::Unavailable),
@@ -1439,6 +1439,23 @@ fn validate_store_directory(path: &Path) -> Result<bool, SplitTrustStoreError> {
         return Err(SplitTrustStoreError::Corrupt);
     }
     Ok(true)
+}
+
+#[cfg(windows)]
+const ERROR_LOCK_VIOLATION: i32 = 33;
+
+fn is_retryable_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        error.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 fn open_lock_file(path: &Path) -> Result<File, SplitTrustStoreError> {
@@ -2139,6 +2156,25 @@ mod tests {
     }
 
     #[test]
+    fn lock_contention_classifier_preserves_standard_kinds_and_only_adds_win32_33() {
+        let would_block = std::io::Error::from(std::io::ErrorKind::WouldBlock);
+        assert!(super::is_retryable_lock_contention(&would_block));
+
+        let interrupted = std::io::Error::from(std::io::ErrorKind::Interrupted);
+        assert!(!super::is_retryable_lock_contention(&interrupted));
+
+        #[cfg(windows)]
+        {
+            let lock_violation = std::io::Error::from_raw_os_error(33);
+            assert!(super::is_retryable_lock_contention(&lock_violation));
+
+            let other_uncategorized = std::io::Error::from_raw_os_error(i32::MAX);
+            assert_eq!(other_uncategorized.raw_os_error(), Some(i32::MAX));
+            assert!(!super::is_retryable_lock_contention(&other_uncategorized));
+        }
+    }
+
+    #[test]
     fn issue_lookup_revoke_and_missing_store_are_distinct() {
         let root = temp_root();
         let store = LocalSplitTrustStore::new(&root);
@@ -2537,6 +2573,59 @@ mod tests {
     }
 
     #[test]
+    fn planning_lookup_retries_cross_process_lock_contention_and_reacquires_after_release() {
+        let base = temp_root();
+        let root = base.join("store");
+        let store = LocalSplitTrustStore::new(&root);
+        let manifest = Sha256Digest::digest(b"planning lock contention");
+        let source_sha256 = Sha256Digest::digest(b"source");
+        store
+            .issue(SplitTrustReceipt::new(manifest, 6, source_sha256))
+            .unwrap();
+
+        let ready = base.join("lock-ready");
+        let proceed = base.join("lock-proceed");
+        let mut holder = spawn_contention_worker("hold-lock", &root, manifest, &ready, &proceed);
+        wait_for_path(&ready);
+
+        let (checked_tx, checked_rx) = std::sync::mpsc::channel();
+        let lookup_store = LocalSplitTrustStore::new(&root);
+        let lookup = std::thread::spawn(move || {
+            let checks = std::cell::Cell::new(0);
+            lookup_store.lookup_receipt_for_planning(&manifest, &|| {
+                let check = checks.get() + 1;
+                checks.set(check);
+                let _ = checked_tx.send(check);
+                false
+            })
+        });
+        let first_poll = checked_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok();
+        let second_poll = checked_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .ok();
+
+        fs::write(&proceed, b"go").unwrap();
+        assert!(wait_for_child(&mut holder).success());
+        let receipt = lookup
+            .join()
+            .unwrap()
+            .unwrap()
+            .expect("the issued receipt remains available after lock release");
+
+        assert_eq!(first_poll, Some(1));
+        assert_eq!(second_poll, Some(2));
+        assert_eq!(receipt.manifest_sha256(), &manifest);
+        assert_eq!(receipt.source_size_bytes(), 6);
+        assert_eq!(receipt.source_sha256(), &source_sha256);
+        let probe = super::open_lock_file(&root.join(".lock")).unwrap();
+        probe.try_lock_exclusive().unwrap();
+        probe.unlock().unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
     fn cleanup_lease_refuses_corrupt_store_state() {
         let root = temp_root();
         let store = LocalSplitTrustStore::new(&root);
@@ -2731,6 +2820,17 @@ mod tests {
         let manifest = Sha256Digest::parse_hex(&manifest).unwrap();
         let ready = PathBuf::from(std::env::var_os("NSCB_TRUST_PROCESS_READY").unwrap());
         let proceed = PathBuf::from(std::env::var_os("NSCB_TRUST_PROCESS_PROCEED").unwrap());
+
+        if mode == "hold-lock" {
+            let lock_path = PathBuf::from(&root).join(".lock");
+            let lock = super::open_lock_file(&lock_path).unwrap();
+            lock.try_lock_exclusive().unwrap();
+            fs::write(&ready, b"ready").unwrap();
+            wait_for_path(&proceed);
+            lock.unlock().unwrap();
+            return;
+        }
+
         fs::write(&ready, b"ready").unwrap();
         wait_for_path(&proceed);
 

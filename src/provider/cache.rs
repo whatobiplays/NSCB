@@ -364,11 +364,21 @@ fn install_object(
     file.write_all(executable_bytes)
         .and_then(|_| file.sync_all())
         .map_err(|_| InspectionErrorCode::InternalIo)?;
+    drop(file);
+    publish_object_directory(temporary, &objects, final_object)
+}
+
+#[cfg(not(unix))]
+fn publish_object_directory(
+    temporary: tempfile::TempDir,
+    objects: &Path,
+    final_object: PathBuf,
+) -> Result<PathBuf, InspectionErrorCode> {
     sync_directory(temporary.path())?;
     let temporary_path = temporary.keep();
     match fs::rename(&temporary_path, &final_object) {
         Ok(()) => {
-            sync_directory(&objects)?;
+            sync_directory(objects)?;
             Ok(final_object)
         }
         Err(_) => {
@@ -2264,5 +2274,45 @@ mod tests {
             CacheLookup::Missing(CacheProblem::ArtifactMismatch)
         ));
         let _ = fs::remove_dir_all(cache);
+    }
+
+    #[test]
+    fn first_install_publishes_complete_executable_and_pointer() {
+        let cache = temp_cache();
+        let (target, archive, executable) = synthetic_release();
+
+        install_archive(&cache, &target, &archive).unwrap();
+
+        let object = test_provider_root(&cache)
+            .join("objects")
+            .join(target.archive_sha256().to_hex())
+            .join(target.executable());
+        assert_eq!(fs::read(object).unwrap(), executable);
+        assert_eq!(ready_sequence(&cache, &target), 1);
+        fs::remove_dir_all(cache).unwrap();
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn failed_object_rename_cleans_temporary_and_protects_destination() {
+        let cache = temp_cache();
+        let objects = test_provider_root(&cache).join("objects");
+        fs::create_dir_all(&objects).unwrap();
+        let temporary = tempfile::Builder::new()
+            .prefix(".tmp-object-test-")
+            .tempdir_in(&objects)
+            .unwrap();
+        let temporary_path = temporary.path().to_path_buf();
+        fs::write(temporary_path.join("partial"), b"new object").unwrap();
+
+        let final_object = objects.join("occupied");
+        fs::create_dir_all(&final_object).unwrap();
+        let existing = final_object.join("sentinel");
+        fs::write(&existing, b"existing object").unwrap();
+
+        assert!(super::publish_object_directory(temporary, &objects, final_object).is_err());
+        assert!(!temporary_path.exists());
+        assert_eq!(fs::read(existing).unwrap(), b"existing object");
+        fs::remove_dir_all(cache).unwrap();
     }
 }
