@@ -1,0 +1,600 @@
+{
+  "schema_version": 1,
+  "capture_date": "2026-11-14",
+  "issue": "https://github.com/whatobiplays/NSCB/issues/75",
+  "policy_revision": "danielbyon/development-process@e2afa055d1126763c69f0e0392d25b86bab98014",
+  "owner_decision": "Reject directories without requiring a platform-independent std::io::ErrorKind; preserve missing-path NotFound, regular-file success, file identity, and security checks.",
+  "integration_baseline": "3cc7d4eeca4f29a954f45419122f635f58ee5040",
+  "candidate_source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+  "candidate_git_tree": "df26baaae5e81a60781a5819f912d0b456356a33",
+  "branch": "codex/issue-75-final-windows-qualification",
+  "host": {
+    "computer": "OBIGAMING",
+    "os": "Windows 11 Pro",
+    "version": "10.0.26200",
+    "build": "26200.9974",
+    "architecture": "x86_64"
+  },
+  "toolchain": {
+    "rustc": "1.98.1 (48a229cea 2026-09-01)",
+    "host": "x86_64-pc-windows-msvc",
+    "cargo": "1.98.1 (797e8a9bc 2026-08-05)",
+    "clippy": "0.1.98 (48a229ceae 2026-09-01)",
+    "msvc": "19.51.36260.0",
+    "msvc_tool_directory": "14.51.36231",
+    "vcvars": "vcvars64.bat initialized"
+  },
+  "raw_capture_root_private": "%LOCALAPPDATA%/NSCB/qualification/issue-75/windows11-20261114T055937Z",
+  "raw_logs_published": false,
+  "raw_log_hash_algorithm": "SHA-256",
+  "runs": [
+    {
+      "name": "baseline-directory-reproduction",
+      "source_revision": "3cc7d4eeca4f29a954f45419122f635f58ee5040",
+      "command": "cargo test --locked --no-default-features --lib provider::tests::a_directory_is_not_opened_as_a_regular_file -- --exact",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "capture_window_utc": {
+        "stdout_created": "2026-11-14T06:07:36.8822576Z",
+        "stderr_created": "2026-11-14T06:07:36.8827767Z",
+        "exit_recorded": "2026-11-14T06:07:53.3500371Z"
+      },
+      "exit_code": 101,
+      "result": "0 passed, 1 failed, 265 filtered; Windows returned NotFound while assertion expected InvalidInput",
+      "raw_files": {
+        "command": {
+          "path": "raw/baseline-directory.cmd",
+          "bytes": 811,
+          "sha256": "051eb342bf9e61ff356a7229fb65aa4fdb77db6d62e275ddff9e1b78a0dff225"
+        },
+        "stdout": {
+          "path": "raw/baseline-directory.stdout.raw",
+          "bytes": 629,
+          "sha256": "896410d94771040e6393907dbb1738036575005f9fd21e1018e62a1ecec8c9d8"
+        },
+        "stderr": {
+          "path": "raw/baseline-directory.stderr.raw",
+          "bytes": 8169,
+          "sha256": "3aba6f21055f62556551317de37b05ea92548fc3e7d51430a74644547d2a9cbc"
+        },
+        "exit": {
+          "path": "raw/baseline-directory.exit",
+          "bytes": 5,
+          "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+        }
+      }
+    },
+    {
+      "name": "focused-directory",
+      "source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+      "command": "cargo test --locked --no-default-features --lib provider::tests::a_directory_is_not_opened_as_a_regular_file -- --exact",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "started_utc": "2026-11-14T06:19:07.9197850Z",
+      "finished_utc": "2026-11-14T06:19:09.5888779Z",
+      "exit_code": 0,
+      "result": "exit 0; 1 passed",
+      "raw_files": {
+        "command": {
+          "path": "final-head-5877bae/raw/focused-directory.cmd",
+          "bytes": 865,
+          "sha256": "12771851e11d9bd6a033e0f5d5111885a7954ca9e945f0621be39408faa73676"
+        },
+        "stdout": {
+          "path": "final-head-5877bae/raw/focused-directory.stdout.raw",
+          "bytes": 187,
+          "sha256": "73104daa86f6c26af42d8320988de7fab94cdbe46a424ed400d1f05a8372389c"
+        },
+        "stderr": {
+          "path": "final-head-5877bae/raw/focused-directory.stderr.raw",
+          "bytes": 4178,
+          "sha256": "4b6180773e16f81622679e32c4d91fa923171361f7a9a892b60a2c8499ec2b93"
+        },
+        "exit": {
+          "path": "final-head-5877bae/raw/focused-directory.exit",
+          "bytes": 3,
+          "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+        },
+        "started": {
+          "path": "final-head-5877bae/raw/focused-directory.started.utc",
+          "bytes": 30,
+          "sha256": "9e5b4a930f8b481e25cfdc9f66a59478c01c9084cd96b14b18df4a55718d663e"
+        },
+        "finished": {
+          "path": "final-head-5877bae/raw/focused-directory.finished.utc",
+          "bytes": 30,
+          "sha256": "ff6685410a22617f3341d0ca3c3e44cefa84bba168eccf7414adc21730541ca1"
+        }
+      }
+    },
+    {
+      "name": "focused-missing",
+      "source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+      "command": "cargo test --locked --no-default-features --lib provider::tests::a_missing_path_remains_not_found -- --exact",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "started_utc": "2026-11-14T06:19:09.6155674Z",
+      "finished_utc": "2026-11-14T06:19:12.0889809Z",
+      "exit_code": 0,
+      "result": "exit 0; 1 passed",
+      "raw_files": {
+        "command": {
+          "path": "final-head-5877bae/raw/focused-missing.cmd",
+          "bytes": 848,
+          "sha256": "5ff2407423efd32181a0b78b501187daf74ecaff4d59dc9a00ba7e90947a2624"
+        },
+        "stdout": {
+          "path": "final-head-5877bae/raw/focused-missing.stdout.raw",
+          "bytes": 176,
+          "sha256": "292ffdbc70b7b3353e5c1adb66bbcd3da08b5ae991ec307f89ca17ccb1e3968f"
+        },
+        "stderr": {
+          "path": "final-head-5877bae/raw/focused-missing.stderr.raw",
+          "bytes": 4178,
+          "sha256": "c66badcfffa3e3d8f5274caa01ca61cf2547af662148d75960197974a18ce5ed"
+        },
+        "exit": {
+          "path": "final-head-5877bae/raw/focused-missing.exit",
+          "bytes": 3,
+          "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+        },
+        "started": {
+          "path": "final-head-5877bae/raw/focused-missing.started.utc",
+          "bytes": 30,
+          "sha256": "6e47b85395f581ed379676b9a6d208b58f6a6490332143e4f6aeaeb02ca45646"
+        },
+        "finished": {
+          "path": "final-head-5877bae/raw/focused-missing.finished.utc",
+          "bytes": 30,
+          "sha256": "4c99a9e1583a7631f5f4c95816c092d3d38500258b9dd97fdeb785cf1e2aa09b"
+        }
+      }
+    },
+    {
+      "name": "focused-regular",
+      "source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+      "command": "cargo test --locked --no-default-features --lib provider::tests::a_regular_file_is_accepted -- --exact",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "started_utc": "2026-11-14T06:19:12.0944848Z",
+      "finished_utc": "2026-11-14T06:19:16.8316882Z",
+      "exit_code": 0,
+      "result": "exit 0; 1 passed",
+      "raw_files": {
+        "command": {
+          "path": "final-head-5877bae/raw/focused-regular.cmd",
+          "bytes": 842,
+          "sha256": "e3a91da6b9994ed5f87c7e72abb9cdf201b5acfca63afcb1b5b3324b3b699b67"
+        },
+        "stdout": {
+          "path": "final-head-5877bae/raw/focused-regular.stdout.raw",
+          "bytes": 170,
+          "sha256": "c778e54396a6892d37e9dd2f94937ac9811d6278b11a37f5ed82ad39e88f66bc"
+        },
+        "stderr": {
+          "path": "final-head-5877bae/raw/focused-regular.stderr.raw",
+          "bytes": 4178,
+          "sha256": "c66badcfffa3e3d8f5274caa01ca61cf2547af662148d75960197974a18ce5ed"
+        },
+        "exit": {
+          "path": "final-head-5877bae/raw/focused-regular.exit",
+          "bytes": 3,
+          "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+        },
+        "started": {
+          "path": "final-head-5877bae/raw/focused-regular.started.utc",
+          "bytes": 30,
+          "sha256": "46fb6d963799f247f56a2dde0567153fa9f584aebf865951735ef17db6f48dd5"
+        },
+        "finished": {
+          "path": "final-head-5877bae/raw/focused-regular.finished.utc",
+          "bytes": 30,
+          "sha256": "af3f533edd3735c47a049a78968b665f39ba6e0774582bcacf7404a9241f9f21"
+        }
+      }
+    },
+    {
+      "name": "full-library",
+      "source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+      "command": "cargo test --locked --no-default-features --lib",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "started_utc": "2026-11-14T06:19:16.8398638Z",
+      "finished_utc": "2026-11-14T06:19:25.3457799Z",
+      "exit_code": 0,
+      "result": "exit 0; 264 passed, 0 failed, 4 ignored; 268 total",
+      "raw_files": {
+        "command": {
+          "path": "final-head-5877bae/raw/full-library.cmd",
+          "bytes": 778,
+          "sha256": "f814e22a82736d8bbde68f40e0393dd4136c43cd786529c92eb476288fb7dac1"
+        },
+        "stdout": {
+          "path": "final-head-5877bae/raw/full-library.stdout.raw",
+          "bytes": 24490,
+          "sha256": "cadb5c5ea41d29c200d5724a3fa9354cfa8e878528745ac1c0fbf765492316de"
+        },
+        "stderr": {
+          "path": "final-head-5877bae/raw/full-library.stderr.raw",
+          "bytes": 4178,
+          "sha256": "c66badcfffa3e3d8f5274caa01ca61cf2547af662148d75960197974a18ce5ed"
+        },
+        "exit": {
+          "path": "final-head-5877bae/raw/full-library.exit",
+          "bytes": 3,
+          "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+        },
+        "started": {
+          "path": "final-head-5877bae/raw/full-library.started.utc",
+          "bytes": 30,
+          "sha256": "450e03bd0614cf980f294ff105bd579fc36cb562aa804c4916402b2e858859ae"
+        },
+        "finished": {
+          "path": "final-head-5877bae/raw/full-library.finished.utc",
+          "bytes": 30,
+          "sha256": "1859b491663b827386ecb359dc147e05130b21d835ad6fcfdc3999913dde7890"
+        }
+      }
+    },
+    {
+      "name": "strict-clippy",
+      "source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+      "command": "cargo clippy --locked --no-default-features --lib -- -D warnings",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "started_utc": "2026-11-14T06:19:25.3724633Z",
+      "finished_utc": "2026-11-14T06:19:29.5936767Z",
+      "exit_code": 0,
+      "result": "exit 0; no warnings",
+      "raw_files": {
+        "command": {
+          "path": "final-head-5877bae/raw/strict-clippy.cmd",
+          "bytes": 798,
+          "sha256": "bce9e7350199b6e6fae8202032fb54fd04e614b51d2861ca317548e41e99e2f5"
+        },
+        "stdout": {
+          "path": "final-head-5877bae/raw/strict-clippy.stdout.raw",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stderr": {
+          "path": "final-head-5877bae/raw/strict-clippy.stderr.raw",
+          "bytes": 72,
+          "sha256": "732186322402325172940531d8d6d7cfac85dc902585b2bef6715ad6839dacfd"
+        },
+        "exit": {
+          "path": "final-head-5877bae/raw/strict-clippy.exit",
+          "bytes": 3,
+          "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+        },
+        "started": {
+          "path": "final-head-5877bae/raw/strict-clippy.started.utc",
+          "bytes": 30,
+          "sha256": "d25f8894678eda4563cac04d0e3b0dd4be4c9d078137ce36fa76b3438be2ce16"
+        },
+        "finished": {
+          "path": "final-head-5877bae/raw/strict-clippy.finished.utc",
+          "bytes": 30,
+          "sha256": "eee88c47b6f04d8124f27c87e7e2ce007f9a5386a29560746282da59e302962a"
+        }
+      }
+    },
+    {
+      "name": "format-check",
+      "source_revision": "5877bae6c05c86e03bf29e887387fb8885064376",
+      "command": "cargo fmt --all -- --check",
+      "cwd": "%USERPROFILE%/.codex/worktrees/issue-75-final-windows-qualification/nscb",
+      "started_utc": "2026-11-14T06:19:29.6044994Z",
+      "finished_utc": "2026-11-14T06:19:34.4072047Z",
+      "exit_code": 0,
+      "result": "exit 0",
+      "raw_files": {
+        "command": {
+          "path": "final-head-5877bae/raw/format-check.cmd",
+          "bytes": 757,
+          "sha256": "91b99319ba2d3828a0c0fe01b0caf52a17a1564b1ae3bb40f625e8754e1e3ff9"
+        },
+        "stdout": {
+          "path": "final-head-5877bae/raw/format-check.stdout.raw",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "stderr": {
+          "path": "final-head-5877bae/raw/format-check.stderr.raw",
+          "bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "exit": {
+          "path": "final-head-5877bae/raw/format-check.exit",
+          "bytes": 3,
+          "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+        },
+        "started": {
+          "path": "final-head-5877bae/raw/format-check.started.utc",
+          "bytes": 30,
+          "sha256": "a3d30bcdf8a1060c2813bada339616d0611c11c22eee4b50c94a6ca98af10135"
+        },
+        "finished": {
+          "path": "final-head-5877bae/raw/format-check.finished.utc",
+          "bytes": 30,
+          "sha256": "3c49fa104e8da9c12d3b35491d9be2d2b35f1441383aee85f1e0146e9655bdd8"
+        }
+      }
+    }
+  ],
+  "raw_files": [
+    {
+      "path": "final-head-5877bae/raw/focused-directory.cmd",
+      "bytes": 865,
+      "sha256": "12771851e11d9bd6a033e0f5d5111885a7954ca9e945f0621be39408faa73676"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-directory.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-directory.finished.utc",
+      "bytes": 30,
+      "sha256": "ff6685410a22617f3341d0ca3c3e44cefa84bba168eccf7414adc21730541ca1"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-directory.started.utc",
+      "bytes": 30,
+      "sha256": "9e5b4a930f8b481e25cfdc9f66a59478c01c9084cd96b14b18df4a55718d663e"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-directory.stderr.raw",
+      "bytes": 4178,
+      "sha256": "4b6180773e16f81622679e32c4d91fa923171361f7a9a892b60a2c8499ec2b93"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-directory.stdout.raw",
+      "bytes": 187,
+      "sha256": "73104daa86f6c26af42d8320988de7fab94cdbe46a424ed400d1f05a8372389c"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-missing.cmd",
+      "bytes": 848,
+      "sha256": "5ff2407423efd32181a0b78b501187daf74ecaff4d59dc9a00ba7e90947a2624"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-missing.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-missing.finished.utc",
+      "bytes": 30,
+      "sha256": "4c99a9e1583a7631f5f4c95816c092d3d38500258b9dd97fdeb785cf1e2aa09b"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-missing.started.utc",
+      "bytes": 30,
+      "sha256": "6e47b85395f581ed379676b9a6d208b58f6a6490332143e4f6aeaeb02ca45646"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-missing.stderr.raw",
+      "bytes": 4178,
+      "sha256": "c66badcfffa3e3d8f5274caa01ca61cf2547af662148d75960197974a18ce5ed"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-missing.stdout.raw",
+      "bytes": 176,
+      "sha256": "292ffdbc70b7b3353e5c1adb66bbcd3da08b5ae991ec307f89ca17ccb1e3968f"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-regular.cmd",
+      "bytes": 842,
+      "sha256": "e3a91da6b9994ed5f87c7e72abb9cdf201b5acfca63afcb1b5b3324b3b699b67"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-regular.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-regular.finished.utc",
+      "bytes": 30,
+      "sha256": "af3f533edd3735c47a049a78968b665f39ba6e0774582bcacf7404a9241f9f21"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-regular.started.utc",
+      "bytes": 30,
+      "sha256": "46fb6d963799f247f56a2dde0567153fa9f584aebf865951735ef17db6f48dd5"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-regular.stderr.raw",
+      "bytes": 4178,
+      "sha256": "c66badcfffa3e3d8f5274caa01ca61cf2547af662148d75960197974a18ce5ed"
+    },
+    {
+      "path": "final-head-5877bae/raw/focused-regular.stdout.raw",
+      "bytes": 170,
+      "sha256": "c778e54396a6892d37e9dd2f94937ac9811d6278b11a37f5ed82ad39e88f66bc"
+    },
+    {
+      "path": "final-head-5877bae/raw/format-check.cmd",
+      "bytes": 757,
+      "sha256": "91b99319ba2d3828a0c0fe01b0caf52a17a1564b1ae3bb40f625e8754e1e3ff9"
+    },
+    {
+      "path": "final-head-5877bae/raw/format-check.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "final-head-5877bae/raw/format-check.finished.utc",
+      "bytes": 30,
+      "sha256": "3c49fa104e8da9c12d3b35491d9be2d2b35f1441383aee85f1e0146e9655bdd8"
+    },
+    {
+      "path": "final-head-5877bae/raw/format-check.started.utc",
+      "bytes": 30,
+      "sha256": "a3d30bcdf8a1060c2813bada339616d0611c11c22eee4b50c94a6ca98af10135"
+    },
+    {
+      "path": "final-head-5877bae/raw/format-check.stderr.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "final-head-5877bae/raw/format-check.stdout.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "final-head-5877bae/raw/full-library.cmd",
+      "bytes": 778,
+      "sha256": "f814e22a82736d8bbde68f40e0393dd4136c43cd786529c92eb476288fb7dac1"
+    },
+    {
+      "path": "final-head-5877bae/raw/full-library.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "final-head-5877bae/raw/full-library.finished.utc",
+      "bytes": 30,
+      "sha256": "1859b491663b827386ecb359dc147e05130b21d835ad6fcfdc3999913dde7890"
+    },
+    {
+      "path": "final-head-5877bae/raw/full-library.started.utc",
+      "bytes": 30,
+      "sha256": "450e03bd0614cf980f294ff105bd579fc36cb562aa804c4916402b2e858859ae"
+    },
+    {
+      "path": "final-head-5877bae/raw/full-library.stderr.raw",
+      "bytes": 4178,
+      "sha256": "c66badcfffa3e3d8f5274caa01ca61cf2547af662148d75960197974a18ce5ed"
+    },
+    {
+      "path": "final-head-5877bae/raw/full-library.stdout.raw",
+      "bytes": 24490,
+      "sha256": "cadb5c5ea41d29c200d5724a3fa9354cfa8e878528745ac1c0fbf765492316de"
+    },
+    {
+      "path": "final-head-5877bae/raw/source-revision.txt",
+      "bytes": 56,
+      "sha256": "664cdde15552b6936f361d7437a291cd2745974fe27ebf8b4b951ab72d6ec2ea"
+    },
+    {
+      "path": "final-head-5877bae/raw/strict-clippy.cmd",
+      "bytes": 798,
+      "sha256": "bce9e7350199b6e6fae8202032fb54fd04e614b51d2861ca317548e41e99e2f5"
+    },
+    {
+      "path": "final-head-5877bae/raw/strict-clippy.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "final-head-5877bae/raw/strict-clippy.finished.utc",
+      "bytes": 30,
+      "sha256": "eee88c47b6f04d8124f27c87e7e2ce007f9a5386a29560746282da59e302962a"
+    },
+    {
+      "path": "final-head-5877bae/raw/strict-clippy.started.utc",
+      "bytes": 30,
+      "sha256": "d25f8894678eda4563cac04d0e3b0dd4be4c9d078137ce36fa76b3438be2ce16"
+    },
+    {
+      "path": "final-head-5877bae/raw/strict-clippy.stderr.raw",
+      "bytes": 72,
+      "sha256": "732186322402325172940531d8d6d7cfac85dc902585b2bef6715ad6839dacfd"
+    },
+    {
+      "path": "final-head-5877bae/raw/strict-clippy.stdout.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "raw/baseline-directory.cmd",
+      "bytes": 811,
+      "sha256": "051eb342bf9e61ff356a7229fb65aa4fdb77db6d62e275ddff9e1b78a0dff225"
+    },
+    {
+      "path": "raw/baseline-directory.exit",
+      "bytes": 5,
+      "sha256": "bdc830287616dae1818ced3e7c186e1387155900ad30d5983ec02da1519c4a95"
+    },
+    {
+      "path": "raw/baseline-directory.stderr.raw",
+      "bytes": 8169,
+      "sha256": "3aba6f21055f62556551317de37b05ea92548fc3e7d51430a74644547d2a9cbc"
+    },
+    {
+      "path": "raw/baseline-directory.stdout.raw",
+      "bytes": 629,
+      "sha256": "896410d94771040e6393907dbb1738036575005f9fd21e1018e62a1ecec8c9d8"
+    },
+    {
+      "path": "raw/cargo-version.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "raw/cargo-version.stdout.raw",
+      "bytes": 76,
+      "sha256": "b1be795f67a73a28b807c2807cb4bec6ce00e788bdc1c8cfe75c6abe124c2b48"
+    },
+    {
+      "path": "raw/cl-smoke.c",
+      "bytes": 28,
+      "sha256": "65d2fad425e300ae19bd229a513aa7564086a7f0feb9405f806c70b2366ad59a"
+    },
+    {
+      "path": "raw/cl-smoke.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "raw/cl-smoke.log",
+      "bytes": 2552,
+      "sha256": "58a804a5ed20b60db0075a3014d2cf23a72d171671e918bbac244575bc2ddbb6"
+    },
+    {
+      "path": "raw/clippy-driver-version.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "raw/clippy-driver-version.stdout.raw",
+      "bytes": 80,
+      "sha256": "1b829cd6cf3e8cbd25e22f37ebb5dfe55d34a44e96d9d3de7171e57b934fe427"
+    },
+    {
+      "path": "raw/host-metadata.txt",
+      "bytes": 4412,
+      "sha256": "6c97caac762336047d3c59fc789a8eabd092408254087b706e90d6c99b1747e8"
+    },
+    {
+      "path": "raw/rustc-vV.exit",
+      "bytes": 3,
+      "sha256": "13bf7b3039c63bf5a50491fa3cfd8eb4e699d1ba1436315aef9cbe5711530354"
+    },
+    {
+      "path": "raw/rustc-vV.stdout.raw",
+      "bytes": 404,
+      "sha256": "84e113625690ecf4c51be8e5113e72ff142e152ceb5f01fe11a01c36b7c88ff3"
+    }
+  ],
+  "source_file_sha256": {
+    "src/provider/mod.rs": "067316d9584c7f89f95b24038d7c6ba64d3063a80e9d061f65b120b30d5a8085",
+    ".github/workflows/ci.yml": "a6b959e593f8d34e263c154099ea293be1eb7414a9ec9fa55154b83a939f6abc"
+  },
+  "sanitized_log": {
+    "path": "qualification-run-windows-11-2026-11-14.sanitized.log",
+    "bytes": 1521,
+    "sha256": "67bcce35498febf3ed4339b6479e0db871e652043ccf22b00705a56b35e759d2"
+  },
+  "report_sha256": "f7711f12a173daf4397ea92e90089d4b51fee425dc1a51dec4145e06662acd17",
+  "ci_jobs_added": [
+    "Windows Server 2025 full cargo test --locked --no-default-features --lib",
+    "Windows Server 2025 cargo clippy --locked --no-default-features --lib -- -D warnings",
+    "Hosted macOS 15 ARM64 make all"
+  ],
+  "hosted_ci_results": "Recorded separately on the draft PR; not represented as native Windows 11 evidence.",
+  "pac_tac": "Issue #75 contained no PAC/TAC identifiers; none were invented. Issue #73 PAC-5 remains separate and unchanged.",
+  "reviews": {
+    "standards": "Independent read-only full implementation and CI diff review: no actionable findings.",
+    "spec": "Independent read-only full implementation and CI diff review: no actionable findings."
+  },
+  "risk_classification": "Low; tests-only production change, with CI coverage expanded.",
+  "local_macos_execution": false,
+  "issue_closed": false
+}
