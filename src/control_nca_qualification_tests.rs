@@ -12,10 +12,11 @@ use crate::control_nca_qualification::synthetic_fixture::{
     too_many_directories_romfs, write_u32, write_u64,
 };
 use crate::file_identity::{file_snapshot, path_identity};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, FileTimes, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -50,13 +51,30 @@ impl TempFile {
             .expect("append test bytes");
     }
 
-    fn overwrite_start(&self, bytes: &[u8]) {
+    fn overwrite_start_with_modified_time(&self, bytes: &[u8], modified: SystemTime) {
+        let original = self.snapshot();
+        assert_ne!(
+            Some(modified),
+            original.modified,
+            "test timestamp must differ from the original file snapshot"
+        );
         OpenOptions::new()
             .write(true)
             .open(&self.0)
             .expect("open test input for overwrite")
             .write_all(bytes)
             .expect("overwrite test bytes");
+        OpenOptions::new()
+            .write(true)
+            .open(&self.0)
+            .expect("open test input to set its timestamp")
+            .set_times(FileTimes::new().set_modified(modified))
+            .expect("set distinct test modification time");
+        assert_ne!(
+            self.snapshot().modified,
+            original.modified,
+            "same-size overwrite must change the file snapshot timestamp"
+        );
     }
 
     fn snapshot(&self) -> crate::file_identity::FileSnapshot {
@@ -69,6 +87,11 @@ impl Drop for TempFile {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+fn distinct_test_modified_time() -> SystemTime {
+    // This FAT-compatible time makes the immediate overwrite visible in the file snapshot.
+    SystemTime::UNIX_EPOCH + Duration::from_secs(946_684_800)
 }
 
 fn qualify_fixture(fixture: &Fixture) -> Result<Outcome, ControlNcaQualificationError> {
@@ -569,7 +592,7 @@ fn source_and_key_mutation_are_detected_after_open() {
     let mut changed = false;
     let error = qualify_with_checkpoint(request, |checkpoint| {
         if !changed && checkpoint == Checkpoint::InputOpened {
-            input.overwrite_start(b"X");
+            input.overwrite_start_with_modified_time(b"X", distinct_test_modified_time());
             changed = true;
         }
     })
@@ -583,7 +606,7 @@ fn source_and_key_mutation_are_detected_after_open() {
     let mut changed = false;
     let error = qualify_with_checkpoint(request, |checkpoint| {
         if !changed && checkpoint == Checkpoint::KeysRead {
-            key_file.overwrite_start(b"#");
+            key_file.overwrite_start_with_modified_time(b"#", distinct_test_modified_time());
             changed = true;
         }
     })
