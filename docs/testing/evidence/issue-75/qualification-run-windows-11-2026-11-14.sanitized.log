@@ -1,0 +1,31 @@
+Issue #75 native Windows 11 qualification — sanitized output excerpts
+Host: OBIGAMING | Windows 11 Pro x86_64 | build 26200.9974
+Toolchain: Rust 1.98.1 x86_64-pc-windows-msvc | MSVC 19.51.36260.0
+Tested source: 5877bae6c05c86e03bf29e887387fb8885064376
+
+BASELINE REPRODUCTION (3cc7d4eeca4f29a954f45419122f635f58ee5040)
+Command: cargo test --locked --no-default-features --lib provider::tests::a_directory_is_not_opened_as_a_regular_file -- --exact
+Exit: 101
+Failure: Windows returned NotFound; the old test expected InvalidInput.
+Result: 0 passed; 1 failed; 265 filtered out.
+
+COMMITTED SOURCE — FOCUSED REGRESSIONS
+provider::tests::a_directory_is_not_opened_as_a_regular_file: exit 0; 1 passed; 267 filtered out.
+provider::tests::a_missing_path_remains_not_found: exit 0; 1 passed; 267 filtered out.
+provider::tests::a_regular_file_is_accepted: exit 0; 1 passed; 267 filtered out.
+
+COMMITTED SOURCE — FULL LIBRARY SUITE
+Command: cargo test --locked --no-default-features --lib
+Exit: 0
+test result: ok. 264 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out.
+
+COMMITTED SOURCE — STRICT CLIPPY
+Command: cargo clippy --locked --no-default-features --lib -- -D warnings
+Exit: 0
+Finished dev profile; no warnings.
+
+COMMITTED SOURCE — FORMATTING
+Command: cargo fmt --all -- --check
+Exit: 0
+
+All raw stdout and stderr remain private. This sanitized excerpt removes machine-local paths and usernames. Windows Server 2025 and macOS 15 ARM64 results are separate hosted CI evidence and are reported on the draft PR.
