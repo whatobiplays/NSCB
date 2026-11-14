@@ -536,8 +536,27 @@ mod tests {
 
     #[test]
     fn a_directory_is_not_opened_as_a_regular_file() {
-        let error = open_regular(&std::env::temp_dir()).unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let base = tempfile::tempdir().unwrap();
+        assert!(open_regular(base.path()).is_err());
+    }
+
+    #[test]
+    fn a_missing_path_remains_not_found() {
+        let base = tempfile::tempdir().unwrap();
+        let missing = base.path().join("missing-file");
+
+        let error = open_regular(&missing).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_regular_file_is_accepted() {
+        let base = tempfile::tempdir().unwrap();
+        let regular_file = base.path().join("regular-file");
+        fs::write(&regular_file, b"regular file").unwrap();
+
+        let opened = open_regular(&regular_file).expect("regular files are accepted");
+        assert!(opened.metadata().unwrap().is_file());
     }
 
     #[cfg(unix)]
