@@ -89,6 +89,10 @@ value `absolute_section_start / 16 + relative_offset / 16`. A read beginning
 inside a 16-byte AES block skips the preceding keystream bytes. The section
 start is the absolute NCA byte offset from the validated partition descriptor.
 
+The private `nca_crypto` module owns the key-area slot-two decryptor and bounded
+AES-CTR reader shared by NSP and Control qualification. It does not parse NCA
+headers or broaden either qualifier's accepted profile.
+
 The qualifier hashes the complete hash-table range and compares that digest
 with the FS-header master hash. It then checks each PFS0 data block against its
 32-byte table entry. The final partial block is hashed using only its actual

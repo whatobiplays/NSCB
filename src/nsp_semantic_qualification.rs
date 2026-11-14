@@ -9,11 +9,8 @@ use crate::engine::{ContainerProbeEntry, ContainerProbeResult};
 use crate::file_identity::{FileIdentity, FileSnapshot};
 use crate::key_file::{NspKeyFileError, NspQualificationKeys};
 use crate::nca::{self, ContentType, Distribution, HeaderError};
+use crate::nca_crypto::{NcaCtrReader, decrypt_key_area_slot2};
 use crate::sha256::Sha256Digest;
-use aes::Aes128;
-use aes::cipher::{BlockDecrypt, KeyInit, generic_array::GenericArray};
-use ctr::Ctr128BE;
-use ctr::cipher::{KeyIvInit, StreamCipher};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -1031,10 +1028,13 @@ where
             ));
         }
     };
-    let section_key = decrypt_section_key(&block[0x300..0x340], keys)?;
+    let section_key =
+        decrypt_key_area_slot2(&block[0x300..0x340], keys.application_kaek.as_bytes()).ok_or_else(
+            || NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InternalIo),
+        )?;
     let mut section_ctr = [0_u8; 8];
     section_ctr.copy_from_slice(&fs[0x140..0x148]);
-    let mut section = CtrSectionReader::new(
+    let mut section = NcaCtrReader::new(
         &mut member,
         partition.offset,
         partition.size,
@@ -1182,28 +1182,8 @@ fn parse_section_regions(fs: &[u8], section_size: u64) -> Option<SectionRegions>
     })
 }
 
-fn decrypt_section_key(
-    encrypted_key_area: &[u8],
-    keys: &NspQualificationKeys,
-) -> Result<Zeroizing<[u8; 16]>, NspSemanticQualificationError> {
-    if encrypted_key_area.len() != 0x40 {
-        return Err(NspSemanticQualificationError::new(
-            NspSemanticQualificationErrorCode::InternalIo,
-        ));
-    }
-    let cipher = Aes128::new(GenericArray::from_slice(keys.application_kaek.as_bytes()));
-    let mut decrypted = Zeroizing::new([0_u8; 0x40]);
-    decrypted.copy_from_slice(encrypted_key_area);
-    for block in decrypted.chunks_mut(16) {
-        cipher.decrypt_block(GenericArray::from_mut_slice(block));
-    }
-    let mut section_key = Zeroizing::new([0_u8; 16]);
-    section_key.copy_from_slice(&decrypted[0x20..0x30]);
-    Ok(section_key)
-}
-
 fn verify_section_hash_tree<F>(
-    section: &mut CtrSectionReader<'_, impl Read + Seek>,
+    section: &mut NcaCtrReader<'_, impl Read + Seek>,
     regions: &SectionRegions,
     request: &NspSemanticQualificationRequest,
     checkpoint: &mut F,
@@ -1408,108 +1388,12 @@ impl<R: Read + Seek> Seek for BoundedReader<'_, R> {
     }
 }
 
-struct CtrSectionReader<'a, R> {
-    inner: &'a mut R,
-    section_start: u64,
-    length: u64,
-    position: u64,
-    key: &'a [u8; 16],
-    section_ctr: [u8; 8],
-}
-
-impl<'a, R: Read + Seek> CtrSectionReader<'a, R> {
-    fn new(
-        inner: &'a mut R,
-        section_start: u64,
-        length: u64,
-        key: &'a [u8; 16],
-        section_ctr: [u8; 8],
-    ) -> Self {
-        Self {
-            inner,
-            section_start,
-            length,
-            position: 0,
-            key,
-            section_ctr,
-        }
-    }
-
-    fn counter_at(&self, relative_offset: u64) -> io::Result<([u8; 16], usize)> {
-        let block_index = relative_offset / 16;
-        let base = self
-            .section_start
-            .checked_div(16)
-            .and_then(|value| value.checked_add(block_index))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "CTR offset"))?;
-        let mut counter = [0_u8; 16];
-        for (dst, src) in counter[..8].iter_mut().zip(self.section_ctr.iter().rev()) {
-            *dst = *src;
-        }
-        counter[8..].copy_from_slice(&base.to_be_bytes());
-        Ok((counter, usize::try_from(relative_offset % 16).unwrap_or(0)))
-    }
-}
-
-impl<R: Read + Seek> Read for CtrSectionReader<'_, R> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() || self.position >= self.length {
-            return Ok(0);
-        }
-        let count = usize::try_from((self.length - self.position).min(buffer.len() as u64))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "section read length"))?;
-        let relative_offset = self.position;
-        let absolute = self
-            .section_start
-            .checked_add(relative_offset)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "section read offset"))?;
-        self.inner.seek(SeekFrom::Start(absolute))?;
-        let read = self.inner.read(&mut buffer[..count])?;
-        if read > 0 {
-            let (counter, skip) = self.counter_at(relative_offset)?;
-            let mut cipher = Ctr128BE::<Aes128>::new_from_slices(self.key, &counter)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "CTR key"))?;
-            if skip > 0 {
-                let mut skipped = Zeroizing::new([0_u8; 16]);
-                cipher.apply_keystream(&mut skipped[..skip]);
-            }
-            cipher.apply_keystream(&mut buffer[..read]);
-            self.position = self
-                .position
-                .checked_add(read as u64)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "section position"))?;
-        }
-        Ok(read)
-    }
-}
-
-impl<R: Read + Seek> Seek for CtrSectionReader<'_, R> {
-    fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
-        let next = match position {
-            SeekFrom::Start(value) => value,
-            SeekFrom::End(value) => self
-                .length
-                .checked_add_signed(value)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "section seek"))?,
-            SeekFrom::Current(value) => self
-                .position
-                .checked_add_signed(value)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "section seek"))?,
-        };
-        if next > self.length {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "section seek"));
-        }
-        self.position = next;
-        Ok(next)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundedReader, Checkpoint, CtrSectionReader, MAX_INPUT_BYTES,
-        NspSemanticQualificationErrorCode, NspSemanticQualificationRequest, parse_section_regions,
-        qualify_with_checkpoint, read_nca_member, try_reserve_vec, validate_input_size,
+        BoundedReader, Checkpoint, MAX_INPUT_BYTES, NspSemanticQualificationErrorCode,
+        NspSemanticQualificationRequest, parse_section_regions, qualify_with_checkpoint,
+        read_nca_member, try_reserve_vec, validate_input_size,
     };
     use crate::CancellationHandle;
     use crate::engine::ContainerProbeEntry;
@@ -1776,18 +1660,6 @@ mod tests {
         let mut wrong_table_size = good;
         wrong_table_size[0x38..0x40].copy_from_slice(&31_u64.to_le_bytes());
         assert!(parse_section_regions(&wrong_table_size, 0x400).is_none());
-    }
-
-    #[test]
-    fn ctr_counter_uses_reversed_section_ctr_and_absolute_section_block() {
-        let mut parent = Cursor::new(vec![0; 0x1000]);
-        let key = [0x24; 16];
-        let section_ctr = [1, 2, 3, 4, 5, 6, 7, 8];
-        let reader = CtrSectionReader::new(&mut parent, 0xc00, 0x100, &key, section_ctr);
-        let (counter, skipped) = reader.counter_at(31).expect("CTR counter");
-        assert_eq!(counter[..8], [8, 7, 6, 5, 4, 3, 2, 1]);
-        assert_eq!(counter[8..], 0xc1_u64.to_be_bytes());
-        assert_eq!(skipped, 15);
     }
 
     #[test]

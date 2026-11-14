@@ -19,6 +19,12 @@ pub(crate) enum AllocationSite {
     NspSectionHashBuffer,
     NcaHeaderSpans,
     NcaHeaderPartitions,
+    ControlIvfcHashBuffer,
+    ControlRomfsMetadata,
+    ControlRomfsRecords,
+    ControlRomfsTraversal,
+    ControlRomfsNames,
+    ControlRomfsExtents,
 }
 
 /// Reserves additional vector capacity and retains the reservation's test site.
