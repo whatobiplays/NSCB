@@ -111,3 +111,13 @@ custom AES or SHA implementation. The selected crates have Rust APIs and no
 native C build dependency; native qualification remains a separate PAC-5 gate.
 Review the pinned lockfile and current RustSec database again before release
 qualification.
+
+## Issue #17 NSP/NSZ conversion
+
+| Capability | Selected implementation | Evidence and license | Decision |
+| --- | --- | --- | --- |
+| Zstandard streaming codec | `zstd` 0.14.4 with default features disabled and `vendored` enabled | Locked transitive versions are `zstd-safe` 8.3.0 and `zstd-sys` 2.1.3+zstd.1.5.7. Cargo metadata reports BSD-3-Clause for `zstd` and `zstd-safe`, and BSD-3-Clause AND BSD-2-Clause for `zstd-sys`. | Used only on macOS arm64. The vendored library is not a managed runtime provider and is not represented in the external provider manifest. |
+| Independent NSZ interoperability oracle | NSZ at commit [`148218ff89bb4b607d07730a8cf87d5e1f249ebc`](https://github.com/nicoboss/nsz/tree/148218ff89bb4b607d07730a8cf87d5e1f249ebc) | MIT. Used from a temporary checkout and Python environment, not added as a project dependency. Each direction reconstructed the synthetic source NSP byte-for-byte. | Test evidence for NCZ framing and codec interoperability only. The fixture is not retail content and does not establish Full Verification. |
+
+The conversion profile, deferred member sizing, key handling, and evidence
+boundaries are described in [the NSP/NSZ architecture note](../architecture/nsp-nsz-compression.md).

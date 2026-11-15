@@ -91,6 +91,28 @@ impl Engine {
         crate::operation::plan_xci_to_nsp(request)
     }
 
+    /// Plans compression of one semantically qualified NSP into a standard NSZ.
+    ///
+    /// The plan records source, key-file, and destination evidence. It does not
+    /// retain section keys or predict compressed output bytes.
+    pub fn plan_nsp_to_nsz(
+        &self,
+        request: crate::NspToNszRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_nsp_to_nsz(request)
+    }
+
+    /// Plans reconstruction of one semantically qualified NSP from an NSZ.
+    ///
+    /// Execution uses the external header and Application key-area keys to
+    /// verify the reconstructed Program against the preserved Meta CNMT.
+    pub fn plan_nsz_to_nsp(
+        &self,
+        request: crate::NszToNspRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_nsz_to_nsp(request)
+    }
+
     /// Resolves an explicit regular source and outer bundle destination into a
     /// non-replayable canonical Split plan.
     pub fn plan_split<'a>(
