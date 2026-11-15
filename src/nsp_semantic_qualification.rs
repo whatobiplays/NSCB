@@ -1861,11 +1861,12 @@ impl<R: Read + Seek> Seek for BoundedReader<'_, R> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    use super::qualify_application_with_control_path_and_probe;
     use super::{
         BoundedReader, Checkpoint, MAX_INPUT_BYTES, MemberQualificationProfile,
         NspSemanticQualificationErrorCode, NspSemanticQualificationRequest, parse_section_regions,
-        qualify_application_with_control_path_and_probe, qualify_with_checkpoint, read_nca_member,
-        try_reserve_vec, validate_input_size,
+        qualify_with_checkpoint, read_nca_member, try_reserve_vec, validate_input_size,
     };
     use crate::CancellationHandle;
     use crate::engine::ContainerProbeEntry;
