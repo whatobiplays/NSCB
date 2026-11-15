@@ -42,7 +42,10 @@ pub fn valid() -> Fixture {
 }
 
 fn canonical_package(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
-    let members = [("meta.nca", meta_nca), ("program.nca", program_nca)];
+    canonical_package_members(&[("meta.nca", meta_nca), ("program.nca", program_nca)])
+}
+
+fn canonical_package_members(members: &[(&str, &[u8])]) -> Vec<u8> {
     let mut strings = Vec::new();
     let mut entries = Vec::new();
     let mut payload = Vec::new();
@@ -60,7 +63,11 @@ fn canonical_package(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
     }
     let mut output = Vec::new();
     output.extend_from_slice(b"PFS0");
-    output.extend_from_slice(&2_u32.to_le_bytes());
+    output.extend_from_slice(
+        &u32::try_from(entries.len())
+            .expect("synthetic member count fits PFS0")
+            .to_le_bytes(),
+    );
     output.extend_from_slice(
         &u32::try_from(strings.len())
             .expect("synthetic names fit PFS0")
@@ -76,6 +83,52 @@ fn canonical_package(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
     output.extend_from_slice(&strings);
     output.extend_from_slice(&payload);
     output
+}
+
+fn canonical_three_member_package(
+    meta_nca: &[u8],
+    program_nca: &[u8],
+    control_nca: &[u8],
+) -> Vec<u8> {
+    canonical_package_members(&[
+        ("meta.nca", meta_nca),
+        ("program.nca", program_nca),
+        ("control.nca", control_nca),
+    ])
+}
+
+pub fn with_three_members(
+    members: [(&str, &[u8]); 3],
+    meta_nca: &[u8],
+    program_nca: &[u8],
+    control_nca: &[u8],
+    key_file: &[u8],
+) -> Fixture {
+    let secure_members = members.map(|(name, bytes)| Member { name, bytes });
+    build_profile_with_members(
+        &secure_members,
+        &["update", "normal", "secure"],
+        None,
+        canonical_three_member_package(meta_nca, program_nca, control_nca),
+        key_file.to_vec(),
+    )
+}
+
+pub fn with_four_members(
+    members: [(&str, &[u8]); 4],
+    package_meta_nca: &[u8],
+    package_program_nca: &[u8],
+    package_control_nca: &[u8],
+    key_file: &[u8],
+) -> Fixture {
+    let secure_members = members.map(|(name, bytes)| Member { name, bytes });
+    build_profile_with_members(
+        &secure_members,
+        &["update", "normal", "secure"],
+        None,
+        canonical_three_member_package(package_meta_nca, package_program_nca, package_control_nca),
+        key_file.to_vec(),
+    )
 }
 
 pub fn build(
@@ -223,7 +276,23 @@ fn build_profile(
             .iter()
             .map(|(name, bytes)| Member { name, bytes }),
     );
-    let secure = hfs_image(&secure_members);
+    build_profile_with_members(
+        &secure_members,
+        root_partition_names,
+        nonempty_partition,
+        package.to_vec(),
+        key_file.to_vec(),
+    )
+}
+
+fn build_profile_with_members(
+    secure_members: &[Member<'_>],
+    root_partition_names: &[&str],
+    nonempty_partition: Option<&str>,
+    package: Vec<u8>,
+    key_file: Vec<u8>,
+) -> Fixture {
+    let secure = hfs_image(secure_members);
 
     let mut partitions: Vec<(String, Vec<u8>, Vec<EntryLocation>)> = Vec::new();
     for name in root_partition_names {

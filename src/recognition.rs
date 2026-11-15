@@ -551,7 +551,7 @@ impl<R: Read + Seek> Parser<'_, R> {
                         return Err(err(UnsupportedStructure));
                     }
                     secure_seen = true;
-                    if partition.spans.len() != 2 {
+                    if !matches!(partition.spans.len(), 2 | 3) {
                         return Err(err(UnsupportedStructure));
                     }
                     secure_members
@@ -573,7 +573,7 @@ impl<R: Read + Seek> Parser<'_, R> {
                 _ => return Err(err(UnsupportedStructure)),
             }
         }
-        if !update_seen || !normal_seen || !secure_seen || secure_members.len() != 2 {
+        if !update_seen || !normal_seen || !secure_seen || !matches!(secure_members.len(), 2 | 3) {
             return Err(err(UnsupportedStructure));
         }
         Ok(XciConversionSource { secure_members })

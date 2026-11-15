@@ -59,7 +59,20 @@ impl fmt::Debug for XciToNspRequest {
 pub(crate) struct XciToNspPackagePlan {
     pub(crate) layout: crate::multi_content_format::Pfs0WriteLayout,
     pub(crate) members: Vec<crate::multi_content_format::Pfs0SourceMember>,
-    pub(crate) facts: crate::nsp_semantic_qualification::NspSemanticQualificationFacts,
+    pub(crate) facts: XciToNspQualificationFacts,
+}
+
+#[cfg(target_os = "macos")]
+/// Profile-specific evidence retained for staged and existing-output checks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum XciToNspQualificationFacts {
+    /// Evidence established by the existing two-member qualifier.
+    MetaProgram(crate::nsp_semantic_qualification::NspSemanticQualificationFacts),
+    /// CNMT linkage plus the independent Control NCA integrity facts.
+    MetaProgramControl {
+        semantic: crate::nsp_semantic_qualification::NspApplicationControlFacts,
+        control: crate::control_nca_qualification::ControlNcaQualificationFacts,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -77,14 +90,9 @@ pub(crate) fn qualify_xci(
     expected_source_snapshot: crate::file_identity::FileSnapshot,
     expected_key_snapshot: crate::file_identity::FileSnapshot,
 ) -> Result<XciToNspPackagePlan, OperationFailureCode> {
-    use crate::nsp_semantic_qualification::{
-        NspSemanticQualificationOutcome, NspSemanticQualificationRequest,
-        NspSemanticQualificationRole,
-    };
-
     let source = crate::recognition::inspect_xci_for_conversion(&mut source_file, source_length)
         .map_err(map_recognition_error)?;
-    if source.secure_members.len() != 2 {
+    if !matches!(source.secure_members.len(), 2 | 3) {
         return Err(OperationFailureCode::UnsupportedXciProfile);
     }
 
@@ -102,13 +110,14 @@ pub(crate) fn qualify_xci(
 
     let mut input_members = Vec::new();
     input_members
-        .try_reserve_exact(2)
+        .try_reserve_exact(detected.len())
         .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
     for (index, member) in detected.iter().enumerate() {
-        let name = if index == 0 {
-            "member-000.nca"
-        } else {
-            "member-001.nca"
+        let name = match index {
+            0 => "member-000.nca",
+            1 => "member-001.nca",
+            2 => "member-002.nca",
+            _ => return Err(OperationFailureCode::UnsupportedXciProfile),
         };
         input_members.push(make_source_member(
             name,
@@ -120,53 +129,142 @@ pub(crate) fn qualify_xci(
     let input_layout_members = layout_members(&input_members)?;
     let input_layout = crate::multi_content_format::build_pfs0_layout(&input_layout_members)
         .map_err(map_format_error)?;
-    let virtual_input = XciPfs0Input::new(
-        source_file,
-        source_path.to_path_buf(),
-        input_layout,
-        input_members,
-        expected_source_snapshot,
+    let request = crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+        source_path,
+        key_file,
     )
-    .map_err(|_| OperationFailureCode::SourceChanged)?;
-    let request = NspSemanticQualificationRequest::new(source_path, key_file)
-        .with_expected_key_snapshot(expected_key_snapshot);
-    let qualification =
-        crate::nsp_semantic_qualification::qualify_with_input(request, virtual_input)
-            .map_err(|error| map_qualification_error(error.code()))?;
-    let facts = match qualification.outcome {
-        NspSemanticQualificationOutcome::Qualified(facts) => facts,
-        NspSemanticQualificationOutcome::NotQualified(_) => {
-            return Err(OperationFailureCode::UnsupportedContentProfile);
+    .with_expected_key_snapshot(expected_key_snapshot.clone());
+    let (facts, ordered_member_indices) = match detected.len() {
+        2 => {
+            use crate::nsp_semantic_qualification::{
+                NspSemanticQualificationOutcome, NspSemanticQualificationRole,
+            };
+
+            let virtual_input = XciPfs0Input::new(
+                source_file,
+                source_path.to_path_buf(),
+                input_layout,
+                input_members,
+                expected_source_snapshot.clone(),
+            )
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+            let qualification =
+                crate::nsp_semantic_qualification::qualify_with_input(request, virtual_input)
+                    .map_err(|error| map_qualification_error(error.code()))?;
+            let facts = match qualification.outcome {
+                NspSemanticQualificationOutcome::Qualified(facts) => facts,
+                NspSemanticQualificationOutcome::NotQualified(_) => {
+                    return Err(OperationFailureCode::UnsupportedContentProfile);
+                }
+            };
+            if facts.members.len() != 2
+                || facts.members[0].role != NspSemanticQualificationRole::Meta
+                || facts.members[1].role != NspSemanticQualificationRole::Program
+            {
+                return Err(OperationFailureCode::UnsupportedContentProfile);
+            }
+            let meta_index = unique_member_for_fact(&detected, &facts.members[0])?;
+            let program_index = unique_member_for_fact(&detected, &facts.members[1])?;
+            if meta_index == program_index {
+                return Err(OperationFailureCode::UnsupportedContentProfile);
+            }
+            (
+                XciToNspQualificationFacts::MetaProgram(facts),
+                [meta_index, program_index, 0],
+            )
         }
+        3 => {
+            let virtual_input = XciPfs0Input::new(
+                source_file,
+                source_path.to_path_buf(),
+                input_layout,
+                input_members,
+                expected_source_snapshot.clone(),
+            )
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+            let qualification =
+                crate::nsp_semantic_qualification::qualify_application_with_control_input(
+                    request,
+                    virtual_input,
+                )
+                .map_err(|error| map_qualification_error(error.code()))?;
+            let candidate = match qualification.outcome {
+                crate::nsp_semantic_qualification::NspApplicationControlOutcome::Qualified(
+                    candidate,
+                ) => candidate,
+                crate::nsp_semantic_qualification::NspApplicationControlOutcome::NotQualified(
+                    _,
+                ) => return Err(OperationFailureCode::UnsupportedContentProfile),
+            };
+            let meta_index = unique_member_for_fact(&detected, &candidate.facts.meta)?;
+            let program_index = unique_member_for_fact(&detected, &candidate.facts.program)?;
+            let control_index = unique_member_for_evidence(
+                &detected,
+                candidate.facts.control_size,
+                candidate.facts.control_sha256,
+            )?;
+            if meta_index == program_index
+                || meta_index == control_index
+                || program_index == control_index
+            {
+                return Err(OperationFailureCode::UnsupportedContentProfile);
+            }
+            let control_request =
+                crate::control_nca_qualification::ControlNcaQualificationRequest::new(
+                    source_path,
+                    key_file,
+                )
+                .with_expected_key_snapshot(expected_key_snapshot.clone());
+            let control = crate::control_nca_qualification::qualify_bounded_path(
+                control_request,
+                detected[control_index].source.offset,
+                detected[control_index].source.length,
+                Some(expected_source_snapshot),
+            )
+            .map_err(|error| map_control_qualification_error(error.code()))?;
+            let control_facts = match control {
+                crate::control_nca_qualification::ControlNcaQualificationOutcome::Qualified(
+                    facts,
+                ) if facts.program_id == candidate.facts.title_id => facts,
+                crate::control_nca_qualification::ControlNcaQualificationOutcome::Qualified(_)
+                | crate::control_nca_qualification::ControlNcaQualificationOutcome::NotQualified(
+                    _,
+                ) => return Err(OperationFailureCode::UnsupportedContentProfile),
+            };
+            (
+                XciToNspQualificationFacts::MetaProgramControl {
+                    semantic: candidate.facts,
+                    control: control_facts,
+                },
+                [meta_index, program_index, control_index],
+            )
+        }
+        _ => return Err(OperationFailureCode::UnsupportedXciProfile),
     };
-    if facts.members.len() != 2
-        || facts.members[0].role != NspSemanticQualificationRole::Meta
-        || facts.members[1].role != NspSemanticQualificationRole::Program
-    {
-        return Err(OperationFailureCode::UnsupportedContentProfile);
-    }
-    let meta_index = unique_member_for_fact(&detected, &facts.members[0])?;
-    let program_index = unique_member_for_fact(&detected, &facts.members[1])?;
-    if meta_index == program_index {
-        return Err(OperationFailureCode::UnsupportedContentProfile);
-    }
 
     let mut output_members = Vec::new();
     output_members
-        .try_reserve_exact(2)
+        .try_reserve_exact(detected.len())
         .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-    output_members.push(make_source_member(
-        "meta.nca",
-        detected[meta_index].source.offset,
-        detected[meta_index].source.length,
-        detected[meta_index].sha256,
-    )?);
-    output_members.push(make_source_member(
-        "program.nca",
-        detected[program_index].source.offset,
-        detected[program_index].source.length,
-        detected[program_index].sha256,
-    )?);
+    for (role_index, member_index) in ordered_member_indices
+        .into_iter()
+        .take(detected.len())
+        .enumerate()
+    {
+        let name = match role_index {
+            0 => "meta.nca",
+            1 => "program.nca",
+            2 => "control.nca",
+            _ => return Err(OperationFailureCode::UnsupportedContentProfile),
+        };
+        let member = &detected[member_index];
+        output_members.push(make_source_member(
+            name,
+            member.source.offset,
+            member.source.length,
+            member.sha256,
+        )?);
+    }
     let output_layout_members = layout_members(&output_members)?;
     let layout = crate::multi_content_format::build_pfs0_layout(&output_layout_members)
         .map_err(map_format_error)?;
@@ -182,9 +280,18 @@ fn unique_member_for_fact(
     members: &[DetectedMember],
     fact: &crate::nsp_semantic_qualification::NspSemanticQualificationMember,
 ) -> Result<usize, OperationFailureCode> {
+    unique_member_for_evidence(members, fact.size, fact.sha256)
+}
+
+#[cfg(target_os = "macos")]
+fn unique_member_for_evidence(
+    members: &[DetectedMember],
+    size: u64,
+    sha256: crate::sha256::Sha256Digest,
+) -> Result<usize, OperationFailureCode> {
     let mut found = None;
     for (index, member) in members.iter().enumerate() {
-        if member.source.length == fact.size && member.sha256 == fact.sha256 {
+        if member.source.length == size && member.sha256 == sha256 {
             if found.is_some() {
                 return Err(OperationFailureCode::UnsupportedContentProfile);
             }
@@ -472,6 +579,30 @@ pub(crate) fn map_qualification_error(
         | Code::Pfs0ResourceLimitExceeded
         | Code::AllocationFailed => OperationFailureCode::ResourceLimitExceeded,
         Code::KeyOrSectionIntegrityFailure => OperationFailureCode::KeyOrSectionIntegrityFailure,
+        Code::Cancelled => OperationFailureCode::Cancelled,
+        Code::InternalIo => OperationFailureCode::SourceUnavailable,
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn map_control_qualification_error(
+    error: crate::control_nca_qualification::ControlNcaQualificationErrorCode,
+) -> OperationFailureCode {
+    use crate::control_nca_qualification::ControlNcaQualificationErrorCode as Code;
+
+    match error {
+        Code::InputUnavailable => OperationFailureCode::SourceUnavailable,
+        Code::InputChangedDuringQualification => OperationFailureCode::SourceChanged,
+        Code::KeyFileUnavailable => OperationFailureCode::KeyFileUnavailable,
+        Code::KeyFileChangedDuringQualification => OperationFailureCode::KeyFileChanged,
+        Code::KeyFileMalformed => OperationFailureCode::KeyFileMalformed,
+        Code::MissingHeaderKey | Code::MissingApplicationKeyAreaKey => {
+            OperationFailureCode::RequiredKeyMissing
+        }
+        Code::KeyFileLimitExceeded
+        | Code::InputLimitExceeded
+        | Code::ResourceLimitExceeded
+        | Code::AllocationFailed => OperationFailureCode::ResourceLimitExceeded,
         Code::Cancelled => OperationFailureCode::Cancelled,
         Code::InternalIo => OperationFailureCode::SourceUnavailable,
     }

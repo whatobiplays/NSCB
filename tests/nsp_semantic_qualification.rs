@@ -5,6 +5,7 @@ use nscb::{
 use sha2::Digest;
 
 #[path = "support/synthetic_nsp_qualification.rs"]
+#[allow(dead_code)]
 mod synthetic_nsp_qualification;
 #[path = "support/synthetic_pfs0.rs"]
 #[allow(dead_code)]

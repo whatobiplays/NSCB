@@ -9,12 +9,38 @@ use std::process::Command;
 
 #[cfg(feature = "standalone-job-history")]
 #[allow(dead_code)]
+#[path = "../src/control_nca_test_fixture.rs"]
+mod synthetic_control_nca;
+#[cfg(feature = "standalone-job-history")]
+#[allow(dead_code)]
 #[path = "support/synthetic_nsp_qualification.rs"]
 mod synthetic_nsp_qualification;
 #[cfg(feature = "standalone-job-history")]
 #[allow(dead_code)]
 #[path = "support/synthetic_xci.rs"]
 mod synthetic_xci;
+
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
+fn valid_control_fixture() -> synthetic_xci::Fixture {
+    let title_id = synthetic_nsp_qualification::PROGRAM_ID;
+    let control = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        title_id,
+    );
+    let nsp = synthetic_nsp_qualification::build_application_with_control(&control.bytes, title_id);
+    synthetic_xci::with_three_members(
+        [
+            ("control-looking-name.nca", &nsp.control_nca),
+            ("meta.bin", &nsp.meta_nca),
+            ("program.dat", &nsp.program_nca),
+        ],
+        &nsp.meta_nca,
+        &nsp.program_nca,
+        &nsp.control_nca,
+        &nsp.key_file,
+    )
+}
 
 #[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
 struct CliFiles {
@@ -97,6 +123,55 @@ fn json_cli_converts_to_the_canonical_output_and_redacts_key_path() {
     assert!(!output.contains(&files.key_file.display().to_string()));
     let key_text = std::str::from_utf8(&fixture.key_file).expect("synthetic key fixture is UTF-8");
     assert!(!output.contains(key_text));
+}
+
+#[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
+#[test]
+fn control_profile_preserves_json_and_jsonl_envelopes_and_redacts_key_material() {
+    let fixture = valid_control_fixture();
+    let mut files = files_with_fixture(&fixture);
+    let source_before = fs::read(&files.source).expect("source baseline");
+    let output = command(&files, "--json").output().expect("run JSON CLI");
+
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON result");
+    assert_eq!(result["kind"], "xci_to_nsp.job_result");
+    assert_eq!(result["plan"]["operation_kind"], "xci_to_nsp");
+    assert_eq!(result["result"]["state"], "succeeded");
+    assert_eq!(result["result"]["outcome"], "converted");
+    assert_eq!(
+        fs::read(&files.output).expect("NSP output"),
+        fixture.package
+    );
+
+    let json_output = combined_output(&output.stdout, &output.stderr);
+    assert!(!json_output.contains(&files.key_file.display().to_string()));
+    let key_text = std::str::from_utf8(&fixture.key_file).expect("synthetic keys are UTF-8");
+    assert!(!json_output.contains(key_text));
+
+    files.output = files.root.path().join("converted-jsonl.nsp");
+    let output = command(&files, "--jsonl").output().expect("run JSONL CLI");
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let records = std::str::from_utf8(&output.stdout)
+        .expect("JSONL output is UTF-8")
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("JSONL record"))
+        .collect::<Vec<_>>();
+    let result = records.last().expect("terminal result");
+    assert_eq!(result["kind"], "xci_to_nsp.job_result");
+    assert_eq!(result["result"]["outcome"], "converted");
+    assert_eq!(
+        fs::read(&files.output).expect("JSONL NSP output"),
+        fixture.package
+    );
+    assert_eq!(
+        fs::read(&files.source).expect("source after CLI calls"),
+        source_before
+    );
+
+    let jsonl_output = combined_output(&output.stdout, &output.stderr);
+    assert!(!jsonl_output.contains(&files.key_file.display().to_string()));
+    assert!(!jsonl_output.contains(key_text));
 }
 
 #[cfg(all(target_os = "macos", feature = "standalone-job-history"))]
