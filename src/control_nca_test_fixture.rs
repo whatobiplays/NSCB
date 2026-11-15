@@ -248,6 +248,10 @@ pub(crate) fn too_many_directories_romfs() -> Vec<u8> {
 }
 
 pub(crate) fn build(romfs: &[u8], mutation: Mutation) -> Fixture {
+    build_for_program_id(romfs, mutation, 0x0100_0000_0000_1000)
+}
+
+pub(crate) fn build_for_program_id(romfs: &[u8], mutation: Mutation, program_id: u64) -> Fixture {
     let mut levels: [Vec<u8>; 6] = std::array::from_fn(|_| Vec::new());
     levels[5].extend_from_slice(romfs);
     for index in (0..5).rev() {
@@ -303,7 +307,7 @@ pub(crate) fn build(romfs: &[u8], mutation: Mutation) -> Fixture {
     header[0x206] = 0;
     header[0x207] = 0;
     write_u64_array(&mut header, 0x208, file_size as u64);
-    write_u64_array(&mut header, 0x210, 0x0100_0000_0000_1000);
+    write_u64_array(&mut header, 0x210, program_id);
     write_u32_array(&mut header, 0x240, SECTION_START_PAGE);
     write_u32_array(
         &mut header,

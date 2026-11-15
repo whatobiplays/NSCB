@@ -2,8 +2,8 @@ use super::{
     Checkpoint, ControlNcaQualificationError, ControlNcaQualificationErrorCode as ErrorCode,
     ControlNcaQualificationOutcome as Outcome, ControlNcaQualificationReason as Reason,
     ControlNcaQualificationRequest, IVFC_BLOCK_SIZE, MAX_INPUT_BYTES, MAX_IVFC_HASH_OPERATIONS,
-    check_input_size, hash_operation_count, is_supported_table_size, qualify,
-    qualify_with_checkpoint,
+    check_input_size, hash_operation_count, is_supported_table_size, qualify, qualify_bounded_path,
+    qualify_bounded_path_with_cancellation_probe, qualify_inner, qualify_with_checkpoint,
 };
 use crate::allocation::AllocationSite;
 use crate::control_nca_qualification::synthetic_fixture::{
@@ -101,6 +101,125 @@ fn qualify_fixture(fixture: &Fixture) -> Result<Outcome, ControlNcaQualification
         input.path(),
         key_file.path(),
     ))
+}
+
+#[test]
+fn bounded_reader_matches_path_qualification_and_isolates_adjacent_members() {
+    let fixture = build(&empty_romfs(), Mutation::None);
+    let standalone = qualify_fixture(&fixture).expect("path qualification");
+
+    let prefix = [0x5a; 37];
+    let adjacent = [0xa5; 91];
+    let mut container = prefix.to_vec();
+    container.extend_from_slice(&fixture.bytes);
+    container.extend_from_slice(&adjacent);
+    let source = TempFile::new(&container);
+    let key_file = TempFile::new(&key_file_bytes());
+    let bounded = qualify_bounded_path(
+        ControlNcaQualificationRequest::new(source.path(), key_file.path()),
+        prefix.len() as u64,
+        fixture.bytes.len() as u64,
+        None,
+    )
+    .expect("bounded qualification");
+    assert_eq!(bounded, standalone);
+
+    let truncated = qualify_bounded_path(
+        ControlNcaQualificationRequest::new(source.path(), key_file.path()),
+        prefix.len() as u64,
+        fixture.bytes.len() as u64 - 1,
+        None,
+    )
+    .expect("truncated NCA returns a profile result");
+    assert!(matches!(truncated, Outcome::NotQualified(_)));
+}
+
+#[test]
+fn invalid_bounded_spans_fail_closed_on_empty_overflow_and_out_of_range_inputs() {
+    let fixture = build(&empty_romfs(), Mutation::None);
+    let source = TempFile::new(&fixture.bytes);
+    let key_file = TempFile::new(&key_file_bytes());
+    for (offset, length) in [(0, 0), (u64::MAX, 2), (fixture.bytes.len() as u64, 1)] {
+        let error = qualify_bounded_path(
+            ControlNcaQualificationRequest::new(source.path(), key_file.path()),
+            offset,
+            length,
+            None,
+        )
+        .expect_err("invalid NCA span is rejected");
+        assert_eq!(error.code(), ErrorCode::InputChangedDuringQualification);
+    }
+}
+
+#[test]
+fn bounded_reader_observes_enclosing_operation_cancellation() {
+    let fixture = build(&empty_romfs(), Mutation::None);
+    let source = TempFile::new(&fixture.bytes);
+    let key_file = TempFile::new(&key_file_bytes());
+    let error = qualify_bounded_path_with_cancellation_probe(
+        ControlNcaQualificationRequest::new(source.path(), key_file.path()),
+        0,
+        fixture.bytes.len() as u64,
+        None,
+        || true,
+    )
+    .expect_err("cancellation stops bounded qualification");
+    assert_eq!(error.code(), ErrorCode::Cancelled);
+}
+
+#[test]
+fn bounded_qualification_revalidates_source_and_key_after_not_qualified_results() {
+    let fixture = build(&empty_romfs(), Mutation::WrongNcaMagic);
+    let source = TempFile::new(&fixture.bytes);
+    let key_file = TempFile::new(&key_file_bytes());
+    let source_snapshot = source.snapshot();
+    let mut source_changed = false;
+    let mut source_checkpoint = |checkpoint| {
+        if checkpoint == Checkpoint::BeforeFinalRevalidation && !source_changed {
+            source_changed = true;
+            source.overwrite_start_with_modified_time(
+                &vec![0; fixture.bytes.len()],
+                distinct_test_modified_time(),
+            );
+        }
+    };
+    let source_error = qualify_inner(
+        ControlNcaQualificationRequest::new(source.path(), key_file.path()),
+        Some((0, fixture.bytes.len() as u64, Some(source_snapshot))),
+        &mut source_checkpoint,
+    )
+    .expect_err("source mutation after NotQualified is detected");
+    assert!(source_changed);
+    assert_eq!(
+        source_error.code(),
+        ErrorCode::InputChangedDuringQualification
+    );
+
+    let source = TempFile::new(&fixture.bytes);
+    let key_file = TempFile::new(&key_file_bytes());
+    let key_snapshot = key_file.snapshot();
+    let mut key_changed = false;
+    let mut key_checkpoint = |checkpoint| {
+        if checkpoint == Checkpoint::BeforeFinalRevalidation && !key_changed {
+            key_changed = true;
+            key_file.overwrite_start_with_modified_time(
+                &vec![0x7b; key_file_bytes().len()],
+                distinct_test_modified_time(),
+            );
+        }
+    };
+    let key_error = qualify_inner(
+        ControlNcaQualificationRequest::new(source.path(), key_file.path())
+            .with_expected_key_snapshot(key_snapshot),
+        Some((0, fixture.bytes.len() as u64, Some(source.snapshot()))),
+        &mut key_checkpoint,
+    )
+    .expect_err("key mutation after NotQualified is detected");
+    assert!(key_changed);
+    assert_eq!(
+        key_error.code(),
+        ErrorCode::KeyFileChangedDuringQualification
+    );
 }
 
 fn assert_reason(fixture: &Fixture, reason: Reason) {

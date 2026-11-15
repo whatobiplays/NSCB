@@ -5341,30 +5341,95 @@ fn validate_xci_to_nsp_package(
     check_cancelled(session)?;
     let conversion = xci_to_nsp(plan).ok_or(OperationFailureCode::StalePlan)?;
     verify_xci_to_nsp_key(plan)?;
-    let qualification = crate::nsp_semantic_qualification::qualify_with_cancellation_probe(
-        crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
-            path,
-            &conversion.key_file.path,
-        ),
-        || {
-            checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
-            session.cancellation_requested().unwrap_or(true)
-        },
-    );
-    check_cancelled(session)?;
-    let result =
-        qualification.map_err(|error| crate::xci_to_nsp::map_qualification_error(error.code()))?;
-    verify_xci_to_nsp_key(plan)?;
-    if result.source_sha256 != conversion.output_sha256 {
-        return Err(OperationFailureCode::ValidationFailed);
-    }
-    match result.outcome {
-        crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::Qualified(facts)
-            if facts == conversion.package.facts =>
-        {
-            Ok(())
+    match &conversion.package.facts {
+        crate::xci_to_nsp::XciToNspQualificationFacts::MetaProgram(expected) => {
+            let qualification = crate::nsp_semantic_qualification::qualify_with_cancellation_probe(
+                crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+                    path,
+                    &conversion.key_file.path,
+                ),
+                || {
+                    checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
+                    session.cancellation_requested().unwrap_or(true)
+                },
+            );
+            check_cancelled(session)?;
+            let result = qualification
+                .map_err(|error| crate::xci_to_nsp::map_qualification_error(error.code()))?;
+            verify_xci_to_nsp_key(plan)?;
+            if result.source_sha256 != conversion.output_sha256 {
+                return Err(OperationFailureCode::ValidationFailed);
+            }
+            match result.outcome {
+                crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::Qualified(
+                    facts,
+                ) if &facts == expected => Ok(()),
+                _ => Err(OperationFailureCode::ValidationFailed),
+            }
         }
-        _ => Err(OperationFailureCode::ValidationFailed),
+        crate::xci_to_nsp::XciToNspQualificationFacts::MetaProgramControl {
+            semantic: expected_semantic,
+            control: expected_control,
+        } => {
+            let expected_key_snapshot = conversion.key_baseline.snapshot.clone();
+            let qualification =
+                crate::nsp_semantic_qualification::qualify_application_with_control_path_and_probe(
+                    crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+                        path,
+                        &conversion.key_file.path,
+                    )
+                    .with_expected_key_snapshot(expected_key_snapshot.clone()),
+                    || {
+                        checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
+                        session.cancellation_requested().unwrap_or(true)
+                    },
+                );
+            check_cancelled(session)?;
+            let result = qualification
+                .map_err(|error| crate::xci_to_nsp::map_qualification_error(error.code()))?;
+            verify_xci_to_nsp_key(plan)?;
+            if result.source_sha256 != conversion.output_sha256 {
+                return Err(OperationFailureCode::ValidationFailed);
+            }
+            let candidate = match result.outcome {
+                crate::nsp_semantic_qualification::NspApplicationControlOutcome::Qualified(
+                    candidate,
+                ) if &candidate.facts == expected_semantic => candidate,
+                _ => return Err(OperationFailureCode::ValidationFailed),
+            };
+            let control_request =
+                crate::control_nca_qualification::ControlNcaQualificationRequest::new(
+                    path,
+                    &conversion.key_file.path,
+                )
+                .with_expected_key_snapshot(expected_key_snapshot);
+            let control =
+                crate::control_nca_qualification::qualify_bounded_path_with_cancellation_probe(
+                    control_request,
+                    candidate.control_span.offset,
+                    candidate.control_span.length,
+                    None,
+                    || {
+                        checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
+                        session.cancellation_requested().unwrap_or(true)
+                    },
+                );
+            check_cancelled(session)?;
+            let control = control.map_err(|error| {
+                crate::xci_to_nsp::map_control_qualification_error(error.code())
+            })?;
+            verify_xci_to_nsp_key(plan)?;
+            match control {
+                crate::control_nca_qualification::ControlNcaQualificationOutcome::Qualified(
+                    facts,
+                ) if &facts == expected_control
+                    && facts.program_id == expected_semantic.title_id =>
+                {
+                    Ok(())
+                }
+                _ => Err(OperationFailureCode::ValidationFailed),
+            }
+        }
     }
 }
 
@@ -11250,6 +11315,46 @@ mod tests {
         (root, destination, workspace, plan)
     }
 
+    fn xci_control_fixture_plan() -> (TempDir, PathBuf, PathBuf, OperationPlan) {
+        let title_id = crate::synthetic_nsp_qualification::PROGRAM_ID;
+        let control = crate::control_nca_qualification::synthetic_fixture::build_for_program_id(
+            &crate::control_nca_qualification::synthetic_fixture::empty_romfs(),
+            crate::control_nca_qualification::synthetic_fixture::Mutation::None,
+            title_id,
+        );
+        let nsp = crate::synthetic_nsp_qualification::build_application_with_control(
+            &control.bytes,
+            title_id,
+        );
+        let fixture = crate::test_synthetic_xci::with_three_members(
+            [
+                ("control-looking-name.nca", &nsp.control_nca),
+                ("meta-data.bin", &nsp.meta_nca),
+                ("program.bin", &nsp.program_nca),
+            ],
+            &nsp.meta_nca,
+            &nsp.program_nca,
+            &nsp.control_nca,
+            &nsp.key_file,
+        );
+        let root = tempfile::tempdir().expect("create Control XCI fixture");
+        let source = root.path().join("source.bin");
+        let destination = root.path().join("destination.bin");
+        let key_file = root.path().join("keys.dat");
+        let workspace = root.path().join("workspace");
+        fs::write(&source, &fixture.image).expect("write Control XCI source");
+        fs::write(&key_file, &fixture.key_file).expect("write Control key fixture");
+        fs::create_dir(&workspace).expect("create Control XCI workspace");
+        let plan = plan_xci_to_nsp(crate::xci_to_nsp::XciToNspRequest::new(
+            &source,
+            &destination,
+            &workspace,
+            &key_file,
+        ))
+        .expect("create Control XCI conversion plan");
+        (root, destination, workspace, plan)
+    }
+
     #[test]
     fn xci_staged_output_corruption_is_rejected_with_retained_evidence() {
         let (_root, destination, workspace, plan) = xci_fixture_plan();
@@ -11310,6 +11415,48 @@ mod tests {
     }
 
     #[test]
+    fn xci_control_staged_output_corruption_is_rejected_with_retained_evidence() {
+        let (_root, destination, workspace, plan) = xci_control_fixture_plan();
+        let stage_path = workspace
+            .join(
+                plan.stage_directory_name
+                    .as_ref()
+                    .expect("planned stage directory"),
+            )
+            .join(plan.stage_file_name.as_ref().expect("planned stage file"));
+        let mut corrupted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion && !corrupted {
+                    corrupted = true;
+                    let mut stage = OpenOptions::new()
+                        .write(true)
+                        .open(&stage_path)
+                        .expect("open staged output for injected corruption");
+                    stage
+                        .write_all(b"staged-control-output-corruption")
+                        .expect("corrupt staged Control output");
+                    stage.sync_all().expect("sync corrupt staged output");
+                }
+            },
+        );
+
+        assert!(corrupted);
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::ValidationFailed)
+        );
+        assert!(!destination.exists());
+        let retained = retained_artifact(&result, OperationArtifactRole::StagedOutput);
+        assert!(retained.retained());
+        assert_ne!(retained.sha256(), retained.recorded_sha256());
+    }
+
+    #[test]
     fn xci_destination_race_is_not_overwritten_and_retains_cleanup_evidence() {
         let (_root, destination, workspace, plan) = xci_fixture_plan();
         let competing_bytes = b"competing destination bytes";
@@ -11351,8 +11498,65 @@ mod tests {
     }
 
     #[test]
+    fn xci_control_destination_race_is_not_overwritten() {
+        let (_root, destination, workspace, plan) = xci_control_fixture_plan();
+        let competing_bytes = b"competing Control destination bytes";
+        let mut raced = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::AtomicPromotionStarted && !raced {
+                    raced = true;
+                    fs::write(&destination, competing_bytes)
+                        .expect("install competing destination at publication boundary");
+                }
+            },
+        );
+
+        assert!(raced);
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::DestinationChanged)
+        );
+        assert_eq!(fs::read(&destination).unwrap(), competing_bytes);
+        let staged = retained_artifact(&result, OperationArtifactRole::StagedOutput);
+        assert!(staged.retained());
+        assert!(staged.path().is_file());
+        assert_eq!(fs::read_dir(workspace).unwrap().count(), 1);
+    }
+
+    #[test]
     fn xci_cancellation_before_promotion_does_not_publish_the_package() {
         let (root, destination, _workspace, plan) = xci_fixture_plan();
+        let source = root.path().join("source.bin");
+        let source_before = fs::read(&source).expect("read source before execution");
+        let session = OperationSession::new();
+        let cancellation_session = session.clone();
+        let mut accepted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &session,
+            copy_source_to_stage,
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion && !accepted {
+                    accepted = cancellation_session.cancel();
+                }
+            },
+        );
+
+        assert!(accepted);
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(result.outcome(), None);
+        assert!(!destination.exists());
+        assert_eq!(fs::read(source).unwrap(), source_before);
+    }
+
+    #[test]
+    fn xci_control_cancellation_before_promotion_does_not_publish_the_package() {
+        let (root, destination, _workspace, plan) = xci_control_fixture_plan();
         let source = root.path().join("source.bin");
         let source_before = fs::read(&source).expect("read source before execution");
         let session = OperationSession::new();

@@ -11,12 +11,61 @@ use nscb::{
 };
 use nscb::{Engine, XciToNspRequest};
 
+#[cfg(target_os = "macos")]
+#[allow(dead_code)]
+#[path = "../src/control_nca_test_fixture.rs"]
+mod synthetic_control_nca;
 #[allow(dead_code)]
 #[path = "support/synthetic_nsp_qualification.rs"]
 mod synthetic_nsp_qualification;
 #[allow(dead_code)]
 #[path = "support/synthetic_xci.rs"]
 mod synthetic_xci;
+
+#[cfg(target_os = "macos")]
+fn valid_control_fixture() -> synthetic_xci::Fixture {
+    let title_id = synthetic_nsp_qualification::PROGRAM_ID;
+    let control_nca = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        title_id,
+    );
+    let nsp =
+        synthetic_nsp_qualification::build_application_with_control(&control_nca.bytes, title_id);
+    xci_fixture_from_control_nsp(&nsp)
+}
+
+#[cfg(target_os = "macos")]
+fn xci_fixture_from_control_nsp(
+    nsp: &synthetic_nsp_qualification::ControlFixture,
+) -> synthetic_xci::Fixture {
+    synthetic_xci::with_three_members(
+        [
+            ("unexpected-name-0.bin", &nsp.program_nca),
+            ("control-looking-name.nca", &nsp.control_nca),
+            ("misleading-meta.dat", &nsp.meta_nca),
+        ],
+        &nsp.meta_nca,
+        &nsp.program_nca,
+        &nsp.control_nca,
+        &nsp.key_file,
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn assert_control_profile_rejected(fixture: synthetic_xci::Fixture) {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = write_fixture(directory.path(), &fixture);
+    let error = match plan(&files) {
+        Ok(_) => panic!("unsupported three-member profile must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code(),
+        OperationFailureCode::UnsupportedContentProfile
+    );
+    assert!(!files.destination.exists());
+}
 
 #[cfg(target_os = "macos")]
 struct TestFiles {
@@ -93,6 +142,198 @@ fn converts_synthetic_rights_free_application_and_preserves_member_bytes() {
         qualified.outcome,
         NspSemanticQualificationOutcome::Qualified(_)
     ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn converts_three_member_application_with_qualified_control_and_preserves_member_bytes() {
+    let fixture = valid_control_fixture();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = write_fixture(directory.path(), &fixture);
+    let source_before = fs::read(&files.source).expect("source baseline");
+    let operation_plan = plan(&files).expect("qualified three-member XCI plans");
+
+    let result = Engine::new().execute_operation(operation_plan, &OperationSession::new());
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(result.outcome(), Some(OperationOutcome::Converted));
+    assert_eq!(
+        fs::read(&files.destination).expect("NSP output"),
+        fixture.package
+    );
+    assert_eq!(
+        fs::read(&files.source).expect("source after conversion"),
+        source_before
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn accepts_control_cnmt_row_before_program_row() {
+    let title_id = synthetic_nsp_qualification::PROGRAM_ID;
+    let control_nca = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        title_id,
+    );
+    let nsp = synthetic_nsp_qualification::build_application_with_control_change(
+        &control_nca.bytes,
+        title_id,
+        |cnmt| {
+            let program_row = cnmt[0x30..0x68].to_vec();
+            cnmt.copy_within(0x68..0xa0, 0x30);
+            cnmt[0x68..0xa0].copy_from_slice(&program_row);
+        },
+    );
+    let fixture = xci_fixture_from_control_nsp(&nsp);
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = write_fixture(directory.path(), &fixture);
+    let result = Engine::new().execute_operation(
+        plan(&files).expect("qualified row order"),
+        &OperationSession::new(),
+    );
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(result.outcome(), Some(OperationOutcome::Converted));
+    assert_eq!(
+        fs::read(&files.destination).expect("NSP output"),
+        nsp.package
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rejects_invalid_three_member_cnmt_rows_and_relationships() {
+    let title_id = synthetic_nsp_qualification::PROGRAM_ID;
+    let control_nca = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        title_id,
+    );
+    let changes: [fn(&mut [u8; 0xc0]); 9] = [
+        |cnmt| cnmt[0x30 + 54] = 3,
+        |cnmt| cnmt[0x68 + 54] = 2,
+        |cnmt| cnmt[0x68 + 54] = 1,
+        |cnmt| cnmt[0x68 + 53] = 1,
+        |cnmt| cnmt[0x68 + 55] = 1,
+        |cnmt| cnmt[0x68 + 48] ^= 1,
+        |cnmt| cnmt[0x68] ^= 1,
+        |cnmt| cnmt[0x68 + 32] ^= 1,
+        |cnmt| cnmt[0x10..0x12].copy_from_slice(&1_u16.to_le_bytes()),
+    ];
+
+    for change in changes {
+        let nsp = synthetic_nsp_qualification::build_application_with_control_change(
+            &control_nca.bytes,
+            title_id,
+            change,
+        );
+        assert_control_profile_rejected(xci_fixture_from_control_nsp(&nsp));
+    }
+
+    let wrong_cnmt_title = synthetic_nsp_qualification::build_application_with_control_change(
+        &control_nca.bytes,
+        title_id,
+        |cnmt| cnmt[0..8].copy_from_slice(&(title_id + 1).to_le_bytes()),
+    );
+    assert_control_profile_rejected(xci_fixture_from_control_nsp(&wrong_cnmt_title));
+
+    let wrong_control_title = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        title_id + 1,
+    );
+    let wrong_header_identity = synthetic_nsp_qualification::build_application_with_control(
+        &wrong_control_title.bytes,
+        title_id,
+    );
+    assert_control_profile_rejected(xci_fixture_from_control_nsp(&wrong_header_identity));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rejects_duplicate_roles_unsupported_cardinality_and_misleading_member_sets() {
+    let title_id = synthetic_nsp_qualification::PROGRAM_ID;
+    let control_nca = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        title_id,
+    );
+    let nsp =
+        synthetic_nsp_qualification::build_application_with_control(&control_nca.bytes, title_id);
+    let duplicate_program = synthetic_xci::with_three_members(
+        [
+            ("meta.nca", &nsp.meta_nca),
+            ("program.nca", &nsp.program_nca),
+            ("also-program.nca", &nsp.program_nca),
+        ],
+        &nsp.meta_nca,
+        &nsp.program_nca,
+        &nsp.control_nca,
+        &nsp.key_file,
+    );
+    assert_control_profile_rejected(duplicate_program);
+
+    let four_members = synthetic_xci::with_four_members(
+        [
+            ("meta.nca", &nsp.meta_nca),
+            ("program.nca", &nsp.program_nca),
+            ("control.nca", &nsp.control_nca),
+            ("duplicate-program.nca", &nsp.program_nca),
+        ],
+        &nsp.meta_nca,
+        &nsp.program_nca,
+        &nsp.control_nca,
+        &nsp.key_file,
+    );
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = write_fixture(directory.path(), &four_members);
+    let error = match plan(&files) {
+        Ok(_) => panic!("four-member source is outside both profiles"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), OperationFailureCode::UnsupportedXciProfile);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn rejects_control_header_ivfc_and_romfs_faults_after_wrapper_evidence_is_rebuilt() {
+    let title_id = synthetic_nsp_qualification::PROGRAM_ID;
+    let mut malformed_romfs = synthetic_control_nca::empty_romfs();
+    malformed_romfs[0x200..0x20c].fill(0xff);
+    let control_ncas = [
+        synthetic_control_nca::build_for_program_id(
+            &synthetic_control_nca::empty_romfs(),
+            synthetic_control_nca::Mutation::RightsBearing,
+            title_id,
+        ),
+        synthetic_control_nca::build_for_program_id(
+            &synthetic_control_nca::empty_romfs(),
+            synthetic_control_nca::Mutation::WrongContentType,
+            title_id,
+        ),
+        synthetic_control_nca::build_for_program_id(
+            &synthetic_control_nca::empty_romfs(),
+            synthetic_control_nca::Mutation::CorruptMasterHash,
+            title_id,
+        ),
+        synthetic_control_nca::build_for_program_id(
+            &synthetic_control_nca::empty_romfs(),
+            synthetic_control_nca::Mutation::CorruptFilesystemDigest,
+            title_id,
+        ),
+        synthetic_control_nca::build_for_program_id(
+            &malformed_romfs,
+            synthetic_control_nca::Mutation::None,
+            title_id,
+        ),
+    ];
+
+    for control in control_ncas {
+        let nsp =
+            synthetic_nsp_qualification::build_application_with_control(&control.bytes, title_id);
+        assert_control_profile_rejected(xci_fixture_from_control_nsp(&nsp));
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -305,100 +546,103 @@ fn rejects_cnmt_metadata_outside_the_base_application_profile() {
 #[cfg(target_os = "macos")]
 #[test]
 fn detects_source_and_key_mutations_after_planning() {
-    let fixture = synthetic_xci::valid();
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let files = write_fixture(directory.path(), &fixture);
-    let source_plan = plan(&files).expect("source mutation plan");
-    fs::write(&files.source, b"source changed after planning").expect("mutate source");
-    let source_result = Engine::new().execute_operation(source_plan, &OperationSession::new());
-    assert_eq!(source_result.state(), JobState::Failed);
-    assert_eq!(
-        source_result.failure().map(|failure| failure.code()),
-        Some(OperationFailureCode::SourceChanged)
-    );
-    assert!(!files.destination.exists());
+    for fixture in [synthetic_xci::valid(), valid_control_fixture()] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let files = write_fixture(directory.path(), &fixture);
+        let source_plan = plan(&files).expect("source mutation plan");
+        fs::write(&files.source, b"source changed after planning").expect("mutate source");
+        let source_result = Engine::new().execute_operation(source_plan, &OperationSession::new());
+        assert_eq!(source_result.state(), JobState::Failed);
+        assert_eq!(
+            source_result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::SourceChanged)
+        );
+        assert!(!files.destination.exists());
 
-    fs::write(&files.source, &fixture.image).expect("restore source bytes");
-    let key_plan = plan(&files).expect("key mutation plan");
-    fs::write(&files.keys, b"changed key file").expect("mutate key file");
-    let key_result = Engine::new().execute_operation(key_plan, &OperationSession::new());
-    assert_eq!(key_result.state(), JobState::Failed);
-    assert_eq!(
-        key_result.failure().map(|failure| failure.code()),
-        Some(OperationFailureCode::KeyFileChanged)
-    );
-    assert!(!files.destination.exists());
+        fs::write(&files.source, &fixture.image).expect("restore source bytes");
+        let key_plan = plan(&files).expect("key mutation plan");
+        fs::write(&files.keys, b"changed key file").expect("mutate key file");
+        let key_result = Engine::new().execute_operation(key_plan, &OperationSession::new());
+        assert_eq!(key_result.state(), JobState::Failed);
+        assert_eq!(
+            key_result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::KeyFileChanged)
+        );
+        assert!(!files.destination.exists());
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn enforces_fail_skip_replace_and_already_up_to_date_policies() {
-    let fixture = synthetic_xci::valid();
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let files = write_fixture(directory.path(), &fixture);
-    fs::write(&files.destination, b"unrelated existing output").expect("conflicting output");
-    let fail_plan = plan(&files).expect("Fail captures an occupied destination");
-    let fail = Engine::new().execute_operation(fail_plan, &OperationSession::new());
-    assert_eq!(fail.state(), JobState::Failed);
-    assert_eq!(
-        fail.failure().map(|failure| failure.code()),
-        Some(OperationFailureCode::DestinationConflict)
-    );
-    assert_eq!(
-        fs::read(&files.destination).expect("Fail preserves existing output"),
-        b"unrelated existing output"
-    );
+    for fixture in [synthetic_xci::valid(), valid_control_fixture()] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let files = write_fixture(directory.path(), &fixture);
+        fs::write(&files.destination, b"unrelated existing output").expect("conflicting output");
+        let fail_plan = plan(&files).expect("Fail captures an occupied destination");
+        let fail = Engine::new().execute_operation(fail_plan, &OperationSession::new());
+        assert_eq!(fail.state(), JobState::Failed);
+        assert_eq!(
+            fail.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::DestinationConflict)
+        );
+        assert_eq!(
+            fs::read(&files.destination).expect("Fail preserves existing output"),
+            b"unrelated existing output"
+        );
 
-    let skip_plan = plan_with_policy(&files, ConflictPolicy::Skip).expect("Skip plan");
-    let skipped = Engine::new().execute_operation(skip_plan, &OperationSession::new());
-    assert_eq!(skipped.state(), JobState::Succeeded);
-    assert_eq!(skipped.outcome(), Some(OperationOutcome::Skipped));
-    assert_eq!(
-        fs::read(&files.destination).expect("skipped output"),
-        b"unrelated existing output"
-    );
+        let skip_plan = plan_with_policy(&files, ConflictPolicy::Skip).expect("Skip plan");
+        let skipped = Engine::new().execute_operation(skip_plan, &OperationSession::new());
+        assert_eq!(skipped.state(), JobState::Succeeded);
+        assert_eq!(skipped.outcome(), Some(OperationOutcome::Skipped));
+        assert_eq!(
+            fs::read(&files.destination).expect("skipped output"),
+            b"unrelated existing output"
+        );
 
-    let replace_plan = plan_with_policy(&files, ConflictPolicy::Replace).expect("Replace plan");
-    let replaced = Engine::new().execute_operation(replace_plan, &OperationSession::new());
-    assert_eq!(replaced.state(), JobState::Succeeded);
-    assert_eq!(replaced.outcome(), Some(OperationOutcome::Converted));
-    assert_eq!(
-        fs::read(&files.destination).expect("replaced output"),
-        fixture.package
-    );
+        let replace_plan = plan_with_policy(&files, ConflictPolicy::Replace).expect("Replace plan");
+        let replaced = Engine::new().execute_operation(replace_plan, &OperationSession::new());
+        assert_eq!(replaced.state(), JobState::Succeeded);
+        assert_eq!(replaced.outcome(), Some(OperationOutcome::Converted));
+        assert_eq!(
+            fs::read(&files.destination).expect("replaced output"),
+            fixture.package
+        );
 
-    let current_plan = plan(&files).expect("matching output plan");
-    let current = Engine::new().execute_operation(current_plan, &OperationSession::new());
-    assert_eq!(current.state(), JobState::Succeeded);
-    assert_eq!(current.outcome(), Some(OperationOutcome::AlreadyUpToDate));
-    assert_eq!(
-        fs::read(&files.destination).expect("current output"),
-        fixture.package
-    );
+        let current_plan = plan(&files).expect("matching output plan");
+        let current = Engine::new().execute_operation(current_plan, &OperationSession::new());
+        assert_eq!(current.state(), JobState::Succeeded);
+        assert_eq!(current.outcome(), Some(OperationOutcome::AlreadyUpToDate));
+        assert_eq!(
+            fs::read(&files.destination).expect("current output"),
+            fixture.package
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn pre_cancelled_operation_does_not_create_output_or_workspace_artifacts() {
-    let fixture = synthetic_xci::valid();
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let files = write_fixture(directory.path(), &fixture);
-    let operation_plan = plan(&files).expect("eligible plan");
-    let cancellation = CancellationHandle::new();
-    cancellation.cancel();
+    for fixture in [synthetic_xci::valid(), valid_control_fixture()] {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let files = write_fixture(directory.path(), &fixture);
+        let operation_plan = plan(&files).expect("eligible plan");
+        let cancellation = CancellationHandle::new();
+        cancellation.cancel();
 
-    let result = Engine::new().execute_operation_with_cancellation(
-        operation_plan,
-        &OperationSession::new(),
-        cancellation,
-    );
-    assert_eq!(result.state(), JobState::Cancelled);
-    assert!(!files.destination.exists());
-    assert_eq!(fs::read_dir(&files.workspace).unwrap().count(), 0);
-    assert_eq!(
-        fs::read(&files.source).expect("source remains"),
-        fixture.image
-    );
+        let result = Engine::new().execute_operation_with_cancellation(
+            operation_plan,
+            &OperationSession::new(),
+            cancellation,
+        );
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert!(!files.destination.exists());
+        assert_eq!(fs::read_dir(&files.workspace).unwrap().count(), 0);
+        assert_eq!(
+            fs::read(&files.source).expect("source remains"),
+            fixture.image
+        );
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

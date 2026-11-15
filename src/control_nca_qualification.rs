@@ -337,7 +337,50 @@ pub(crate) fn qualify(
     request: ControlNcaQualificationRequest,
 ) -> Result<ControlNcaQualificationOutcome, ControlNcaQualificationError> {
     let mut checkpoint = |_| {};
-    qualify_inner(request, &mut checkpoint)
+    qualify_inner(request, None, &mut checkpoint)
+}
+
+/// Qualifies one NCA inside a larger file through an exact bounded span.
+///
+/// The NCA parser sees the start of this span as offset zero. The reader cannot
+/// seek or read into bytes before or after the member.
+pub(crate) fn qualify_bounded_path(
+    request: ControlNcaQualificationRequest,
+    offset: u64,
+    length: u64,
+    expected_source_snapshot: Option<crate::file_identity::FileSnapshot>,
+) -> Result<ControlNcaQualificationOutcome, ControlNcaQualificationError> {
+    let mut checkpoint = |_| {};
+    qualify_inner(
+        request,
+        Some((offset, length, expected_source_snapshot)),
+        &mut checkpoint,
+    )
+}
+
+/// Qualifies a bounded NCA while polling the enclosing operation for cancellation.
+pub(crate) fn qualify_bounded_path_with_cancellation_probe<F>(
+    request: ControlNcaQualificationRequest,
+    offset: u64,
+    length: u64,
+    expected_source_snapshot: Option<crate::file_identity::FileSnapshot>,
+    mut is_cancelled: F,
+) -> Result<ControlNcaQualificationOutcome, ControlNcaQualificationError>
+where
+    F: FnMut() -> bool,
+{
+    let cancellation = crate::CancellationHandle::new();
+    let request = request.with_cancellation(cancellation.clone());
+    let mut checkpoint = |_| {
+        if is_cancelled() {
+            cancellation.cancel();
+        }
+    };
+    qualify_inner(
+        request,
+        Some((offset, length, expected_source_snapshot)),
+        &mut checkpoint,
+    )
 }
 
 #[cfg(test)]
@@ -348,11 +391,12 @@ fn qualify_with_checkpoint<F>(
 where
     F: FnMut(Checkpoint),
 {
-    qualify_inner(request, &mut checkpoint)
+    qualify_inner(request, None, &mut checkpoint)
 }
 
 fn qualify_inner<F>(
     request: ControlNcaQualificationRequest,
+    input_span: Option<(u64, u64, Option<crate::file_identity::FileSnapshot>)>,
     checkpoint: &mut F,
 ) -> Result<ControlNcaQualificationOutcome, ControlNcaQualificationError>
 where
@@ -366,7 +410,20 @@ where
     )?;
     checkpoint(Checkpoint::InputOpened);
     check_cancelled(&request)?;
-    check_input_size(input.size)?;
+    let qualification_size = input_span
+        .as_ref()
+        .map_or(input.size, |(_, length, _)| *length);
+    check_input_size(qualification_size)?;
+    if input_span.as_ref().is_some_and(|(_, length, expected)| {
+        *length == 0
+            || expected
+                .as_ref()
+                .is_some_and(|snapshot| snapshot != &input.snapshot)
+    }) {
+        return Err(ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+        ));
+    }
     let mut key_file = open_file(
         &request.key_file,
         ControlNcaQualificationErrorCode::KeyFileUnavailable,
@@ -395,7 +452,23 @@ where
     checkpoint(Checkpoint::KeysRead);
     check_cancelled(&request)?;
 
-    let result = qualify_opened(&mut input.file, input.size, &keys, &request, checkpoint);
+    let result = match input_span {
+        Some((offset, length, _)) => {
+            let mut bounded = crate::nsp_semantic_qualification::BoundedReader::new(
+                &mut input.file,
+                offset,
+                length,
+                input.size,
+            )
+            .ok_or_else(|| {
+                ControlNcaQualificationError::new(
+                    ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+                )
+            })?;
+            qualify_opened(&mut bounded, length, &keys, &request, checkpoint)
+        }
+        None => qualify_opened(&mut input.file, input.size, &keys, &request, checkpoint),
+    };
     if result.is_ok() {
         checkpoint(Checkpoint::BeforeFinalRevalidation);
         check_cancelled(&request)?;
@@ -1670,7 +1743,8 @@ fn read_u64(bytes: &[u8], offset: usize) -> u64 {
 
 #[cfg(test)]
 #[path = "control_nca_test_fixture.rs"]
-mod synthetic_fixture;
+#[allow(dead_code)]
+pub(crate) mod synthetic_fixture;
 #[cfg(test)]
 #[path = "control_nca_qualification_tests.rs"]
 mod tests;

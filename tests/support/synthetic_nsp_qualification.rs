@@ -15,8 +15,60 @@ pub struct Fixture {
     pub program_nca: Vec<u8>,
 }
 
+pub struct ControlFixture {
+    pub package: Vec<u8>,
+    pub key_file: Vec<u8>,
+    pub meta_nca: Vec<u8>,
+    pub program_nca: Vec<u8>,
+    pub control_nca: Vec<u8>,
+}
+
 pub fn valid() -> Fixture {
     build_with_cnmt_change(|_| {})
+}
+
+pub fn build_application_with_control(control_nca: &[u8], program_id: u64) -> ControlFixture {
+    build_application_with_control_change(control_nca, program_id, |_| {})
+}
+
+pub fn build_application_with_control_change(
+    control_nca: &[u8],
+    program_id: u64,
+    change_cnmt: impl FnOnce(&mut [u8; 0xc0]),
+) -> ControlFixture {
+    let program_pfs0 = pfs0(&[("program-data.bin", b"synthetic program section")]);
+    let program_nca = nca(0, &program_pfs0, program_id);
+    let program_digest: [u8; 32] = Sha256::digest(&program_nca).into();
+    let control_digest: [u8; 32] = Sha256::digest(control_nca).into();
+
+    let mut cnmt = [0_u8; 0xc0];
+    cnmt[0..8].copy_from_slice(&program_id.to_le_bytes());
+    cnmt[0x0c] = 0x80;
+    cnmt[0x0e..0x10].copy_from_slice(&0x10_u16.to_le_bytes());
+    cnmt[0x10..0x12].copy_from_slice(&2_u16.to_le_bytes());
+    write_content_row(&mut cnmt[0x30..0x68], &program_nca, &program_digest, 1);
+    write_content_row(&mut cnmt[0x68..0xa0], control_nca, &control_digest, 3);
+    change_cnmt(&mut cnmt);
+
+    let meta_pfs0 = pfs0_with_payload(&[("application.cnmt", &cnmt)], cnmt.to_vec());
+    let meta_nca = nca(1, &meta_pfs0, program_id);
+    let package = package_with_control_members(&meta_nca, &program_nca, control_nca);
+    ControlFixture {
+        package,
+        key_file: key_file_with_application_kaek(APPLICATION_KAEK),
+        meta_nca,
+        program_nca,
+        control_nca: control_nca.to_vec(),
+    }
+}
+
+fn write_content_row(row: &mut [u8], member: &[u8], digest: &[u8; 32], content_type: u8) {
+    row[0..32].copy_from_slice(digest);
+    row[32..48].copy_from_slice(&digest[..16]);
+    put_u40(&mut row[48..53], member.len() as u64);
+    row[53] = 0;
+    row[54] = content_type;
+    row[55] = 0;
 }
 
 pub fn build_with_cnmt_change(change: impl FnOnce(&mut [u8; 0x88])) -> Fixture {
@@ -107,6 +159,25 @@ pub fn package_with_members(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(program_nca);
     pfs0_with_payload(
         &[("program.nca", meta_nca), ("meta.cnmt.nca", program_nca)],
+        payload,
+    )
+}
+
+fn package_with_control_members(
+    meta_nca: &[u8],
+    program_nca: &[u8],
+    control_nca: &[u8],
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(meta_nca.len() + program_nca.len() + control_nca.len());
+    payload.extend_from_slice(meta_nca);
+    payload.extend_from_slice(program_nca);
+    payload.extend_from_slice(control_nca);
+    pfs0_with_payload(
+        &[
+            ("meta.nca", meta_nca),
+            ("program.nca", program_nca),
+            ("control.nca", control_nca),
+        ],
         payload,
     )
 }
