@@ -41,6 +41,9 @@ zeroize = "1.9"
 [dev-dependencies]
 rand = "=0.8.5"
 
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+zstd = { version = "=0.14.4", default-features = false, features = ["vendored"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

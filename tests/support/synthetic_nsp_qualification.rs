@@ -79,8 +79,21 @@ pub fn build_with_program_payload(
     program_payload: &[u8],
     change: impl FnOnce(&mut [u8; 0x88]),
 ) -> Fixture {
+    build_with_program_payload_and_application_kaek(program_payload, APPLICATION_KAEK, change)
+}
+
+pub fn build_with_program_payload_and_application_kaek(
+    program_payload: &[u8],
+    application_kaek: [u8; 16],
+    change: impl FnOnce(&mut [u8; 0x88]),
+) -> Fixture {
     let program_pfs0 = pfs0(&[("unrelated.bin", program_payload)]);
-    build_with_program_pfs0_and_meta_suffix(program_pfs0, &[], change)
+    build_with_program_pfs0_and_meta_suffix_and_application_kaek(
+        program_pfs0,
+        &[],
+        application_kaek,
+        change,
+    )
 }
 
 pub fn build_with_program_pfs0(program_pfs0: Vec<u8>) -> Fixture {
@@ -123,7 +136,21 @@ fn build_with_program_pfs0_and_meta_suffix(
     meta_suffix: &[u8],
     change: impl FnOnce(&mut [u8; 0x88]),
 ) -> Fixture {
-    let program_nca = nca(0, &program_pfs0, PROGRAM_ID);
+    build_with_program_pfs0_and_meta_suffix_and_application_kaek(
+        program_pfs0,
+        meta_suffix,
+        APPLICATION_KAEK,
+        change,
+    )
+}
+
+fn build_with_program_pfs0_and_meta_suffix_and_application_kaek(
+    program_pfs0: Vec<u8>,
+    meta_suffix: &[u8],
+    application_kaek: [u8; 16],
+    change: impl FnOnce(&mut [u8; 0x88]),
+) -> Fixture {
+    let program_nca = nca_with_application_kaek(0, &program_pfs0, PROGRAM_ID, application_kaek);
     let program_digest = Sha256::digest(&program_nca);
 
     let mut cnmt = [0_u8; 0x88];
@@ -140,10 +167,10 @@ fn build_with_program_pfs0_and_meta_suffix(
 
     let mut meta_payload = cnmt.to_vec();
     meta_payload.extend_from_slice(meta_suffix);
-    let meta_pfs0 = pfs0_with_payload(&[("misleading.txt", &cnmt)], meta_payload);
-    let meta_nca = nca(1, &meta_pfs0, PROGRAM_ID);
+    let meta_pfs0 = pfs0_with_payload(&[("application.cnmt", &cnmt)], meta_payload);
+    let meta_nca = nca_with_application_kaek(1, &meta_pfs0, PROGRAM_ID, application_kaek);
     let package = package_with_members(&meta_nca, &program_nca);
-    let key_file = key_file_with_application_kaek(APPLICATION_KAEK);
+    let key_file = key_file_with_application_kaek(application_kaek);
 
     Fixture {
         package,
@@ -154,11 +181,20 @@ fn build_with_program_pfs0_and_meta_suffix(
 }
 
 pub fn package_with_members(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(meta_nca.len() + program_nca.len());
+    package_with_named_members(meta_nca, program_nca, "program.nca", "meta.cnmt.nca")
+}
+
+pub fn package_with_named_members(
+    meta_nca: &[u8],
+    program_member: &[u8],
+    meta_name: &str,
+    program_name: &str,
+) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(meta_nca.len() + program_member.len());
     payload.extend_from_slice(meta_nca);
-    payload.extend_from_slice(program_nca);
+    payload.extend_from_slice(program_member);
     pfs0_with_payload(
-        &[("program.nca", meta_nca), ("meta.cnmt.nca", program_nca)],
+        &[(meta_name, meta_nca), (program_name, program_member)],
         payload,
     )
 }
@@ -228,6 +264,15 @@ pub fn mutate_nca_header(mut nca: Vec<u8>, mutate: impl FnOnce(&mut [u8])) -> Ve
 }
 
 fn nca(content_type: u8, pfs0_bytes: &[u8], program_id: u64) -> Vec<u8> {
+    nca_with_application_kaek(content_type, pfs0_bytes, program_id, APPLICATION_KAEK)
+}
+
+fn nca_with_application_kaek(
+    content_type: u8,
+    pfs0_bytes: &[u8],
+    program_id: u64,
+    application_kaek: [u8; 16],
+) -> Vec<u8> {
     const SECTION_OFFSET: usize = 0xc00;
     const PFS0_OFFSET: usize = 0x200;
     const BLOCK_SIZE: usize = 0x200;
@@ -291,7 +336,7 @@ fn nca(content_type: u8, pfs0_bytes: &[u8], program_id: u64) -> Vec<u8> {
     area[0x10..0x20].copy_from_slice(&[0x22; 0x10]);
     area[0x20..0x30].copy_from_slice(&section_key);
     area[0x30..0x40].copy_from_slice(&[0x44; 0x10]);
-    let area_cipher = Aes128::new(GenericArray::from_slice(&APPLICATION_KAEK));
+    let area_cipher = Aes128::new(GenericArray::from_slice(&application_kaek));
     for block in area.chunks_mut(16) {
         area_cipher.encrypt_block(GenericArray::from_mut_slice(block));
     }

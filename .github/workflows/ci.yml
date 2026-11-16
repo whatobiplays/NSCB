@@ -189,6 +189,20 @@ jobs:
           subprocess.run(command, check=True)
           PY
 
+      - name: Record non-target NSP and NSZ qualification environment
+        if: matrix.name != 'macOS 15 arm64'
+        shell: bash
+        run: |
+          uname -a
+          rustc -vV
+          cargo -V
+
+      - name: Run NSP and NSZ unsupported-capability test
+        if: matrix.name != 'macOS 15 arm64'
+        shell: bash
+        run: |
+          cargo test --locked --no-default-features --test nsp_nsz -- --exact conversion_is_typed_unsupported_outside_native_arm64_macos
+
       - name: Run native qualification tests
         shell: bash
         run: |

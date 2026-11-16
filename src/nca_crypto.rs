@@ -52,7 +52,7 @@ pub(crate) struct NcaCtrReader<'a, R> {
     length: u64,
     position: u64,
     key: &'a [u8; 16],
-    section_ctr: [u8; 8],
+    section_ctr: Zeroizing<[u8; 8]>,
 }
 
 impl<'a, R: Read + Seek> NcaCtrReader<'a, R> {
@@ -69,7 +69,7 @@ impl<'a, R: Read + Seek> NcaCtrReader<'a, R> {
             length,
             position: 0,
             key,
-            section_ctr,
+            section_ctr: Zeroizing::new(section_ctr),
         }
     }
 
