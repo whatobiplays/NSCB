@@ -49,22 +49,32 @@ existing publication path.
 ## Frozen compression settings
 
 An NSP-to-NSZ plan records its private encoder settings without changing the
-public Operation Plan snapshot. The plan fixes the Zstandard codec identity and
-version, compression level 9, window log 27, checksum enabled, content size
-enabled, zero worker threads, and no dictionary. Execution passes these stored
-settings to the encoder and rejects a codec-version mismatch.
+public Operation Plan snapshot, JSON, or JSONL schemas. The public Rust request
+uses `NszCompression`: `Fast` resolves to level 3, `Balanced` resolves to level
+9, `Maximum` resolves to level 19, and `Level(i32)` accepts levels 1 through
+19. The request constructor defaults to `Balanced`, preserving the existing
+level 9 behavior. The CLI exposes mutually exclusive `--preset
+fast|balanced|maximum` and `--level 1..19` options on `nsp-to-nsz` only.
+
+The private plan freezes the Zstandard identity and version, resolved level,
+window log 27, checksum enabled, content size enabled, zero worker threads,
+no dictionary, and the exact NCZ section suffix length as the pledged source
+size. Execution uses those values and rejects a version or input-size mismatch;
+it does not resolve the preset again or adjust settings. The numeric ceiling
+of 19 is the supported range for this operation. Zstandard 1.5.7 accepts a
+wider set of provider levels, but those levels are outside this operation's
+qualified profile. Zstandard documents that higher levels generally require
+more memory, so the operation's cap is a profile boundary rather than the
+codec's maximum.
 
 The project pins `zstd` 0.14.4, `zstd-safe` 8.3.0, and
-`zstd-sys` 2.1.3+zstd.1.5.7. The plan captures the linked Zstandard version at
-construction. The current build omits the `zstdmt` feature, so the recorded
-zero worker count selects single-threaded compression.
-
-Level 9 is the current fixed choice for the first-slice implementation. The
-pinned synthetic interoperability check used this level; no benchmark
-establishes it as optimal. ADR-0022 defines typed Fast, Balanced, and Maximum
-presets and requires resolved provider parameters to be frozen in the plan. It
-does not assign numeric levels. The broader preset and numeric selection API
-remains outside this slice.
+`zstd-sys` 2.1.3+zstd.1.5.7. Planning captures the linked version and rejects
+any build that does not provide that qualified codec. The build omits the
+`zstdmt` feature; Zstandard's worker parameter defaults to zero, and the plan
+rejects any other worker count. The 128 MiB window limit constrains decoder
+back-reference distance. It is not a bound on encoder peak memory. Preset names
+describe the selected level's speed or ratio intent; measured performance is
+specific to the synthetic input and host used for qualification.
 
 ## NCZ format limits
 

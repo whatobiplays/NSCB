@@ -8,6 +8,39 @@
 use crate::operation::ConflictPolicy;
 use std::path::PathBuf;
 
+/// Selects a supported Zstandard compression level for an NSZ output.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum NszCompression {
+    /// Favors encoding speed with Zstandard level 3.
+    Fast,
+    /// Uses the compatible default Zstandard level 9.
+    #[default]
+    Balanced,
+    /// Uses the highest level supported by this operation, Zstandard level 19.
+    Maximum,
+    /// Uses an explicit Zstandard level from 1 through 19. Other values fail
+    /// during planning with `InvalidCompressionLevel`.
+    Level(i32),
+}
+
+impl NszCompression {
+    const MIN_LEVEL: i32 = 1;
+    const MAX_LEVEL: i32 = 19;
+
+    pub(crate) fn compression_level(self) -> Option<i32> {
+        match self {
+            Self::Fast => Some(3),
+            Self::Balanced => Some(9),
+            Self::Maximum => Some(19),
+            Self::Level(level) if (Self::MIN_LEVEL..=Self::MAX_LEVEL).contains(&level) => {
+                Some(level)
+            }
+            Self::Level(_) => None,
+        }
+    }
+}
+
 /// Describes a request to compress the Program member of a qualified NSP.
 ///
 /// Standard NCZ metadata contains the Program section key and counter in
@@ -20,6 +53,7 @@ pub struct NspToNszRequest {
     workspace: PathBuf,
     key_file: PathBuf,
     conflict_policy: ConflictPolicy,
+    compression: NszCompression,
 }
 
 impl NspToNszRequest {
@@ -37,6 +71,7 @@ impl NspToNszRequest {
             workspace: workspace.into(),
             key_file: key_file.into(),
             conflict_policy: ConflictPolicy::Fail,
+            compression: NszCompression::default(),
         }
     }
 
@@ -47,6 +82,13 @@ impl NspToNszRequest {
         self
     }
 
+    /// Selects the Zstandard level resolved into the operation plan.
+    #[must_use]
+    pub fn with_compression(mut self, compression: NszCompression) -> Self {
+        self.compression = compression;
+        self
+    }
+
     pub(crate) fn into_parts(self) -> NspNszRequestParts {
         NspNszRequestParts {
             source: self.source,
@@ -54,6 +96,7 @@ impl NspToNszRequest {
             workspace: self.workspace,
             key_file: self.key_file,
             conflict_policy: self.conflict_policy,
+            compression: Some(self.compression),
         }
     }
 }
@@ -104,6 +147,7 @@ impl NszToNspRequest {
             workspace: self.workspace,
             key_file: self.key_file,
             conflict_policy: self.conflict_policy,
+            compression: None,
         }
     }
 }
@@ -114,6 +158,7 @@ pub(crate) struct NspNszRequestParts {
     pub(crate) workspace: PathBuf,
     pub(crate) key_file: PathBuf,
     pub(crate) conflict_policy: ConflictPolicy,
+    pub(crate) compression: Option<NszCompression>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,7 +232,7 @@ const MAX_PFS0_METADATA_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "macos")]
 const DEFAULT_ZSTD_WINDOW_LOG: u32 = 27;
 #[cfg(target_os = "macos")]
-const DEFAULT_ZSTD_COMPRESSION_LEVEL: i32 = 9;
+const QUALIFIED_ZSTD_VERSION: &str = "1.5.7";
 #[cfg(target_os = "macos")]
 const IO_BUFFER_SIZE: usize = 64 * 1024;
 
@@ -214,22 +259,31 @@ pub(crate) struct NczCompressionSettings {
     content_size: bool,
     worker_threads: u32,
     dictionary: NczDictionaryPolicy,
+    pledged_src_size: u64,
 }
 
 #[cfg(target_os = "macos")]
 impl NczCompressionSettings {
     #[cfg(target_arch = "aarch64")]
-    pub(crate) fn for_plan() -> Self {
-        Self {
+    pub(crate) fn for_plan(compression_level: i32, pledged_src_size: u64) -> Option<Self> {
+        let codec_version = zstd::zstd_safe::version_string();
+        if !(1..=19).contains(&compression_level)
+            || pledged_src_size == 0
+            || codec_version != QUALIFIED_ZSTD_VERSION
+        {
+            return None;
+        }
+        Some(Self {
             codec: NczCodecIdentity::Zstandard,
-            codec_version: zstd::zstd_safe::version_string(),
-            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
+            codec_version,
+            compression_level,
             window_log: DEFAULT_ZSTD_WINDOW_LOG,
             checksum: true,
             content_size: true,
             worker_threads: 0,
             dictionary: NczDictionaryPolicy::None,
-        }
+            pledged_src_size,
+        })
     }
 }
 
@@ -677,7 +731,12 @@ pub(crate) fn encode_ncz_member(
     use std::io::{Read, Seek, SeekFrom, Write};
 
     if settings.codec != NczCodecIdentity::Zstandard
+        || settings.codec_version != QUALIFIED_ZSTD_VERSION
         || settings.codec_version != zstd::zstd_safe::version_string()
+        || !(1..=19).contains(&settings.compression_level)
+        || settings.window_log != DEFAULT_ZSTD_WINDOW_LOG
+        || !settings.checksum
+        || !settings.content_size
         || settings.worker_threads != 0
     {
         return Err(NspNszFormatError::UnsupportedProfile);
@@ -701,6 +760,9 @@ pub(crate) fn encode_ncz_member(
         .checked_sub(NCZ_PREFIX_SIZE)
         .filter(|size| *size > 0)
         .ok_or(NspNszFormatError::UnsupportedProfile)?;
+    if settings.pledged_src_size != suffix_size {
+        return Err(NspNszFormatError::UnsupportedProfile);
+    }
     if section_offset > NCZ_PREFIX_SIZE
         || section_offset
             .checked_add(section_size)
@@ -779,7 +841,12 @@ pub(crate) fn encode_ncz_member(
         .include_contentsize(settings.content_size)
         .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
     encoder
-        .set_pledged_src_size(Some(suffix_size))
+        .set_parameter(zstd::zstd_safe::CParameter::NbWorkers(
+            settings.worker_threads,
+        ))
+        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
+    encoder
+        .set_pledged_src_size(Some(settings.pledged_src_size))
         .map_err(|_| NspNszFormatError::ResourceLimit)?;
 
     let mut buffer = [0_u8; IO_BUFFER_SIZE];
@@ -1288,5 +1355,61 @@ mod tests {
                 Err(NspNszFormatError::ResourceLimit)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod compression_selection_tests {
+    use super::NszCompression;
+
+    #[test]
+    fn named_presets_and_explicit_levels_resolve_to_supported_levels() {
+        assert_eq!(NszCompression::Fast.compression_level(), Some(3));
+        assert_eq!(NszCompression::Balanced.compression_level(), Some(9));
+        assert_eq!(NszCompression::Maximum.compression_level(), Some(19));
+
+        for level in 1..=19 {
+            assert_eq!(
+                NszCompression::Level(level).compression_level(),
+                Some(level)
+            );
+        }
+    }
+
+    #[test]
+    fn balanced_is_the_default_and_invalid_levels_are_rejected() {
+        assert_eq!(NszCompression::default(), NszCompression::Balanced);
+
+        for level in [i32::MIN, -1, 0, 20, 22, i32::MAX] {
+            assert_eq!(NszCompression::Level(level).compression_level(), None);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod compression_settings_tests {
+    use super::{NczCompressionSettings, NczDictionaryPolicy, QUALIFIED_ZSTD_VERSION};
+
+    #[test]
+    fn compression_settings_freeze_codec_options_and_pledged_size() {
+        let settings =
+            NczCompressionSettings::for_plan(19, 0x8000).expect("qualified compression settings");
+
+        assert_eq!(settings.codec_version, QUALIFIED_ZSTD_VERSION);
+        assert_eq!(settings.compression_level, 19);
+        assert_eq!(settings.window_log, 27);
+        assert!(settings.checksum);
+        assert!(settings.content_size);
+        assert_eq!(settings.worker_threads, 0);
+        assert_eq!(settings.dictionary, NczDictionaryPolicy::None);
+        assert_eq!(settings.pledged_src_size, 0x8000);
+    }
+
+    #[test]
+    fn compression_settings_reject_invalid_levels_and_empty_suffixes() {
+        for level in [0, 20, -1] {
+            assert!(NczCompressionSettings::for_plan(level, 1).is_none());
+        }
+        assert!(NczCompressionSettings::for_plan(9, 0).is_none());
     }
 }

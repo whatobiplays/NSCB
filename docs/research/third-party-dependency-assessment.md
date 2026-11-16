@@ -116,8 +116,18 @@ qualification.
 
 | Capability | Selected implementation | Evidence and license | Decision |
 | --- | --- | --- | --- |
-| Zstandard streaming codec | `zstd` 0.14.4 with default features disabled and `vendored` enabled | Locked transitive versions are `zstd-safe` 8.3.0 and `zstd-sys` 2.1.3+zstd.1.5.7. Cargo metadata reports BSD-3-Clause for `zstd` and `zstd-safe`, and BSD-3-Clause AND BSD-2-Clause for `zstd-sys`. | Used only on macOS arm64. The vendored library is not a managed runtime provider and is not represented in the external provider manifest. |
+| Zstandard streaming codec | `zstd` 0.14.4 with default features disabled and `vendored` enabled | Locked transitive versions are `zstd-safe` 8.3.0 and `zstd-sys` 2.1.3+zstd.1.5.7. Cargo metadata reports BSD-3-Clause for `zstd` and `zstd-safe`, and BSD-3-Clause AND BSD-2-Clause for `zstd-sys`. | Used only on macOS arm64. The vendored library is not a managed runtime provider and is not represented in the external provider manifest. The operation accepts levels 1 through 19: Fast=3, Balanced/default=9, Maximum=19. |
 | Independent NSZ interoperability oracle | NSZ at commit [`148218ff89bb4b607d07730a8cf87d5e1f249ebc`](https://github.com/nicoboss/nsz/tree/148218ff89bb4b607d07730a8cf87d5e1f249ebc) | MIT. Used from a temporary checkout and Python environment, not added as a project dependency. Each direction reconstructed the synthetic source NSP byte-for-byte. | Test evidence for NCZ framing and codec interoperability only. The fixture is not retail content and does not establish Full Verification. |
+
+This operation-level range is narrower than the provider's full level range.
+The level 19 ceiling bounds this operation's qualified choices; it is not the
+codec maximum. Zstandard documents that higher levels generally require more
+memory. Each plan captures Zstandard 1.5.7, window log 27, checksum and
+content-size flags, zero workers, no dictionary, and the exact pledged section
+length; the encoder uses those frozen values. The window setting limits decoder
+back-reference distance to 128 MiB but does not bound encoder memory. Preset
+speed and ratio descriptions are intent labels; resource measurements need to
+identify the tested synthetic input and host.
 
 The conversion profile, deferred member sizing, key handling, and evidence
 boundaries are described in [the NSP/NSZ architecture note](../architecture/nsp-nsz-compression.md).

@@ -125,7 +125,7 @@ pub use split_trust::{
     SplitTrustRestore, SplitTrustStore, SplitTrustStoreError, SplitTrustWriter,
 };
 
-pub use nsp_nsz::{NspToNszRequest, NszToNspRequest};
+pub use nsp_nsz::{NspToNszRequest, NszCompression, NszToNspRequest};
 pub use verification::{
     CheckApplicability, CheckExecution, CheckOutcome, PublicKeyEncoding, TrustProvenance,
     TrustProvenanceKind, VerificationCheck, VerificationCheckId, VerificationError,

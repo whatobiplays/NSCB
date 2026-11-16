@@ -406,6 +406,8 @@ pub enum OperationFailureCode {
     DuplicateContentMember,
     /// A package contains malformed or insufficiently validated content bytes.
     InvalidContentPackage,
+    /// The requested NSP-to-NSZ compression level is outside the supported range.
+    InvalidCompressionLevel,
     /// A package uses a content profile that this operation does not support.
     UnsupportedContentProfile,
     /// Package member ownership cannot be established from supported byte evidence.
@@ -497,6 +499,7 @@ impl OperationFailureCode {
             Self::DuplicateInput => "duplicate_input",
             Self::DuplicateContentMember => "duplicate_content_member",
             Self::InvalidContentPackage => "invalid_content_package",
+            Self::InvalidCompressionLevel => "invalid_compression_level",
             Self::UnsupportedContentProfile => "unsupported_content_profile",
             Self::AmbiguousContentGrouping => "ambiguous_content_grouping",
             Self::InvalidXciImage => "invalid_xci_image",
@@ -2517,6 +2520,18 @@ fn plan_nsp_nsz_unix(
 ) -> Result<OperationPlan, OperationError> {
     use std::io::{Seek, SeekFrom};
 
+    let compression_level = match direction {
+        crate::nsp_nsz::NspNszDirection::NspToNsz => Some(
+            request
+                .compression
+                .and_then(crate::nsp_nsz::NszCompression::compression_level)
+                .ok_or_else(|| {
+                    OperationError::new(OperationFailureCode::InvalidCompressionLevel)
+                })?,
+        ),
+        crate::nsp_nsz::NspNszDirection::NszToNsp => None,
+    };
+
     let source = resolve_file(&request.source, OperationFailureCode::SourceUnavailable)?;
     let key_file = resolve_file(&request.key_file, OperationFailureCode::KeyFileUnavailable)?;
     if source.path == key_file.path {
@@ -2694,7 +2709,22 @@ fn plan_nsp_nsz_unix(
     ];
     let compression_settings = match direction {
         crate::nsp_nsz::NspNszDirection::NspToNsz => {
-            Some(crate::nsp_nsz::NczCompressionSettings::for_plan())
+            let suffix_size = package
+                .program_nca_size
+                .checked_sub(crate::nsp_nsz::NCZ_PREFIX_SIZE)
+                .filter(|size| *size > 0)
+                .ok_or_else(|| {
+                    OperationError::new(OperationFailureCode::UnsupportedContentProfile)
+                })?;
+            Some(
+                crate::nsp_nsz::NczCompressionSettings::for_plan(
+                    compression_level.ok_or_else(|| {
+                        OperationError::new(OperationFailureCode::UnsupportedCapability)
+                    })?,
+                    suffix_size,
+                )
+                .ok_or_else(|| OperationError::new(OperationFailureCode::UnsupportedCapability))?,
+            )
         }
         crate::nsp_nsz::NspNszDirection::NszToNsp => None,
     };
@@ -6296,13 +6326,26 @@ mod nsp_nsz_publication_tests {
         fs::write(&source, fixture.package).expect("write synthetic NSP");
         fs::write(&key_file, fixture.key_file).expect("write synthetic keys");
 
-        let plan = conversion_plan(false, &source, &destination, &key_file, &workspace);
+        fs::create_dir(&workspace).expect("create conversion workspace");
+        let plan = crate::Engine::new()
+            .plan_nsp_to_nsz(
+                crate::NspToNszRequest::new(&source, &destination, &workspace, &key_file)
+                    .with_compression(crate::NszCompression::Maximum),
+            )
+            .expect("plan maximum compression");
         let conversion = plan.nsp_nsz.as_ref().expect("planned conversion");
         let frozen = conversion
             .compression_settings
             .as_ref()
             .expect("compression settings captured during planning");
-        assert_eq!(frozen, &crate::nsp_nsz::NczCompressionSettings::for_plan());
+        assert_eq!(
+            frozen,
+            &crate::nsp_nsz::NczCompressionSettings::for_plan(
+                19,
+                conversion.package.program_nca_size - crate::nsp_nsz::NCZ_PREFIX_SIZE,
+            )
+            .expect("qualified settings")
+        );
         let execution_settings = conversion
             .compression_settings()
             .expect("execution settings available");
@@ -6310,6 +6353,70 @@ mod nsp_nsz_publication_tests {
 
         let result = crate::Engine::new().execute_operation(plan, &OperationSession::new());
         assert_eq!(result.outcome(), Some(OperationOutcome::Compressed));
+    }
+
+    #[test]
+    fn all_compression_selections_produce_plans_with_frozen_provider_settings() {
+        let root = tempfile::tempdir().expect("create conversion fixture");
+        let fixture = crate::synthetic_nsp_qualification::build_with_program_payload(
+            &vec![0xa5; 0x9000],
+            |_| {},
+        );
+        let source = root.path().join("compression-selections.nsp");
+        let key_file = root.path().join("compression-selections-keys.dat");
+        fs::write(&source, fixture.package).expect("write synthetic NSP");
+        fs::write(&key_file, fixture.key_file).expect("write synthetic keys");
+
+        let mut selections = vec![
+            crate::NszCompression::Fast,
+            crate::NszCompression::Balanced,
+            crate::NszCompression::Maximum,
+        ];
+        selections.extend((1..=19).map(crate::NszCompression::Level));
+
+        for (index, selection) in selections.into_iter().enumerate() {
+            let level = selection.compression_level().expect("supported selection");
+            let destination = root.path().join(format!("selection-{index}.nsz"));
+            let workspace = root.path().join(format!("workspace-selection-{index}"));
+            fs::create_dir(&workspace).expect("create conversion workspace");
+            let plan = crate::Engine::new()
+                .plan_nsp_to_nsz(
+                    crate::NspToNszRequest::new(&source, &destination, &workspace, &key_file)
+                        .with_compression(selection),
+                )
+                .expect("plan supported compression selection");
+            let conversion = plan.nsp_nsz.as_ref().expect("planned conversion");
+            let suffix_size = conversion.package.program_nca_size - crate::nsp_nsz::NCZ_PREFIX_SIZE;
+            assert_eq!(
+                conversion.compression_settings.as_ref(),
+                crate::nsp_nsz::NczCompressionSettings::for_plan(level, suffix_size).as_ref(),
+                "selection {selection:?} must freeze its resolved settings"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_compression_level_fails_before_resolving_input_paths() {
+        let root = tempfile::tempdir().expect("create temporary root");
+        for level in [i32::MIN, -1, 0, 20, 22, i32::MAX] {
+            let error = match crate::Engine::new().plan_nsp_to_nsz(
+                crate::NspToNszRequest::new(
+                    root.path().join("missing.nsp"),
+                    root.path().join("output.nsz"),
+                    root.path().join("workspace"),
+                    root.path().join("missing-keys.dat"),
+                )
+                .with_compression(crate::NszCompression::Level(level)),
+            ) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid compression level {level} unexpectedly produced a plan"),
+            };
+            assert_eq!(
+                error.code(),
+                OperationFailureCode::InvalidCompressionLevel,
+                "level {level} must fail before resolving input paths"
+            );
+        }
     }
 
     #[test]

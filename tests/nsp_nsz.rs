@@ -15,8 +15,8 @@ mod synthetic_nsp_qualification;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use nscb::{
-    ConflictPolicy, Engine, JobState, NspToNszRequest, NszToNspRequest, OperationArtifactRole,
-    OperationFailureCode, OperationKind, OperationOutcome, OperationSession,
+    ConflictPolicy, Engine, JobState, NspToNszRequest, NszCompression, NszToNspRequest,
+    OperationArtifactRole, OperationFailureCode, OperationKind, OperationOutcome, OperationSession,
 };
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -144,6 +144,32 @@ fn compresses_and_reconstructs_the_exact_nsp_with_content_selected_program() {
     );
     assert_eq!(compressed.outcome(), Some(OperationOutcome::Compressed));
     let nsz = fs::read(&files.destination).expect("published NSZ");
+
+    let balanced_destination = directory.path().join("explicit-balanced.nsz");
+    let balanced_workspace = directory.path().join("workspace-explicit-balanced");
+    fs::create_dir(&balanced_workspace).expect("Balanced workspace");
+    let balanced_plan = Engine::new()
+        .plan_nsp_to_nsz(
+            NspToNszRequest::new(
+                &files.source,
+                &balanced_destination,
+                &balanced_workspace,
+                &files.key_file,
+            )
+            .with_compression(NszCompression::Balanced),
+        )
+        .expect("explicit Balanced plan");
+    let balanced_result = Engine::new().execute_operation(balanced_plan, &OperationSession::new());
+    assert_eq!(
+        balanced_result.outcome(),
+        Some(OperationOutcome::Compressed)
+    );
+    assert_eq!(
+        fs::read(balanced_destination).expect("explicit Balanced NSZ"),
+        nsz,
+        "the default level 9 operation must remain byte-compatible with explicit Balanced"
+    );
+
     let nsz_members = pfs0_members(&nsz);
     assert_ne!(
         &nsz_members[1].1[0x4040..0x4048],
@@ -229,6 +255,61 @@ fn compresses_and_reconstructs_the_exact_nsp_with_content_selected_program() {
         current_result.outcome(),
         Some(OperationOutcome::AlreadyUpToDate)
     );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn named_presets_reconstruct_the_exact_synthetic_nsp() {
+    let fixture = large_fixture();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let presets = [
+        ("fast", NszCompression::Fast),
+        ("balanced", NszCompression::Balanced),
+        ("maximum", NszCompression::Maximum),
+    ];
+
+    for (name, preset) in presets {
+        let files = write_files(directory.path(), &fixture, name);
+        let plan = Engine::new()
+            .plan_nsp_to_nsz(
+                NspToNszRequest::new(
+                    &files.source,
+                    &files.destination,
+                    &files.workspace,
+                    &files.key_file,
+                )
+                .with_compression(preset),
+            )
+            .expect("qualified preset plan");
+        let compressed = Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(
+            compressed.state(),
+            JobState::Succeeded,
+            "{name} compression failed: {:?}",
+            compressed.failure().map(|failure| failure.code())
+        );
+
+        let reconstructed = directory.path().join(format!("reconstructed-{name}.nsp"));
+        let decompress_workspace = directory
+            .path()
+            .join(format!("workspace-decompress-{name}"));
+        fs::create_dir(&decompress_workspace).expect("decompression workspace");
+        let plan = Engine::new()
+            .plan_nsz_to_nsp(NszToNspRequest::new(
+                &files.destination,
+                &reconstructed,
+                &decompress_workspace,
+                &files.key_file,
+            ))
+            .expect("qualified decompression plan");
+        let decompressed = Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(decompressed.state(), JobState::Succeeded);
+        assert_eq!(
+            fs::read(&reconstructed).expect("reconstructed NSP"),
+            fixture.package,
+            "{name} output must decode to the exact synthetic NSP"
+        );
+    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

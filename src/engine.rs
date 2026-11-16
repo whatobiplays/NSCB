@@ -94,7 +94,9 @@ impl Engine {
     /// Plans compression of one semantically qualified NSP into a standard NSZ.
     ///
     /// The plan records source, key-file, and destination evidence. It does not
-    /// retain section keys or predict compressed output bytes.
+    /// retain section keys or predict compressed output bytes. The request's
+    /// compression choice defaults to `Balanced`; the resolved Zstandard
+    /// version and encoder parameters are stored privately in the plan.
     pub fn plan_nsp_to_nsz(
         &self,
         request: crate::NspToNszRequest,
