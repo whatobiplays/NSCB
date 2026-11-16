@@ -418,6 +418,13 @@ fn cli_history_and_diagnostics_redact_key_material() {
         .output()
         .expect("run compression CLI");
     assert_eq!(successful.status.code(), Some(0), "{successful:?}");
+    let result: serde_json::Value =
+        serde_json::from_slice(&successful.stdout).expect("conversion JSON result");
+    assert_eq!(result["schema_version"], 1);
+    assert_eq!(result["kind"], "nsp_nsz.job_result");
+    assert_eq!(result["plan"]["operation_kind"], "nsp_to_nsz");
+    assert_eq!(result["result"]["state"], "succeeded");
+    assert_eq!(result["result"]["outcome"], "compressed");
 
     let nsz_members = pfs0_members(&fs::read(&files.destination).expect("published NSZ"));
     let program_ncz = nsz_members
@@ -504,6 +511,122 @@ fn cli_history_and_diagnostics_redact_key_material() {
     {
         assert!(!diagnostic_output.contains(sentinel));
     }
+}
+
+#[cfg(all(
+    target_os = "macos",
+    target_arch = "aarch64",
+    feature = "standalone-job-history"
+))]
+#[test]
+fn conversion_cli_jsonl_preserves_event_and_terminal_record_contract() {
+    fn assert_successful_jsonl(stdout: &[u8], operation_kind: &str, outcome: &str) {
+        let records = stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).expect("JSONL record"))
+            .collect::<Vec<_>>();
+        assert!(
+            records.len() >= 2,
+            "events and terminal JSONL record are emitted"
+        );
+        assert_eq!(
+            records[..records.len() - 1]
+                .iter()
+                .filter(|record| record["kind"] == "job.event")
+                .count(),
+            records.len() - 1
+        );
+        for (sequence, event) in records[..records.len() - 1].iter().enumerate() {
+            assert_eq!(event["kind"], "job.event");
+            assert_eq!(event["schema_version"], 1);
+            assert_eq!(event["nscb_version"], env!("CARGO_PKG_VERSION"));
+            assert_eq!(event["sequence"], sequence as u64);
+            assert!(event["snapshot"].is_object());
+        }
+        let terminal = records.last().expect("terminal JSONL result");
+        assert_eq!(terminal["schema_version"], 1);
+        assert_eq!(terminal["nscb_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(terminal["kind"], "nsp_nsz.job_result");
+        assert_eq!(terminal["plan"]["operation_kind"], operation_kind);
+        assert_eq!(terminal["session"]["status"], "succeeded");
+        assert_eq!(terminal["result"]["state"], "succeeded");
+        assert_eq!(terminal["result"]["outcome"], outcome);
+    }
+
+    let fixture = large_fixture();
+    let directory = tempfile::tempdir().expect("temporary CLI home");
+    let files = write_files(directory.path(), &fixture, "cli-jsonl");
+    let cli = env!("CARGO_BIN_EXE_nscb");
+
+    let compression = Command::new(cli)
+        .env("HOME", directory.path())
+        .args(["nsp-to-nsz", "--source"])
+        .arg(&files.source)
+        .arg("--output")
+        .arg(&files.destination)
+        .arg("--workspace")
+        .arg(&files.workspace)
+        .arg("--keys")
+        .arg(&files.key_file)
+        .arg("--jsonl")
+        .output()
+        .expect("run NSP-to-NSZ JSONL command");
+    assert_eq!(compression.status.code(), Some(0), "{compression:?}");
+    assert!(compression.stderr.is_empty());
+    let compressed_member = pfs0_members(&fs::read(&files.destination).expect("compressed NSZ"))
+        .into_iter()
+        .find(|(name, _)| name.ends_with(".ncz"))
+        .expect("compressed Program member")
+        .1;
+    let to_hex = |bytes: &[u8]| {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let key_sentinels = [
+        "42".repeat(32),
+        "24".repeat(16),
+        to_hex(&compressed_member[0x4030..0x4040]),
+        to_hex(&compressed_member[0x4040..0x4050]),
+    ];
+    let assert_no_key_material = |output: &[u8]| {
+        let output = String::from_utf8_lossy(output);
+        for sentinel in &key_sentinels {
+            assert!(
+                !output.contains(sentinel),
+                "JSONL output contains key material"
+            );
+        }
+    };
+    assert_no_key_material(&compression.stdout);
+    assert_successful_jsonl(&compression.stdout, "nsp_to_nsz", "compressed");
+
+    let reconstructed = directory.path().join("reconstructed.nsp");
+    let decompression_workspace = directory.path().join("workspace-decompression");
+    fs::create_dir(&decompression_workspace).expect("decompression workspace");
+    let decompression = Command::new(cli)
+        .env("HOME", directory.path())
+        .args(["nsz-to-nsp", "--source"])
+        .arg(&files.destination)
+        .arg("--output")
+        .arg(&reconstructed)
+        .arg("--workspace")
+        .arg(&decompression_workspace)
+        .arg("--keys")
+        .arg(&files.key_file)
+        .arg("--jsonl")
+        .output()
+        .expect("run NSZ-to-NSP JSONL command");
+    assert_eq!(decompression.status.code(), Some(0), "{decompression:?}");
+    assert!(decompression.stderr.is_empty());
+    assert_no_key_material(&decompression.stdout);
+    assert_successful_jsonl(&decompression.stdout, "nsz_to_nsp", "decompressed");
+    assert_eq!(
+        fs::read(&reconstructed).expect("reconstructed NSP"),
+        fixture.package
+    );
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

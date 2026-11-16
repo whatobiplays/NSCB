@@ -59,11 +59,12 @@ The project pins `zstd` 0.14.4, `zstd-safe` 8.3.0, and
 construction. The current build omits the `zstdmt` feature, so the recorded
 zero worker count selects single-threaded compression.
 
-Level 9 is the concrete compression level assigned to the first-slice
-Balanced default by ADR-0022. It retains the setting used for the synthetic
-upstream interoperability check. No benchmark comparison establishes it as
-optimal. The broader preset and numeric selection API remains outside this
-slice.
+Level 9 is the current fixed choice for the first-slice implementation. The
+pinned synthetic interoperability check used this level; no benchmark
+establishes it as optimal. ADR-0022 defines typed Fast, Balanced, and Maximum
+presets and requires resolved provider parameters to be frozen in the plan. It
+does not assign numeric levels. The broader preset and numeric selection API
+remains outside this slice.
 
 ## NCZ format limits
 
