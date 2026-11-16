@@ -453,6 +453,35 @@ fn cli_history_and_diagnostics_redact_key_material() {
         assert!(!successful_output.contains(sentinel));
     }
 
+    let reconstructed_nsp = directory.path().join("json-reconstructed.nsp");
+    let json_decompression_workspace = directory.path().join("workspace-json-decompression");
+    fs::create_dir(&json_decompression_workspace).expect("JSON decompression workspace");
+    let decompressed = Command::new(cli)
+        .env("HOME", directory.path())
+        .args(["nsz-to-nsp", "--source"])
+        .arg(&files.destination)
+        .arg("--output")
+        .arg(&reconstructed_nsp)
+        .arg("--workspace")
+        .arg(&json_decompression_workspace)
+        .arg("--keys")
+        .arg(&files.key_file)
+        .arg("--json")
+        .output()
+        .expect("run decompression CLI");
+    assert_eq!(decompressed.status.code(), Some(0), "{decompressed:?}");
+    let decompression_result: serde_json::Value =
+        serde_json::from_slice(&decompressed.stdout).expect("decompression JSON result");
+    assert_eq!(decompression_result["schema_version"], 1);
+    assert_eq!(decompression_result["kind"], "nsp_nsz.job_result");
+    assert_eq!(decompression_result["plan"]["operation_kind"], "nsz_to_nsp");
+    assert_eq!(decompression_result["result"]["state"], "succeeded");
+    assert_eq!(decompression_result["result"]["outcome"], "decompressed");
+    assert_eq!(
+        fs::read(&reconstructed_nsp).expect("JSON reconstructed NSP"),
+        fixture.package
+    );
+
     let history = Command::new(cli)
         .env("HOME", directory.path())
         .args(["jobs", "list", "--json"])
@@ -510,6 +539,43 @@ fn cli_history_and_diagnostics_redact_key_material() {
         .chain([&diagnostic_header_key, &diagnostic_application_key])
     {
         assert!(!diagnostic_output.contains(sentinel));
+    }
+
+    let jsonl_diagnostic = Command::new(cli)
+        .env("HOME", directory.path())
+        .args(["nsp-to-nsz", "--source"])
+        .arg(&files.source)
+        .arg("--output")
+        .arg(directory.path().join("diagnostic-output-jsonl.nsz"))
+        .arg("--workspace")
+        .arg(directory.path().join("diagnostic-workspace-jsonl"))
+        .arg("--keys")
+        .arg(&diagnostic_keys)
+        .arg("--jsonl")
+        .output()
+        .expect("run failing JSONL compression CLI");
+    assert_ne!(
+        jsonl_diagnostic.status.code(),
+        Some(0),
+        "{jsonl_diagnostic:?}"
+    );
+    for line in jsonl_diagnostic
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let _: serde_json::Value = serde_json::from_slice(line).expect("JSONL diagnostic record");
+    }
+    let jsonl_diagnostic_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&jsonl_diagnostic.stdout),
+        String::from_utf8_lossy(&jsonl_diagnostic.stderr)
+    );
+    for sentinel in key_sentinels
+        .iter()
+        .chain([&diagnostic_header_key, &diagnostic_application_key])
+    {
+        assert!(!jsonl_diagnostic_output.contains(sentinel));
     }
 }
 
