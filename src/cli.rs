@@ -1014,6 +1014,7 @@ mod nsp_nsz_cli_tests {
         invalid.push(vec!["--preset", "fast", "--preset", "balanced"]);
         invalid.push(vec!["--level", "3", "--level", "4"]);
         invalid.push(vec!["--preset", "fast", "--level", "9"]);
+        invalid.push(vec!["--level", "9", "--preset", "fast"]);
 
         for options in invalid {
             let mut args = conversion_args("nsp-to-nsz");

@@ -285,6 +285,16 @@ impl NczCompressionSettings {
             pledged_src_size,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn set_codec_version_for_test(&mut self, codec_version: &'static str) {
+        self.codec_version = codec_version;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pledged_src_size_for_test(&mut self, pledged_src_size: u64) {
+        self.pledged_src_size = pledged_src_size;
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1388,13 +1398,16 @@ mod compression_selection_tests {
 
 #[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
 mod compression_settings_tests {
-    use super::{NczCompressionSettings, NczDictionaryPolicy, QUALIFIED_ZSTD_VERSION};
+    use super::{
+        NczCodecIdentity, NczCompressionSettings, NczDictionaryPolicy, QUALIFIED_ZSTD_VERSION,
+    };
 
     #[test]
     fn compression_settings_freeze_codec_options_and_pledged_size() {
         let settings =
             NczCompressionSettings::for_plan(19, 0x8000).expect("qualified compression settings");
 
+        assert_eq!(settings.codec, NczCodecIdentity::Zstandard);
         assert_eq!(settings.codec_version, QUALIFIED_ZSTD_VERSION);
         assert_eq!(settings.compression_level, 19);
         assert_eq!(settings.window_log, 27);
