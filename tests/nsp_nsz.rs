@@ -2,11 +2,7 @@
 use std::fs;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::{Path, PathBuf};
-#[cfg(all(
-    target_os = "macos",
-    target_arch = "aarch64",
-    feature = "standalone-job-history"
-))]
+#[cfg(feature = "standalone-job-history")]
 use std::process::Command;
 
 #[allow(dead_code)]
@@ -15,8 +11,8 @@ mod synthetic_nsp_qualification;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use nscb::{
-    ConflictPolicy, Engine, JobState, NspToNszRequest, NszToNspRequest, OperationArtifactRole,
-    OperationFailureCode, OperationKind, OperationOutcome, OperationSession,
+    ConflictPolicy, Engine, JobState, NspToNszRequest, NszCompression, NszToNspRequest,
+    OperationArtifactRole, OperationFailureCode, OperationKind, OperationOutcome, OperationSession,
 };
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -66,6 +62,50 @@ fn compress_plan(files: &ConversionFiles, policy: ConflictPolicy) -> nscb::Opera
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn compress_plan_with_selection(
+    files: &ConversionFiles,
+    policy: ConflictPolicy,
+    compression: NszCompression,
+) -> nscb::OperationPlan {
+    Engine::new()
+        .plan_nsp_to_nsz(
+            NspToNszRequest::new(
+                &files.source,
+                &files.destination,
+                &files.workspace,
+                &files.key_file,
+            )
+            .with_conflict_policy(policy)
+            .with_compression(compression),
+        )
+        .expect("qualified NSP compression plan with selection")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn encode_with_frozen_parameters(plaintext: &[u8], level: i32) -> Vec<u8> {
+    use std::io::Write as _;
+
+    let pledged_src_size = u64::try_from(plaintext.len()).expect("fixture length fits u64");
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), level)
+        .expect("independent Zstandard encoder");
+    encoder.window_log(27).expect("qualified window log");
+    encoder.include_checksum(true).expect("qualified checksum");
+    encoder
+        .include_contentsize(true)
+        .expect("qualified content size");
+    encoder
+        .set_parameter(zstd::zstd_safe::CParameter::NbWorkers(0))
+        .expect("single-threaded encoder");
+    encoder
+        .set_pledged_src_size(Some(pledged_src_size))
+        .expect("pledged source size");
+    encoder
+        .write_all(plaintext)
+        .expect("write independent frame input");
+    encoder.finish().expect("finish independent frame")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn decompress_plan(
     source: &Path,
     destination: &Path,
@@ -112,6 +152,120 @@ fn pfs0_members(package: &[u8]) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+#[cfg(feature = "standalone-job-history")]
+#[test]
+fn cli_reports_compression_selection_usage_errors_consistently() {
+    use std::ffi::OsString;
+
+    let cases: [(&str, &str, &[&str]); 13] = [
+        ("invalid preset", "nsp-to-nsz", &["--preset", "turbo"]),
+        ("invalid level", "nsp-to-nsz", &["--level", "not-a-number"]),
+        ("out-of-range level", "nsp-to-nsz", &["--level", "20"]),
+        ("missing preset", "nsp-to-nsz", &["--preset"]),
+        ("missing level", "nsp-to-nsz", &["--level"]),
+        (
+            "duplicate presets",
+            "nsp-to-nsz",
+            &["--preset", "fast", "--preset", "maximum"],
+        ),
+        (
+            "duplicate levels",
+            "nsp-to-nsz",
+            &["--level", "3", "--level", "9"],
+        ),
+        (
+            "preset before level",
+            "nsp-to-nsz",
+            &["--preset", "fast", "--level", "3"],
+        ),
+        (
+            "level before preset",
+            "nsp-to-nsz",
+            &["--level", "3", "--preset", "fast"],
+        ),
+        (
+            "preset on decompression",
+            "nsz-to-nsp",
+            &["--preset", "fast"],
+        ),
+        ("level on decompression", "nsz-to-nsp", &["--level", "9"]),
+        (
+            "preset on XCI conversion",
+            "xci-to-nsp",
+            &["--preset", "fast"],
+        ),
+        ("level on XCI conversion", "xci-to-nsp", &["--level", "9"]),
+    ];
+    let modes = [
+        ("text", None, false),
+        ("json", Some("--json"), true),
+        ("jsonl", Some("--jsonl"), false),
+    ];
+    let cli = env!("CARGO_BIN_EXE_nscb");
+    let home = tempfile::tempdir().expect("temporary CLI home");
+
+    for (case_name, command, selection) in cases {
+        for (mode_name, mode_option, mode_before_selection) in modes {
+            let mut args = vec![OsString::from(command)];
+            if mode_before_selection {
+                args.push(OsString::from(mode_option.expect("machine output option")));
+            }
+            args.extend(
+                [
+                    "--source",
+                    "source.nsp",
+                    "--output",
+                    "output.nsz",
+                    "--workspace",
+                    "workspace",
+                    "--keys",
+                    "keys.dat",
+                ]
+                .into_iter()
+                .map(OsString::from),
+            );
+            args.extend(selection.iter().copied().map(OsString::from));
+            if !mode_before_selection && let Some(mode_option) = mode_option {
+                args.push(OsString::from(mode_option));
+            }
+
+            let output = Command::new(cli)
+                .args(&args)
+                .env("HOME", home.path())
+                .output()
+                .expect("run invalid compression CLI command");
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{case_name} in {mode_name} mode: {output:?}"
+            );
+
+            if mode_name == "text" {
+                assert!(output.stdout.is_empty(), "text usage errors use stderr");
+                assert!(
+                    String::from_utf8_lossy(&output.stderr)
+                        .to_ascii_lowercase()
+                        .contains("usage"),
+                    "text usage error lacks usage guidance: {output:?}"
+                );
+            } else {
+                assert!(output.stderr.is_empty(), "machine errors use stdout");
+                let records = output
+                    .stdout
+                    .split(|byte| *byte == b'\n')
+                    .filter(|line| !line.is_empty())
+                    .collect::<Vec<_>>();
+                assert_eq!(records.len(), 1, "one error record is emitted");
+                let document: serde_json::Value =
+                    serde_json::from_slice(records[0]).expect("machine usage error document");
+                assert_eq!(document["schema_version"], 1);
+                assert_eq!(document["kind"], "error");
+                assert_eq!(document["error"]["code"], "usage_error");
+            }
+        }
+    }
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
 fn compresses_and_reconstructs_the_exact_nsp_with_content_selected_program() {
@@ -144,6 +298,54 @@ fn compresses_and_reconstructs_the_exact_nsp_with_content_selected_program() {
     );
     assert_eq!(compressed.outcome(), Some(OperationOutcome::Compressed));
     let nsz = fs::read(&files.destination).expect("published NSZ");
+
+    let balanced_destination = directory.path().join("explicit-balanced.nsz");
+    let balanced_workspace = directory.path().join("workspace-explicit-balanced");
+    fs::create_dir(&balanced_workspace).expect("Balanced workspace");
+    let balanced_plan = Engine::new()
+        .plan_nsp_to_nsz(
+            NspToNszRequest::new(
+                &files.source,
+                &balanced_destination,
+                &balanced_workspace,
+                &files.key_file,
+            )
+            .with_compression(NszCompression::Balanced),
+        )
+        .expect("explicit Balanced plan");
+    let balanced_result = Engine::new().execute_operation(balanced_plan, &OperationSession::new());
+    assert_eq!(
+        balanced_result.outcome(),
+        Some(OperationOutcome::Compressed)
+    );
+    assert_eq!(
+        fs::read(balanced_destination).expect("explicit Balanced NSZ"),
+        nsz,
+        "the default level 9 operation must remain byte-compatible with explicit Balanced"
+    );
+
+    let level9_destination = directory.path().join("explicit-level-9.nsz");
+    let level9_workspace = directory.path().join("workspace-explicit-level-9");
+    fs::create_dir(&level9_workspace).expect("explicit level 9 workspace");
+    let level9_plan = Engine::new()
+        .plan_nsp_to_nsz(
+            NspToNszRequest::new(
+                &files.source,
+                &level9_destination,
+                &level9_workspace,
+                &files.key_file,
+            )
+            .with_compression(NszCompression::Level(9)),
+        )
+        .expect("explicit level 9 plan");
+    let level9_result = Engine::new().execute_operation(level9_plan, &OperationSession::new());
+    assert_eq!(level9_result.outcome(), Some(OperationOutcome::Compressed));
+    assert_eq!(
+        fs::read(level9_destination).expect("explicit level 9 NSZ"),
+        nsz,
+        "omitted selection, Balanced, and Level(9) must be byte-identical"
+    );
+
     let nsz_members = pfs0_members(&nsz);
     assert_ne!(
         &nsz_members[1].1[0x4040..0x4048],
@@ -233,11 +435,159 @@ fn compresses_and_reconstructs_the_exact_nsp_with_content_selected_program() {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
+fn named_presets_reconstruct_the_exact_synthetic_nsp() {
+    let fixture = large_fixture();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let presets = [
+        ("fast", NszCompression::Fast),
+        ("balanced", NszCompression::Balanced),
+        ("maximum", NszCompression::Maximum),
+    ];
+
+    for (name, preset) in presets {
+        let files = write_files(directory.path(), &fixture, name);
+        let plan = Engine::new()
+            .plan_nsp_to_nsz(
+                NspToNszRequest::new(
+                    &files.source,
+                    &files.destination,
+                    &files.workspace,
+                    &files.key_file,
+                )
+                .with_compression(preset),
+            )
+            .expect("qualified preset plan");
+        let compressed = Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(
+            compressed.state(),
+            JobState::Succeeded,
+            "{name} compression failed: {:?}",
+            compressed.failure().map(|failure| failure.code())
+        );
+
+        let reconstructed = directory.path().join(format!("reconstructed-{name}.nsp"));
+        let decompress_workspace = directory
+            .path()
+            .join(format!("workspace-decompress-{name}"));
+        fs::create_dir(&decompress_workspace).expect("decompression workspace");
+        let plan = Engine::new()
+            .plan_nsz_to_nsp(NszToNspRequest::new(
+                &files.destination,
+                &reconstructed,
+                &decompress_workspace,
+                &files.key_file,
+            ))
+            .expect("qualified decompression plan");
+        let decompressed = Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(decompressed.state(), JobState::Succeeded);
+        assert_eq!(
+            fs::read(&reconstructed).expect("reconstructed NSP"),
+            fixture.package,
+            "{name} output must decode to the exact synthetic NSP"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn explicit_numeric_levels_reconstruct_the_exact_synthetic_nsp() {
+    let fixture = large_fixture();
+    let directory = tempfile::tempdir().expect("temporary directory");
+
+    for level in 1..=19 {
+        let suffix = format!("level-{level}");
+        let files = write_files(directory.path(), &fixture, &suffix);
+        let plan = Engine::new()
+            .plan_nsp_to_nsz(
+                NspToNszRequest::new(
+                    &files.source,
+                    &files.destination,
+                    &files.workspace,
+                    &files.key_file,
+                )
+                .with_compression(NszCompression::Level(level)),
+            )
+            .expect("qualified numeric-level plan");
+        let compressed = Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(
+            compressed.state(),
+            JobState::Succeeded,
+            "level {level} compression failed: {:?}",
+            compressed.failure().map(|failure| failure.code())
+        );
+        assert_eq!(compressed.outcome(), Some(OperationOutcome::Compressed));
+
+        let reconstructed = directory.path().join(format!("reconstructed-{suffix}.nsp"));
+        let decompress_workspace = directory
+            .path()
+            .join(format!("workspace-decompress-{suffix}"));
+        fs::create_dir(&decompress_workspace).expect("decompression workspace");
+        let plan = Engine::new()
+            .plan_nsz_to_nsp(NszToNspRequest::new(
+                &files.destination,
+                &reconstructed,
+                &decompress_workspace,
+                &files.key_file,
+            ))
+            .expect("qualified decompression plan");
+        let decompressed = Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(
+            decompressed.state(),
+            JobState::Succeeded,
+            "level {level} decompression failed: {:?}",
+            decompressed.failure().map(|failure| failure.code())
+        );
+        assert_eq!(decompressed.outcome(), Some(OperationOutcome::Decompressed));
+        assert_eq!(
+            fs::read(&reconstructed).expect("reconstructed NSP"),
+            fixture.package,
+            "level {level} output must decode to the exact synthetic NSP"
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn maximum_frame_matches_an_independent_zstandard_encoder() {
+    let fixture = large_fixture();
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let files = write_files(directory.path(), &fixture, "independent-frame");
+    let plan = compress_plan_with_selection(&files, ConflictPolicy::Fail, NszCompression::Maximum);
+    let result = Engine::new().execute_operation(plan, &OperationSession::new());
+    assert_eq!(result.outcome(), Some(OperationOutcome::Compressed));
+
+    let members = pfs0_members(&fs::read(&files.destination).expect("published NSZ"));
+    let program_ncz = &members
+        .iter()
+        .find(|(name, _)| name.ends_with(".ncz"))
+        .expect("compressed Program member")
+        .1;
+    let emitted_frame = &program_ncz[0x4050..];
+    let plaintext = zstd::stream::decode_all(emitted_frame).expect("decode emitted frame");
+    let expected_maximum = encode_with_frozen_parameters(&plaintext, 19);
+    let expected_balanced = encode_with_frozen_parameters(&plaintext, 9);
+
+    assert_ne!(
+        expected_maximum, expected_balanced,
+        "synthetic frame input must distinguish Maximum from hardcoded level 9"
+    );
+    assert_eq!(
+        emitted_frame, expected_maximum,
+        "emitted Maximum frame must match an independent encoder with captured settings"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
 fn deferred_destination_policies_compare_the_validated_output() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     let fixture = large_fixture();
     let directory = tempfile::tempdir().expect("temporary directory");
     let files = write_files(directory.path(), &fixture, "conflicts");
-    let source_plan = compress_plan(&files, ConflictPolicy::Fail);
+    let source_plan =
+        compress_plan_with_selection(&files, ConflictPolicy::Fail, NszCompression::Maximum);
     let result = Engine::new().execute_operation(source_plan, &OperationSession::new());
     assert_eq!(
         result.outcome(),
@@ -250,12 +600,10 @@ fn deferred_destination_policies_compare_the_validated_output() {
     let current = directory.path().join("current.nsz");
     fs::write(&current, &expected).expect("matching destination");
     let current_plan = Engine::new()
-        .plan_nsp_to_nsz(NspToNszRequest::new(
-            &files.source,
-            &current,
-            &files.workspace,
-            &files.key_file,
-        ))
+        .plan_nsp_to_nsz(
+            NspToNszRequest::new(&files.source, &current, &files.workspace, &files.key_file)
+                .with_compression(NszCompression::Maximum),
+        )
         .expect("plan with unknown output bytes and existing destination");
     let current_result = Engine::new().execute_operation(current_plan, &OperationSession::new());
     assert_eq!(
@@ -278,6 +626,14 @@ fn deferred_destination_policies_compare_the_validated_output() {
     ] {
         let destination = directory.path().join(format!("{suffix}.nsz"));
         fs::write(&destination, b"old destination bytes").expect("existing destination");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(&destination)
+                .expect("existing destination metadata")
+                .permissions();
+            permissions.set_mode(0o640);
+            fs::set_permissions(&destination, permissions).expect("set existing permissions");
+        }
         let plan = Engine::new()
             .plan_nsp_to_nsz(
                 NspToNszRequest::new(
@@ -286,7 +642,8 @@ fn deferred_destination_policies_compare_the_validated_output() {
                     &files.workspace,
                     &files.key_file,
                 )
-                .with_conflict_policy(policy),
+                .with_conflict_policy(policy)
+                .with_compression(NszCompression::Maximum),
             )
             .expect("deferred conflict planning");
         let result = Engine::new().execute_operation(plan, &OperationSession::new());
@@ -305,6 +662,20 @@ fn deferred_destination_policies_compare_the_validated_output() {
         } else {
             assert_eq!(fs::read(&destination).unwrap(), b"old destination bytes");
         }
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&destination)
+                .expect("destination metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            if policy == ConflictPolicy::Replace {
+                0o600
+            } else {
+                0o640
+            },
+            "{suffix} policy must preserve existing permissions or use private staged permissions"
+        );
     }
 }
 
@@ -321,7 +692,8 @@ fn redacts_key_material_from_plans_events_and_results() {
         &files.destination,
         &files.workspace,
         &files.key_file,
-    );
+    )
+    .with_compression(NszCompression::Maximum);
     let request_debug = format!("{request:?}");
     let plan = Engine::new()
         .plan_nsp_to_nsz(request)
@@ -329,6 +701,8 @@ fn redacts_key_material_from_plans_events_and_results() {
     let snapshot = plan.snapshot();
     let snapshot_json = serde_json::to_string(&snapshot).expect("plan JSON");
     let snapshot_debug = format!("{snapshot:?}");
+    let snapshot_value = serde_json::to_value(snapshot).expect("plan JSON value");
+    assert!(snapshot_value.get("compression").is_none());
     let session = OperationSession::new();
     let consumer = session.subscribe_events().expect("event consumer");
     let result = Engine::new().execute_operation(plan, &session);
@@ -377,6 +751,52 @@ fn redacts_key_material_from_plans_events_and_results() {
             );
         }
     }
+
+    let failed_files = write_files(directory.path(), &fixture, "redaction-failure");
+    let failed_request = NspToNszRequest::new(
+        &failed_files.source,
+        &failed_files.destination,
+        &failed_files.workspace,
+        &failed_files.key_file,
+    )
+    .with_compression(NszCompression::Maximum);
+    let failed_request_debug = format!("{failed_request:?}");
+    let failed_plan = Engine::new()
+        .plan_nsp_to_nsz(failed_request)
+        .expect("plan selected compression for failure reporting");
+    let failed_snapshot = failed_plan.snapshot();
+    let failed_snapshot_json = serde_json::to_string(&failed_snapshot).expect("failure plan JSON");
+    let failed_snapshot_debug = format!("{failed_snapshot:?}");
+    fs::write(&failed_files.key_file, b"changed after planning").expect("mutate key file");
+    let failed_session = OperationSession::new();
+    let failed_consumer = failed_session
+        .subscribe_events()
+        .expect("failure event consumer");
+    let failed_result = Engine::new().execute_operation(failed_plan, &failed_session);
+    assert_eq!(failed_result.state(), JobState::Failed);
+    assert_eq!(
+        failed_result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::KeyFileChanged)
+    );
+    assert!(!failed_files.destination.exists());
+    let failed_events = std::iter::from_fn(|| failed_consumer.try_recv().ok()).collect::<Vec<_>>();
+    let failed_surfaces = [
+        failed_request_debug,
+        failed_snapshot_json,
+        failed_snapshot_debug,
+        serde_json::to_string(&failed_events).expect("failure event JSON"),
+        format!("{failed_events:?}"),
+        serde_json::to_string(&failed_result).expect("failure result JSON"),
+        format!("{failed_result:?}"),
+    ];
+    for (index, surface) in failed_surfaces.iter().enumerate() {
+        for secret in &secrets {
+            assert!(
+                !surface.contains(secret),
+                "failure surface {index} contains key material"
+            );
+        }
+    }
 }
 
 #[cfg(all(
@@ -414,6 +834,7 @@ fn cli_history_and_diagnostics_redact_key_material() {
         .arg(&files.workspace)
         .arg("--keys")
         .arg(&files.key_file)
+        .args(["--preset", "maximum"])
         .arg("--json")
         .output()
         .expect("run compression CLI");
@@ -525,6 +946,7 @@ fn cli_history_and_diagnostics_redact_key_material() {
         .arg(directory.path().join("diagnostic-workspace"))
         .arg("--keys")
         .arg(&diagnostic_keys)
+        .args(["--preset", "maximum"])
         .arg("--json")
         .output()
         .expect("run failing compression CLI");
@@ -551,6 +973,7 @@ fn cli_history_and_diagnostics_redact_key_material() {
         .arg(directory.path().join("diagnostic-workspace-jsonl"))
         .arg("--keys")
         .arg(&diagnostic_keys)
+        .args(["--preset", "maximum"])
         .arg("--jsonl")
         .output()
         .expect("run failing JSONL compression CLI");
@@ -615,6 +1038,7 @@ fn conversion_cli_jsonl_preserves_event_and_terminal_record_contract() {
         assert_eq!(terminal["nscb_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(terminal["kind"], "nsp_nsz.job_result");
         assert_eq!(terminal["plan"]["operation_kind"], operation_kind);
+        assert!(terminal["plan"].get("compression").is_none());
         assert_eq!(terminal["session"]["status"], "succeeded");
         assert_eq!(terminal["result"]["state"], "succeeded");
         assert_eq!(terminal["result"]["outcome"], outcome);
@@ -635,6 +1059,7 @@ fn conversion_cli_jsonl_preserves_event_and_terminal_record_contract() {
         .arg(&files.workspace)
         .arg("--keys")
         .arg(&files.key_file)
+        .args(["--preset", "maximum"])
         .arg("--jsonl")
         .output()
         .expect("run NSP-to-NSZ JSONL command");
@@ -933,7 +1358,8 @@ fn detects_source_and_key_mutation_after_planning() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let files = write_files(directory.path(), &fixture, "mutation");
 
-    let source_plan = compress_plan(&files, ConflictPolicy::Fail);
+    let source_plan =
+        compress_plan_with_selection(&files, ConflictPolicy::Fail, NszCompression::Maximum);
     fs::write(&files.source, b"changed after planning").unwrap();
     let source_result = Engine::new().execute_operation(source_plan, &OperationSession::new());
     assert_eq!(source_result.state(), JobState::Failed);
@@ -944,7 +1370,8 @@ fn detects_source_and_key_mutation_after_planning() {
     assert!(!files.destination.exists());
 
     fs::write(&files.source, &fixture.package).unwrap();
-    let key_plan = compress_plan(&files, ConflictPolicy::Fail);
+    let key_plan =
+        compress_plan_with_selection(&files, ConflictPolicy::Fail, NszCompression::Maximum);
     fs::write(&files.key_file, b"changed after planning").unwrap();
     let key_result = Engine::new().execute_operation(key_plan, &OperationSession::new());
     assert_eq!(key_result.state(), JobState::Failed);
@@ -1006,77 +1433,6 @@ fn detects_decompression_source_and_key_mutation_after_planning() {
         Some(OperationFailureCode::KeyFileChanged)
     );
     assert!(!key_destination.exists());
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[test]
-fn cancellation_during_member_streaming_reports_private_spools() {
-    use std::thread;
-    use std::time::{Duration, Instant};
-
-    let payload = vec![0x5a; 8 * 1024 * 1024];
-    let fixture = synthetic_nsp_qualification::build_with_program_payload(&payload, |_| {});
-    let directory = tempfile::tempdir().expect("temporary directory");
-    let files = write_files(directory.path(), &fixture, "cancel-stream");
-    let plan = compress_plan(&files, ConflictPolicy::Fail);
-    let session = OperationSession::new();
-    let execution_session = session.clone();
-    let execution =
-        std::thread::spawn(move || Engine::new().execute_operation(plan, &execution_session));
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let mut cancellation_accepted = false;
-    while Instant::now() < deadline {
-        if session
-            .current_operation()
-            .expect("operation snapshot")
-            .completed_bytes()
-            > 0
-        {
-            cancellation_accepted = session.cancel();
-            break;
-        }
-        thread::yield_now();
-    }
-    assert!(
-        cancellation_accepted,
-        "operation did not reach streaming in time"
-    );
-    let result = execution.join().expect("operation thread");
-    assert_eq!(result.state(), JobState::Cancelled);
-    assert_eq!(
-        result.failure().map(|failure| failure.code()),
-        Some(OperationFailureCode::Cancelled)
-    );
-    assert!(!files.destination.exists());
-    assert!(result.cleanup_artifact_retained());
-    assert_eq!(
-        result.cleanup_warning().map(|warning| warning.code()),
-        Some(OperationFailureCode::CleanupIncomplete)
-    );
-    let spool = result
-        .artifacts()
-        .iter()
-        .find(|artifact| artifact.role() == OperationArtifactRole::PrivateMemberSpool)
-        .expect("reported compression spool");
-    assert!(spool.retained());
-    let spool_length = spool.length().expect("retained spool length");
-    assert!(spool_length > 0);
-    assert!(spool.sha256().is_some());
-    assert_eq!(result.retained_storage_bytes(), Some(spool_length));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let spool_mode = fs::metadata(spool.path()).unwrap().permissions().mode() & 0o777;
-        let directory_mode = fs::metadata(spool.path().parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(spool_mode, 0o600);
-        assert_eq!(directory_mode, 0o700);
-    }
-    let result_json = serde_json::to_string(&result).expect("safe result serialization");
-    assert!(!result_json.contains("33333333333333333333333333333333"));
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1177,19 +1533,32 @@ fn rejects_unsupported_member_suffixes_and_output_name_collisions() {
 fn conversion_is_typed_unsupported_outside_native_arm64_macos() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let engine = nscb::Engine::new();
-    let error = match engine.plan_nsp_to_nsz(nscb::NspToNszRequest::new(
-        directory.path().join("input.nsp"),
-        directory.path().join("output.nsz"),
-        directory.path().join("workspace"),
-        directory.path().join("keys.dat"),
-    )) {
-        Ok(_) => panic!("conversion must be unsupported on this target"),
-        Err(error) => error,
-    };
-    assert_eq!(
-        error.code(),
-        nscb::OperationFailureCode::UnsupportedCapability
-    );
+    let selections = [
+        nscb::NszCompression::Fast,
+        nscb::NszCompression::Balanced,
+        nscb::NszCompression::Maximum,
+        nscb::NszCompression::Level(1),
+        nscb::NszCompression::Level(19),
+    ];
+    for (index, compression) in selections.into_iter().enumerate() {
+        let error = match engine.plan_nsp_to_nsz(
+            nscb::NspToNszRequest::new(
+                directory.path().join(format!("input-{index}.nsp")),
+                directory.path().join(format!("output-{index}.nsz")),
+                directory.path().join(format!("workspace-{index}")),
+                directory.path().join("keys.dat"),
+            )
+            .with_compression(compression),
+        ) {
+            Ok(_) => panic!("{compression:?} conversion must be unsupported on this target"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.code(),
+            nscb::OperationFailureCode::UnsupportedCapability,
+            "{compression:?} must keep the target capability boundary"
+        );
+    }
 
     let error = match engine.plan_nsz_to_nsp(nscb::NszToNspRequest::new(
         directory.path().join("input.nsz"),

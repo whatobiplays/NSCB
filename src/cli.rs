@@ -718,6 +718,7 @@ enum MultiContentInvocation {
         workspace: PathBuf,
         key_file: PathBuf,
         conflict_policy: ConflictPolicy,
+        compression: nscb::NszCompression,
         json: bool,
         jsonl: bool,
     },
@@ -772,6 +773,8 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
     let mut workspace = None;
     let mut conflict_policy = ConflictPolicy::Fail;
     let mut conflict_policy_seen = false;
+    let mut compression = nscb::NszCompression::default();
+    let mut compression_option_seen = false;
     let mut json = false;
     let mut jsonl = false;
     let mut index = 1;
@@ -780,7 +783,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
         index += 1;
         match option {
             "--source" | "--output" | "--output-directory" | "--workspace" | "--keys"
-            | "--conflict-policy" => {
+            | "--conflict-policy" | "--preset" | "--level" => {
                 let value = args.get(index).ok_or(())?;
                 if value.is_empty() {
                     return Err(());
@@ -810,6 +813,23 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                             "skip" => ConflictPolicy::Skip,
                             _ => return Err(()),
                         };
+                    }
+                    "--preset" if is_nsp_to_nsz && !compression_option_seen => {
+                        compression_option_seen = true;
+                        compression = match value.to_str().ok_or(())? {
+                            "fast" => nscb::NszCompression::Fast,
+                            "balanced" => nscb::NszCompression::Balanced,
+                            "maximum" => nscb::NszCompression::Maximum,
+                            _ => return Err(()),
+                        };
+                    }
+                    "--level" if is_nsp_to_nsz && !compression_option_seen => {
+                        compression_option_seen = true;
+                        let level = value.to_str().ok_or(())?.parse::<i32>().map_err(|_| ())?;
+                        compression = nscb::NszCompression::Level(level);
+                        if !(1..=19).contains(&level) {
+                            return Err(());
+                        }
                     }
                     _ => return Err(()),
                 }
@@ -868,6 +888,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
             workspace,
             key_file: key_file.ok_or(())?,
             conflict_policy,
+            compression,
             json,
             jsonl,
         })
@@ -889,8 +910,25 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
 
 #[cfg(test)]
 mod nsp_nsz_cli_tests {
-    use super::parse_multi_content_invocation;
+    use super::{MultiContentInvocation, parse_multi_content_invocation};
     use std::ffi::OsString;
+
+    fn conversion_args(command: &str) -> Vec<OsString> {
+        [
+            command,
+            "--source",
+            "input",
+            "--output",
+            "output",
+            "--workspace",
+            "workspace",
+            "--keys",
+            "keys",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+    }
 
     #[test]
     fn conversion_commands_accept_required_paths_and_keys() {
@@ -924,6 +962,66 @@ mod nsp_nsz_cli_tests {
             assert!(
                 parse_multi_content_invocation(&args).is_ok(),
                 "conversion command rejected its required arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn compression_selection_is_available_only_on_nsp_to_nsz() {
+        let cases = [
+            ("--preset", "fast", nscb::NszCompression::Fast),
+            ("--preset", "balanced", nscb::NszCompression::Balanced),
+            ("--preset", "maximum", nscb::NszCompression::Maximum),
+            ("--level", "1", nscb::NszCompression::Level(1)),
+            ("--level", "19", nscb::NszCompression::Level(19)),
+        ];
+
+        for (option, value, expected) in cases {
+            let mut args = conversion_args("nsp-to-nsz");
+            args.extend([OsString::from(option), OsString::from(value)]);
+            let invocation = parse_multi_content_invocation(&args).expect("valid selection");
+            let MultiContentInvocation::NspToNsz { compression, .. } = invocation else {
+                panic!("compression command must create an NSP-to-NSZ invocation");
+            };
+            assert_eq!(compression, expected);
+        }
+
+        let invocation = parse_multi_content_invocation(&conversion_args("nsp-to-nsz"))
+            .expect("default selection");
+        let MultiContentInvocation::NspToNsz { compression, .. } = invocation else {
+            panic!("compression command must create an NSP-to-NSZ invocation");
+        };
+        assert_eq!(compression, nscb::NszCompression::Balanced);
+
+        for command in ["nsz-to-nsp", "xci-to-nsp"] {
+            for option in ["--preset", "--level"] {
+                let mut args = conversion_args(command);
+                args.extend([OsString::from(option), OsString::from("3")]);
+                assert!(parse_multi_content_invocation(&args).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn compression_selection_rejects_invalid_duplicates_and_conflicts() {
+        let mut invalid = Vec::new();
+        for value in ["", "abc", "1.5", "0", "20", "2147483648"] {
+            invalid.push(vec!["--level", value]);
+        }
+        invalid.push(vec!["--preset"]);
+        invalid.push(vec!["--level"]);
+        invalid.push(vec!["--preset", "unknown"]);
+        invalid.push(vec!["--preset", "fast", "--preset", "balanced"]);
+        invalid.push(vec!["--level", "3", "--level", "4"]);
+        invalid.push(vec!["--preset", "fast", "--level", "9"]);
+        invalid.push(vec!["--level", "9", "--preset", "fast"]);
+
+        for options in invalid {
+            let mut args = conversion_args("nsp-to-nsz");
+            args.extend(options.into_iter().map(OsString::from));
+            assert!(
+                parse_multi_content_invocation(&args).is_err(),
+                "accepted invalid compression options: {args:?}"
             );
         }
     }
@@ -1007,12 +1105,14 @@ fn run_multi_content_command(
             workspace,
             key_file,
             conflict_policy,
+            compression,
             json,
             jsonl,
         } => (
             engine.plan_nsp_to_nsz(
                 nscb::NspToNszRequest::new(source, destination, workspace, key_file)
-                    .with_conflict_policy(conflict_policy),
+                    .with_conflict_policy(conflict_policy)
+                    .with_compression(compression),
             ),
             json,
             jsonl,
@@ -1184,7 +1284,7 @@ fn multi_content_usage(args: &[OsString]) -> &'static str {
         .first()
         .is_some_and(|value| value == OsStr::new("nsp-to-nsz"))
     {
-        "usage: nsp-to-nsz --source NSP --output NSZ --workspace DIR --keys FILE [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+        "usage: nsp-to-nsz --source NSP --output NSZ --workspace DIR --keys FILE [--preset fast|balanced|maximum | --level 1..19] [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     } else if args
         .first()
         .is_some_and(|value| value == OsStr::new("nsz-to-nsp"))
@@ -4336,6 +4436,7 @@ fn exit_for_operation_failure(code: OperationFailureCode) -> i32 {
         | OperationFailureCode::InsufficientStorage
         | OperationFailureCode::DuplicateContentMember
         | OperationFailureCode::InvalidContentPackage
+        | OperationFailureCode::InvalidCompressionLevel
         | OperationFailureCode::UnsupportedContentProfile
         | OperationFailureCode::AmbiguousContentGrouping
         | OperationFailureCode::InvalidXciImage
@@ -6939,6 +7040,14 @@ mod copy_cli_tests {
 
     #[test]
     fn operation_failure_exit_classes_are_stable() {
+        assert_eq!(
+            OperationFailureCode::InvalidCompressionLevel.as_str(),
+            "invalid_compression_level"
+        );
+        assert_eq!(
+            exit_for_operation_failure(OperationFailureCode::InvalidCompressionLevel),
+            3
+        );
         assert_eq!(
             exit_for_operation_failure(OperationFailureCode::DestinationConflict),
             4
