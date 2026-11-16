@@ -145,6 +145,16 @@ fn compresses_and_reconstructs_the_exact_nsp_with_content_selected_program() {
     assert_eq!(compressed.outcome(), Some(OperationOutcome::Compressed));
     let nsz = fs::read(&files.destination).expect("published NSZ");
     let nsz_members = pfs0_members(&nsz);
+    assert_ne!(
+        &nsz_members[1].1[0x4040..0x4048],
+        &[0; 8],
+        "the supported NCZ counter contains a nonzero low half"
+    );
+    assert_eq!(
+        &nsz_members[1].1[0x4048..0x4050],
+        &[0; 8],
+        "the NCZ record reserves the high counter half as zero"
+    );
     assert_eq!(nsz_members[0].0, "program.nca");
     assert_eq!(nsz_members[1].0, "meta.cnmt.ncz");
     #[cfg(unix)]
@@ -642,6 +652,29 @@ fn rejects_truncated_and_corrupt_ncz_frames() {
         );
         assert!(!destination.exists());
     }
+
+    let mut program_ncz = compressed_members[1].1.clone();
+    // The NCZ frame begins at 0x4050; byte 5 is its first content-size byte.
+    program_ncz[0x4055] ^= 0x01;
+    let source_package = synthetic_nsp_qualification::package_with_named_members(
+        &fixture.meta_nca,
+        &program_ncz,
+        "program.nca",
+        "meta.cnmt.ncz",
+    );
+    let source = directory.path().join("mismatched-frame-size.nsz");
+    let destination = directory.path().join("mismatched-frame-size.nsp");
+    let workspace = directory.path().join("workspace-mismatched-frame-size");
+    fs::create_dir(&workspace).unwrap();
+    fs::write(&source, source_package).unwrap();
+    let plan = decompress_plan(&source, &destination, &files.key_file, &workspace);
+    let result = Engine::new().execute_operation(plan, &OperationSession::new());
+    assert_eq!(result.state(), JobState::Failed);
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::ValidationFailed)
+    );
+    assert!(!destination.exists());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -954,13 +987,28 @@ fn rejects_unsupported_member_suffixes_and_output_name_collisions() {
 #[test]
 fn conversion_is_typed_unsupported_outside_native_arm64_macos() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let error = match nscb::Engine::new().plan_nsp_to_nsz(nscb::NspToNszRequest::new(
+    let engine = nscb::Engine::new();
+    let error = match engine.plan_nsp_to_nsz(nscb::NspToNszRequest::new(
         directory.path().join("input.nsp"),
         directory.path().join("output.nsz"),
         directory.path().join("workspace"),
         directory.path().join("keys.dat"),
     )) {
         Ok(_) => panic!("conversion must be unsupported on this target"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.code(),
+        nscb::OperationFailureCode::UnsupportedCapability
+    );
+
+    let error = match engine.plan_nsz_to_nsp(nscb::NszToNspRequest::new(
+        directory.path().join("input.nsz"),
+        directory.path().join("output.nsp"),
+        directory.path().join("workspace"),
+        directory.path().join("keys.dat"),
+    )) {
+        Ok(_) => panic!("decompression must be unsupported on this target"),
         Err(error) => error,
     };
     assert_eq!(

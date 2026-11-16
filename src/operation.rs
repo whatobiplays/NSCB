@@ -2366,9 +2366,21 @@ struct NspNszPlan {
     key_file: ResolvedFile,
     key_baseline: FileEvidence,
     source_facts: Option<crate::nsp_semantic_qualification::NspSemanticQualificationFacts>,
+    compression_settings: Option<crate::nsp_nsz::NczCompressionSettings>,
     output_upper_bound: u64,
     known_output_length: Option<u64>,
     spool_bytes: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl NspNszPlan {
+    fn compression_settings(
+        &self,
+    ) -> Result<&crate::nsp_nsz::NczCompressionSettings, OperationFailureCode> {
+        self.compression_settings
+            .as_ref()
+            .ok_or(OperationFailureCode::StalePlan)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2680,11 +2692,18 @@ fn plan_nsp_nsz_unix(
         String::from("nca_header_key"),
         String::from("key_area_key_application_00"),
     ];
+    let compression_settings = match direction {
+        crate::nsp_nsz::NspNszDirection::NspToNsz => {
+            Some(crate::nsp_nsz::NczCompressionSettings::for_plan())
+        }
+        crate::nsp_nsz::NspNszDirection::NszToNsp => None,
+    };
     plan.nsp_nsz = Some(NspNszPlan {
         package,
         key_file,
         key_baseline,
         source_facts,
+        compression_settings,
         output_upper_bound,
         known_output_length,
         spool_bytes,
@@ -6071,6 +6090,7 @@ fn produce_nsp_nsz(
                     source_file,
                     program,
                     &crypto,
+                    conversion.compression_settings()?,
                     &mut program_spool,
                     |written| {
                         completed = completed
@@ -6260,6 +6280,36 @@ mod nsp_nsz_publication_tests {
                 ))
                 .expect("plan compression")
         }
+    }
+
+    #[test]
+    fn compression_execution_uses_settings_frozen_in_plan() {
+        let root = tempfile::tempdir().expect("create conversion fixture");
+        let fixture = crate::synthetic_nsp_qualification::build_with_program_payload(
+            &vec![0xa5; 0x9000],
+            |_| {},
+        );
+        let source = root.path().join("codec-settings.nsp");
+        let key_file = root.path().join("codec-settings-keys.dat");
+        let destination = root.path().join("codec-settings.nsz");
+        let workspace = root.path().join("codec-settings-workspace");
+        fs::write(&source, fixture.package).expect("write synthetic NSP");
+        fs::write(&key_file, fixture.key_file).expect("write synthetic keys");
+
+        let plan = conversion_plan(false, &source, &destination, &key_file, &workspace);
+        let conversion = plan.nsp_nsz.as_ref().expect("planned conversion");
+        let frozen = conversion
+            .compression_settings
+            .as_ref()
+            .expect("compression settings captured during planning");
+        assert_eq!(frozen, &crate::nsp_nsz::NczCompressionSettings::for_plan());
+        let execution_settings = conversion
+            .compression_settings()
+            .expect("execution settings available");
+        assert!(std::ptr::eq(frozen, execution_settings));
+
+        let result = crate::Engine::new().execute_operation(plan, &OperationSession::new());
+        assert_eq!(result.outcome(), Some(OperationOutcome::Compressed));
     }
 
     #[test]

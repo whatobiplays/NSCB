@@ -46,6 +46,25 @@ checks. Byte-identical output returns `AlreadyUpToDate`; otherwise the
 operation applies the requested Fail, Skip, or Replace policy using the
 existing publication path.
 
+## Frozen compression settings
+
+An NSP-to-NSZ plan records its private encoder settings without changing the
+public Operation Plan snapshot. The plan fixes the Zstandard codec identity and
+version, compression level 9, window log 27, checksum enabled, content size
+enabled, zero worker threads, and no dictionary. Execution passes these stored
+settings to the encoder and rejects a codec-version mismatch.
+
+The project pins `zstd` 0.14.4, `zstd-safe` 8.3.0, and
+`zstd-sys` 2.1.3+zstd.1.5.7. The plan captures the linked Zstandard version at
+construction. The current build omits the `zstdmt` feature, so the recorded
+zero worker count selects single-threaded compression.
+
+Level 9 is the concrete compression level assigned to the first-slice
+Balanced default by ADR-0022. It retains the setting used for the synthetic
+upstream interoperability check. No benchmark comparison establishes it as
+optimal. The broader preset and numeric selection API remains outside this
+slice.
+
 ## NCZ format limits
 
 The writer preserves the first `0x4000` Program NCA bytes and writes one

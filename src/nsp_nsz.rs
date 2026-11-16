@@ -185,11 +185,53 @@ pub(crate) const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const MAX_PFS0_METADATA_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "macos")]
-const ZSTD_WINDOW_LOG: u32 = 27;
+const DEFAULT_ZSTD_WINDOW_LOG: u32 = 27;
 #[cfg(target_os = "macos")]
-const ZSTD_COMPRESSION_LEVEL: i32 = 9;
+const DEFAULT_ZSTD_COMPRESSION_LEVEL: i32 = 9;
 #[cfg(target_os = "macos")]
 const IO_BUFFER_SIZE: usize = 64 * 1024;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NczCodecIdentity {
+    Zstandard,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NczDictionaryPolicy {
+    None,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NczCompressionSettings {
+    codec: NczCodecIdentity,
+    codec_version: &'static str,
+    compression_level: i32,
+    window_log: u32,
+    checksum: bool,
+    content_size: bool,
+    worker_threads: u32,
+    dictionary: NczDictionaryPolicy,
+}
+
+#[cfg(target_os = "macos")]
+impl NczCompressionSettings {
+    #[cfg(target_arch = "aarch64")]
+    pub(crate) fn for_plan() -> Self {
+        Self {
+            codec: NczCodecIdentity::Zstandard,
+            codec_version: zstd::zstd_safe::version_string(),
+            compression_level: DEFAULT_ZSTD_COMPRESSION_LEVEL,
+            window_log: DEFAULT_ZSTD_WINDOW_LOG,
+            checksum: true,
+            content_size: true,
+            worker_threads: 0,
+            dictionary: NczDictionaryPolicy::None,
+        }
+    }
+}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn inspect_package(
@@ -628,10 +670,21 @@ pub(crate) fn encode_ncz_member(
     source: &mut std::fs::File,
     member: &NspNszMember,
     crypto: &ProgramCrypto,
+    settings: &NczCompressionSettings,
     output: &mut std::fs::File,
     mut on_chunk: impl FnMut(u64) -> Result<(), NspNszFormatError>,
 ) -> Result<(), NspNszFormatError> {
     use std::io::{Read, Seek, SeekFrom, Write};
+
+    if settings.codec != NczCodecIdentity::Zstandard
+        || settings.codec_version != zstd::zstd_safe::version_string()
+        || settings.worker_threads != 0
+    {
+        return Err(NspNszFormatError::UnsupportedProfile);
+    }
+    match settings.dictionary {
+        NczDictionaryPolicy::None => {}
+    }
 
     if member.role != NspNszMemberRole::Program {
         return Err(NspNszFormatError::UnsupportedProfile);
@@ -714,16 +767,16 @@ pub(crate) fn encode_ncz_member(
         .seek(SeekFrom::Start(start))
         .map_err(|_| NspNszFormatError::InvalidPackage)?;
 
-    let mut encoder = zstd::stream::write::Encoder::new(&mut limited, ZSTD_COMPRESSION_LEVEL)
+    let mut encoder = zstd::stream::write::Encoder::new(&mut limited, settings.compression_level)
         .map_err(|_| NspNszFormatError::OutputIo)?;
     encoder
-        .window_log(ZSTD_WINDOW_LOG)
+        .window_log(settings.window_log)
         .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
     encoder
-        .include_checksum(true)
+        .include_checksum(settings.checksum)
         .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
     encoder
-        .include_contentsize(true)
+        .include_contentsize(settings.content_size)
         .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
     encoder
         .set_pledged_src_size(Some(suffix_size))
@@ -813,7 +866,7 @@ pub(crate) fn decode_ncz_member(
         .map_err(|_| source_io_tracker.zstd_error())?
         .single_frame();
     decoder
-        .window_log_max(ZSTD_WINDOW_LOG)
+        .window_log_max(DEFAULT_ZSTD_WINDOW_LOG)
         .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
 
     let mut raw_counter = Zeroizing::new([0_u8; 8]);
@@ -880,12 +933,12 @@ fn apply_ctr_at_nca_offset(
     let block = (section_offset / 16)
         .checked_add(section_relative_offset / 16)
         .ok_or(NspNszFormatError::ResourceLimit)?;
-    let mut counter = [0_u8; 16];
+    let mut counter = Zeroizing::new([0_u8; 16]);
     for (destination, source) in counter[..8].iter_mut().zip(raw_counter.iter().rev()) {
         *destination = *source;
     }
     counter[8..].copy_from_slice(&block.to_be_bytes());
-    let mut cipher = Ctr128BE::<Aes128>::new_from_slices(key, &counter)
+    let mut cipher = Ctr128BE::<Aes128>::new_from_slices(key, &counter[..])
         .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
     let skip = usize::try_from(section_relative_offset % 16)
         .map_err(|_| NspNszFormatError::ResourceLimit)?;
