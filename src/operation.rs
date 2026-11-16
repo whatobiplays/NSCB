@@ -2372,7 +2372,7 @@ struct NspNszPlan {
     spool_bytes: u64,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 impl NspNszPlan {
     fn compression_settings(
         &self,
