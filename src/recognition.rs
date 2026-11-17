@@ -1246,7 +1246,9 @@ pub(crate) fn recognize<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::{Cursor, Write};
+    use std::io::Cursor;
+    #[cfg(target_os = "macos")]
+    use std::io::Write;
 
     #[test]
     fn nca_allocation_failure_maps_to_a_recognition_resource_limit() {

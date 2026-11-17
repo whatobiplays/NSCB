@@ -108,6 +108,11 @@ cancellation checkpoint tests. A separately instrumented standalone CLI run
 converted the upstream fixture, and its invalid-argument and usage paths
 completed with their expected CLI errors.
 
+The first draft CI run found that `Write` was imported unconditionally even
+though only a macOS-gated sparse-XCI test uses it. The import is now gated by
+the same platform condition, and pinned Linux all-target strict Clippy passes.
+The updated commit's CI result is tracked separately on the draft PR.
+
 The x86_64-apple-darwin target passed `cargo check --locked --all-targets
 --all-features` with Rust 1.98.1. The x86_64-unknown-linux-gnu target also
 passed `cargo check --locked --all-targets --all-features` with Rust 1.98.1,
