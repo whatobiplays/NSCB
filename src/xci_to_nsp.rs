@@ -83,13 +83,40 @@ struct DetectedMember {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn qualify_xci(
-    mut source_file: std::fs::File,
+    source_file: std::fs::File,
     source_path: &std::path::Path,
     source_length: u64,
     key_file: &std::path::Path,
     expected_source_snapshot: crate::file_identity::FileSnapshot,
     expected_key_snapshot: crate::file_identity::FileSnapshot,
 ) -> Result<XciToNspPackagePlan, OperationFailureCode> {
+    qualify_xci_with_cancellation_probe(
+        source_file,
+        source_path,
+        source_length,
+        key_file,
+        expected_source_snapshot,
+        expected_key_snapshot,
+        || false,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn qualify_xci_with_cancellation_probe<F>(
+    mut source_file: std::fs::File,
+    source_path: &std::path::Path,
+    source_length: u64,
+    key_file: &std::path::Path,
+    expected_source_snapshot: crate::file_identity::FileSnapshot,
+    expected_key_snapshot: crate::file_identity::FileSnapshot,
+    mut is_cancelled: F,
+) -> Result<XciToNspPackagePlan, OperationFailureCode>
+where
+    F: FnMut() -> bool,
+{
+    if is_cancelled() {
+        return Err(OperationFailureCode::Cancelled);
+    }
     let source = crate::recognition::inspect_xci_for_conversion(&mut source_file, source_length)
         .map_err(map_recognition_error)?;
     if !matches!(source.secure_members.len(), 2 | 3) {
@@ -101,7 +128,7 @@ pub(crate) fn qualify_xci(
         .try_reserve_exact(source.secure_members.len())
         .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
     for member in source.secure_members {
-        let sha256 = hash_member(&mut source_file, &member)?;
+        let sha256 = hash_member(&mut source_file, &member, &mut is_cancelled)?;
         detected.push(DetectedMember {
             source: member,
             sha256,
@@ -149,8 +176,12 @@ pub(crate) fn qualify_xci(
             )
             .map_err(|_| OperationFailureCode::SourceChanged)?;
             let qualification =
-                crate::nsp_semantic_qualification::qualify_with_input(request, virtual_input)
-                    .map_err(|error| map_qualification_error(error.code()))?;
+                crate::nsp_semantic_qualification::qualify_with_input_and_cancellation_probe(
+                    request,
+                    virtual_input,
+                    &mut is_cancelled,
+                )
+                .map_err(|error| map_qualification_error(error.code()))?;
             let facts = match qualification.outcome {
                 NspSemanticQualificationOutcome::Qualified(facts) => facts,
                 NspSemanticQualificationOutcome::NotQualified(_) => {
@@ -498,6 +529,7 @@ impl crate::nsp_semantic_qualification::NspSemanticInput for XciPfs0Input {
 fn hash_member(
     source: &mut std::fs::File,
     member: &crate::recognition::XciSecureMember,
+    is_cancelled: &mut impl FnMut() -> bool,
 ) -> Result<crate::sha256::Sha256Digest, OperationFailureCode> {
     use sha2::{Digest, Sha256};
     use std::io::{Read, Seek, SeekFrom};
@@ -509,6 +541,9 @@ fn hash_member(
     let mut buffer = [0_u8; 64 * 1024];
     let mut hasher = Sha256::new();
     while remaining > 0 {
+        if is_cancelled() {
+            return Err(OperationFailureCode::Cancelled);
+        }
         let count = usize::try_from(remaining.min(buffer.len() as u64))
             .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
         let read = source
@@ -527,7 +562,7 @@ fn hash_member(
 }
 
 #[cfg(target_os = "macos")]
-fn map_recognition_error(
+pub(crate) fn map_recognition_error(
     error: crate::recognition::ContentRecognitionError,
 ) -> OperationFailureCode {
     use crate::recognition::ContentRecognitionErrorCode as Code;
@@ -646,6 +681,37 @@ mod tests {
         assert!(
             result.is_err(),
             "a different source snapshot must be rejected"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn member_hashing_stops_between_bounded_chunks_when_cancelled() {
+        use std::io::{Seek, SeekFrom, Write};
+
+        let mut source = tempfile::tempfile().expect("create member source");
+        let bytes = vec![0xA5; 128 * 1024];
+        source.write_all(&bytes).expect("write member source");
+        source
+            .seek(SeekFrom::Start(0))
+            .expect("rewind member source");
+        let member = crate::recognition::XciSecureMember {
+            name: String::from("program.nca"),
+            offset: 0,
+            length: u64::try_from(bytes.len()).expect("member size fits u64"),
+        };
+        let mut probes = 0;
+        let error = hash_member(&mut source, &member, &mut || {
+            probes += 1;
+            probes > 1
+        })
+        .expect_err("cancellation between member chunks must stop hashing");
+
+        assert_eq!(probes, 2);
+        assert_eq!(error, OperationFailureCode::Cancelled);
+        assert_eq!(
+            source.stream_position().expect("member file position"),
+            64 * 1024
         );
     }
 

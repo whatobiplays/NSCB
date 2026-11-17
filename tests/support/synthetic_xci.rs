@@ -45,6 +45,27 @@ fn canonical_package(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
     canonical_package_members(&[("meta.nca", meta_nca), ("program.nca", program_nca)])
 }
 
+/// Builds an uncompressed XCI containing the two-member synthetic Application.
+pub fn xci(meta_nca: &[u8], program_nca: &[u8], package: &[u8], key_file: &[u8]) -> Fixture {
+    let secure_members = [
+        Member {
+            name: "meta.nca",
+            bytes: meta_nca,
+        },
+        Member {
+            name: "program.nca",
+            bytes: program_nca,
+        },
+    ];
+    build_profile_with_members(
+        &secure_members,
+        &["update", "normal", "secure"],
+        None,
+        package.to_vec(),
+        key_file.to_vec(),
+    )
+}
+
 fn canonical_package_members(members: &[(&str, &[u8])]) -> Vec<u8> {
     let mut strings = Vec::new();
     let mut entries = Vec::new();
@@ -156,6 +177,101 @@ pub fn build(
         None,
         &[],
     )
+}
+
+/// Builds an upstream-style XCZ fixture with an expanded root HFS0 header,
+/// zero-sized entry hashes, and the original root digest retained in the card
+/// header. The supplied Program member is an NCZ produced by the qualified
+/// encoder used by the tests.
+pub fn xcz(meta_nca: &[u8], program_ncz: &[u8], package: &[u8], key_file: &[u8]) -> Fixture {
+    let secure_members = [
+        Member {
+            name: "meta.nca",
+            bytes: meta_nca,
+        },
+        Member {
+            name: "program.ncz",
+            bytes: program_ncz,
+        },
+    ];
+    let mut fixture = build_profile_with_members(
+        &secure_members,
+        &["update", "normal", "secure"],
+        None,
+        package.to_vec(),
+        key_file.to_vec(),
+    );
+
+    for entry in fixture.root_entries.iter().take(2) {
+        fixture.image[entry.data_offset + 8..entry.data_offset + 12]
+            .copy_from_slice(&1_u32.to_le_bytes());
+        fixture.image[entry.data_offset + 16] = 0;
+    }
+
+    let original_root_size = u64::from_le_bytes(
+        fixture.image[0x138..0x140]
+            .try_into()
+            .expect("fixed synthetic card-header field"),
+    );
+    let original_root_start = ROOT_OFFSET;
+    let original_root_end = original_root_start
+        .checked_add(usize::try_from(original_root_size).expect("small synthetic root header"))
+        .expect("synthetic root span fits usize");
+    let original_digest = Sha256::digest(&fixture.image[original_root_start..original_root_end]);
+    fixture.image[0x140..0x160].copy_from_slice(&original_digest);
+
+    let expanded_root_size = 0x8000_u64;
+    let padding = usize::try_from(expanded_root_size - original_root_size)
+        .expect("synthetic root padding fits usize");
+    fixture.image.splice(
+        original_root_end..original_root_end,
+        std::iter::repeat_n(0, padding),
+    );
+    fixture.image[0x138..0x140].copy_from_slice(&expanded_root_size.to_le_bytes());
+
+    for entry in &mut fixture.root_entries {
+        let offset = u64::from_le_bytes(
+            fixture.image[entry.table_offset..entry.table_offset + 8]
+                .try_into()
+                .expect("fixed synthetic HFS0 offset field"),
+        );
+        let shifted = offset
+            .checked_add(u64::try_from(padding).expect("synthetic padding fits u64"))
+            .expect("synthetic HFS0 offset fits u64");
+        fixture.image[entry.table_offset..entry.table_offset + 8]
+            .copy_from_slice(&shifted.to_le_bytes());
+        entry.data_offset = entry
+            .data_offset
+            .checked_add(padding)
+            .expect("synthetic root member offset fits usize");
+        fixture.image[entry.table_offset + 20..entry.table_offset + 24]
+            .copy_from_slice(&0_u32.to_le_bytes());
+        fixture.image[entry.table_offset + 32..entry.table_offset + 64].fill(0);
+    }
+    for entry in &mut fixture.secure_entries {
+        entry.table_offset = entry
+            .table_offset
+            .checked_add(padding)
+            .expect("synthetic nested table offset fits usize");
+        entry.data_offset = entry
+            .data_offset
+            .checked_add(padding)
+            .expect("synthetic nested member offset fits usize");
+        fixture.image[entry.table_offset + 20..entry.table_offset + 24]
+            .copy_from_slice(&0_u32.to_le_bytes());
+        fixture.image[entry.table_offset + 32..entry.table_offset + 64].fill(0);
+    }
+
+    let secure = fixture.root_entries[2].data_offset;
+    let rom_page = u32::try_from(
+        secure
+            .checked_add(0x1000)
+            .expect("synthetic physical card offset fits usize")
+            / 0x200,
+    )
+    .expect("synthetic RomArea page fits u32");
+    fixture.image[0x104..0x108].copy_from_slice(&rom_page.to_le_bytes());
+    fixture
 }
 
 pub fn with_nonempty_partition(partition_name: &str) -> Fixture {

@@ -91,6 +91,15 @@ impl Engine {
         crate::operation::plan_xci_to_nsp(request)
     }
 
+    /// Plans reconstruction of one rights-free Application XCZ as an XCI.
+    /// Execution is qualified only on native macOS arm64.
+    pub fn plan_xcz_to_xci(
+        &self,
+        request: crate::xcz_to_xci::XczToXciRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_xcz_to_xci(request.into_parts())
+    }
+
     /// Plans compression of one semantically qualified NSP into a standard NSZ.
     ///
     /// The plan records source, key-file, and destination evidence. It does not

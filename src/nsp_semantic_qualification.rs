@@ -494,6 +494,28 @@ pub(crate) fn qualify_with_input<I: NspSemanticInput>(
     qualify_input_inner(request, input, &mut checkpoint)
 }
 
+/// Qualifies a bounded virtual package and checks cancellation at each work checkpoint.
+#[cfg(target_os = "macos")]
+pub(crate) fn qualify_with_input_and_cancellation_probe<I, F>(
+    request: NspSemanticQualificationRequest,
+    input: I,
+    mut is_cancelled: F,
+) -> Result<NspSemanticQualificationResult, NspSemanticQualificationError>
+where
+    I: NspSemanticInput,
+    F: FnMut() -> bool,
+{
+    let cancellation = crate::CancellationHandle::new();
+    let request = request.with_cancellation(cancellation.clone());
+    let mut checkpoint = |_| {
+        if is_cancelled() {
+            cancellation.cancel();
+        }
+    };
+    check_cancelled(&request)?;
+    qualify_input_inner(request, input, &mut checkpoint)
+}
+
 #[cfg(target_os = "macos")]
 /// Private profile tag for the three-member conversion evidence.
 /// Control IVFC and RomFS integrity facts are recorded by the Control NCA qualifier.
@@ -1861,12 +1883,15 @@ impl<R: Read + Seek> Seek for BoundedReader<'_, R> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "macos")]
-    use super::qualify_application_with_control_path_and_probe;
     use super::{
         BoundedReader, Checkpoint, MAX_INPUT_BYTES, MemberQualificationProfile,
         NspSemanticQualificationErrorCode, NspSemanticQualificationRequest, parse_section_regions,
         qualify_with_checkpoint, read_nca_member, try_reserve_vec, validate_input_size,
+    };
+    #[cfg(target_os = "macos")]
+    use super::{
+        open_snapshot_file, qualify_application_with_control_path_and_probe,
+        qualify_with_input_and_cancellation_probe,
     };
     use crate::CancellationHandle;
     use crate::engine::ContainerProbeEntry;
@@ -2220,6 +2245,31 @@ mod tests {
             }
         })
         .expect_err("cancellation at the last chunk must not become a result");
+        assert_eq!(error.code(), NspSemanticQualificationErrorCode::Cancelled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn virtual_input_cancellation_probe_stops_at_a_source_hash_checkpoint() {
+        let input = TempFile::new(b"not a PFS0 container");
+        let request = NspSemanticQualificationRequest::new(
+            input.path(),
+            "/key-file-is-not-opened-for-invalid-container",
+        );
+        let opened_input = open_snapshot_file(
+            input.path(),
+            NspSemanticQualificationErrorCode::InputUnavailable,
+            NspSemanticQualificationErrorCode::InputChangedDuringQualification,
+        )
+        .expect("open bounded semantic input");
+        let mut probes = 0;
+        let error = qualify_with_input_and_cancellation_probe(request, opened_input, || {
+            probes += 1;
+            true
+        })
+        .expect_err("cancellation at a source hash checkpoint must stop qualification");
+
+        assert_eq!(probes, 1);
         assert_eq!(error.code(), NspSemanticQualificationErrorCode::Cancelled);
     }
 

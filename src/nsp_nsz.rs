@@ -8,6 +8,13 @@
 use crate::operation::ConflictPolicy;
 use std::path::PathBuf;
 
+#[cfg(target_os = "macos")]
+use crate::ncz::SpanReader;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) use crate::ncz::ZeroizingBuffer;
+#[cfg(target_os = "macos")]
+pub(crate) use crate::ncz::{DEFAULT_ZSTD_WINDOW_LOG, NCZ_FRAME_OFFSET, read_ncz_record};
+
 /// Selects a supported Zstandard compression level for an NSZ output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
@@ -218,19 +225,11 @@ pub(crate) enum NspNszFormatError {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) const NCZ_PREFIX_SIZE: u64 = 0x4000;
-#[cfg(target_os = "macos")]
-const NCZ_TABLE_OFFSET: u64 = 0x4010;
-#[cfg(target_os = "macos")]
-const NCZ_RECORD_SIZE: u64 = 64;
-#[cfg(target_os = "macos")]
-const NCZ_FRAME_OFFSET: u64 = NCZ_TABLE_OFFSET + NCZ_RECORD_SIZE;
+pub(crate) use crate::ncz::NCZ_PREFIX_SIZE;
 #[cfg(target_os = "macos")]
 pub(crate) const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const MAX_PFS0_METADATA_BYTES: usize = 1024 * 1024;
-#[cfg(target_os = "macos")]
-const DEFAULT_ZSTD_WINDOW_LOG: u32 = 27;
 #[cfg(target_os = "macos")]
 const QUALIFIED_ZSTD_VERSION: &str = "1.5.7";
 #[cfg(target_os = "macos")]
@@ -491,7 +490,7 @@ fn pfs0_payload_is_accounted(probe: &crate::engine::ContainerProbeResult) -> boo
 }
 
 #[cfg(target_os = "macos")]
-fn validate_supported_header(
+pub(crate) fn validate_supported_header(
     block: &[u8; crate::nca::HEADER_SIZE],
     header: &crate::nca::Header,
     nca_size: u64,
@@ -586,92 +585,6 @@ fn hash_span(
     ))
 }
 
-#[cfg(target_os = "macos")]
-struct NczRecord {
-    nca_size: u64,
-    section_offset: u64,
-    section_size: u64,
-    frame_offset: u64,
-    frame_size: u64,
-    key: zeroize::Zeroizing<[u8; 16]>,
-    counter: zeroize::Zeroizing<[u8; 16]>,
-}
-
-#[cfg(target_os = "macos")]
-fn read_ncz_record<R: std::io::Read + std::io::Seek>(
-    member: &mut SpanReader<R>,
-    member_size: u64,
-) -> Result<NczRecord, NspNszFormatError> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    if member_size <= NCZ_FRAME_OFFSET {
-        return Err(NspNszFormatError::InvalidPackage);
-    }
-    member
-        .seek(SeekFrom::Start(NCZ_PREFIX_SIZE))
-        .map_err(|_| NspNszFormatError::SourceIo)?;
-    let mut marker = [0_u8; 8];
-    member.read_exact(&mut marker).map_err(map_ncz_read_error)?;
-    if &marker != b"NCZSECTN" {
-        return Err(NspNszFormatError::InvalidPackage);
-    }
-    let mut count = [0_u8; 8];
-    member.read_exact(&mut count).map_err(map_ncz_read_error)?;
-    if u64::from_le_bytes(count) != 1 {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-
-    let mut record = zeroize::Zeroizing::new([0_u8; NCZ_RECORD_SIZE as usize]);
-    member
-        .read_exact(&mut record[..])
-        .map_err(map_ncz_read_error)?;
-    let offset = u64::from_le_bytes(record[0..8].try_into().expect("fixed NCZ field"));
-    let section_size = u64::from_le_bytes(record[8..16].try_into().expect("fixed NCZ field"));
-    let crypto_type = u64::from_le_bytes(record[16..24].try_into().expect("fixed NCZ field"));
-    if offset > NCZ_PREFIX_SIZE
-        || section_size == 0
-        || crypto_type != 3
-        || record[24..32].iter().any(|byte| *byte != 0)
-        || record[56..64].iter().any(|byte| *byte != 0)
-    {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-    let nca_size = offset
-        .checked_add(section_size)
-        .ok_or(NspNszFormatError::ResourceLimit)?;
-    if nca_size <= NCZ_PREFIX_SIZE {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-    let frame_size = member_size
-        .checked_sub(NCZ_FRAME_OFFSET)
-        .filter(|size| *size > 0)
-        .ok_or(NspNszFormatError::InvalidPackage)?;
-    member
-        .seek(SeekFrom::Start(NCZ_FRAME_OFFSET))
-        .map_err(|_| NspNszFormatError::SourceIo)?;
-    let mut frame_marker = [0_u8; 8];
-    member
-        .read_exact(&mut frame_marker)
-        .map_err(map_ncz_read_error)?;
-    if &frame_marker == b"NCZBLOCK" {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-
-    let mut key = zeroize::Zeroizing::new([0_u8; 16]);
-    key.copy_from_slice(&record[32..48]);
-    let mut counter = zeroize::Zeroizing::new([0_u8; 16]);
-    counter.copy_from_slice(&record[48..64]);
-    Ok(NczRecord {
-        nca_size,
-        section_offset: offset,
-        section_size,
-        frame_offset: NCZ_FRAME_OFFSET,
-        frame_size,
-        key,
-        counter,
-    })
-}
-
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn read_program_crypto(
     source: &mut std::fs::File,
@@ -727,6 +640,39 @@ pub(crate) fn ncz_member_bound(nca_size: u64) -> Result<u64, NspNszFormatError> 
     NCZ_FRAME_OFFSET
         .checked_add(frame_bound)
         .ok_or(NspNszFormatError::ResourceLimit)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn copy_file_span<W: std::io::Write>(
+    source: &mut std::fs::File,
+    offset: u64,
+    length: u64,
+    output: &mut W,
+    on_chunk: &mut impl FnMut(u64) -> Result<(), NspNszFormatError>,
+) -> Result<(), NspNszFormatError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|_| NspNszFormatError::SourceIo)?;
+    let mut remaining = length;
+    let mut buffer = ZeroizingBuffer::new();
+    while remaining > 0 {
+        let wanted = usize::try_from(remaining.min(IO_BUFFER_SIZE as u64))
+            .map_err(|_| NspNszFormatError::ResourceLimit)?;
+        let read = source
+            .read(&mut buffer.0[..wanted])
+            .map_err(|_| NspNszFormatError::SourceIo)?;
+        if read == 0 {
+            return Err(NspNszFormatError::InvalidPackage);
+        }
+        output
+            .write_all(&buffer.0[..read])
+            .map_err(|_| NspNszFormatError::OutputIo)?;
+        remaining -= u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?;
+        on_chunk(u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?)?;
+    }
+    Ok(())
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -888,186 +834,29 @@ pub(crate) fn decode_ncz_member(
     source: &mut std::fs::File,
     member: &NspNszMember,
     output: &mut std::fs::File,
-    mut on_chunk: impl FnMut(u64) -> Result<(), NspNszFormatError>,
+    on_chunk: impl FnMut(u64) -> Result<(), NspNszFormatError>,
 ) -> Result<(), NspNszFormatError> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use zeroize::Zeroizing;
-
     if member.role != NspNszMemberRole::Program {
         return Err(NspNszFormatError::UnsupportedProfile);
     }
-    let source_offset = member.source_offset;
-    let source_size = member.source_size;
-    let expected_nca_size = member.nca_size;
     let section_offset = member
         .section_offset
         .ok_or(NspNszFormatError::UnsupportedProfile)?;
     let section_size = member
         .section_size
         .ok_or(NspNszFormatError::UnsupportedProfile)?;
-    let mut member = SpanReader::new(&mut *source, source_offset, source_size);
-    let record = read_ncz_record(&mut member, source_size)?;
-    let encoded_suffix_size = expected_nca_size
-        .checked_sub(NCZ_PREFIX_SIZE)
-        .filter(|size| *size > 0)
-        .ok_or(NspNszFormatError::UnsupportedProfile)?;
-    let standard_record =
-        record.section_offset == section_offset && record.section_size == section_size;
-    let clipped_record =
-        record.section_offset == NCZ_PREFIX_SIZE && record.section_size == encoded_suffix_size;
-    if record.nca_size != expected_nca_size
-        || section_offset > NCZ_PREFIX_SIZE
-        || section_offset
-            .checked_add(section_size)
-            .filter(|end| *end == expected_nca_size)
-            .is_none()
-        || (!standard_record && !clipped_record)
-    {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-
-    copy_file_span(
+    crate::ncz::decode_member(
         source,
-        source_offset,
-        NCZ_PREFIX_SIZE,
-        output,
-        &mut on_chunk,
-    )?;
-    let frame_source_offset = source_offset
-        .checked_add(record.frame_offset)
-        .ok_or(NspNszFormatError::ResourceLimit)?;
-    let frame_reader = SpanReader::new(&mut *source, frame_source_offset, record.frame_size);
-    let source_io_tracker = SourceIoTracker::default();
-    let frame_reader = source_io_tracker.track(frame_reader);
-    let mut decoder = zstd::stream::read::Decoder::new(frame_reader)
-        .map_err(|_| source_io_tracker.zstd_error())?
-        .single_frame();
-    decoder
-        .window_log_max(DEFAULT_ZSTD_WINDOW_LOG)
-        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
-
-    let mut raw_counter = Zeroizing::new([0_u8; 8]);
-    for (destination, source) in raw_counter.iter_mut().zip(record.counter[..8].iter().rev()) {
-        *destination = *source;
-    }
-    let mut decoded = 0_u64;
-    let mut buffer = Zeroizing::new([0_u8; IO_BUFFER_SIZE]);
-    loop {
-        let read = decoder
-            .read(&mut buffer[..])
-            .map_err(|_| source_io_tracker.zstd_error())?;
-        if read == 0 {
-            break;
-        }
-        let next = decoded
-            .checked_add(u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?)
-            .ok_or(NspNszFormatError::ResourceLimit)?;
-        if next > encoded_suffix_size {
-            return Err(NspNszFormatError::InvalidPackage);
-        }
-        apply_ctr_at_nca_offset(
-            &record.key,
-            &raw_counter,
+        crate::ncz::NczDecodeSpec {
+            source_offset: member.source_offset,
+            source_size: member.source_size,
+            expected_nca_size: member.nca_size,
             section_offset,
-            NCZ_PREFIX_SIZE - section_offset + decoded,
-            &mut buffer[..read],
-        )?;
-        output
-            .write_all(&buffer[..read])
-            .map_err(|_| NspNszFormatError::OutputIo)?;
-        decoded = next;
-        on_chunk(u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?)?;
-    }
-    if decoded != encoded_suffix_size {
-        return Err(NspNszFormatError::InvalidPackage);
-    }
-    let mut frame_reader = decoder.finish();
-    let consumed = frame_reader
-        .stream_position()
-        .map_err(|_| NspNszFormatError::SourceIo)?;
-    if consumed != record.frame_size {
-        return Err(NspNszFormatError::InvalidPackage);
-    }
-    output
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    Ok(())
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn apply_ctr_at_nca_offset(
-    key: &[u8; 16],
-    raw_counter: &[u8; 8],
-    section_offset: u64,
-    section_relative_offset: u64,
-    bytes: &mut [u8],
-) -> Result<(), NspNszFormatError> {
-    use aes::Aes128;
-    use aes::cipher::{KeyIvInit, StreamCipher};
-    use ctr::Ctr128BE;
-    use zeroize::Zeroizing;
-
-    let block = (section_offset / 16)
-        .checked_add(section_relative_offset / 16)
-        .ok_or(NspNszFormatError::ResourceLimit)?;
-    let mut counter = Zeroizing::new([0_u8; 16]);
-    for (destination, source) in counter[..8].iter_mut().zip(raw_counter.iter().rev()) {
-        *destination = *source;
-    }
-    counter[8..].copy_from_slice(&block.to_be_bytes());
-    let mut cipher = Ctr128BE::<Aes128>::new_from_slices(key, &counter[..])
-        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
-    let skip = usize::try_from(section_relative_offset % 16)
-        .map_err(|_| NspNszFormatError::ResourceLimit)?;
-    if skip > 0 {
-        let mut skipped = Zeroizing::new([0_u8; 16]);
-        cipher.apply_keystream(&mut skipped[..skip]);
-    }
-    cipher.apply_keystream(bytes);
-    Ok(())
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn copy_file_span<W: std::io::Write>(
-    source: &mut std::fs::File,
-    offset: u64,
-    length: u64,
-    output: &mut W,
-    on_chunk: &mut impl FnMut(u64) -> Result<(), NspNszFormatError>,
-) -> Result<(), NspNszFormatError> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    source
-        .seek(SeekFrom::Start(offset))
-        .map_err(|_| NspNszFormatError::SourceIo)?;
-    let mut remaining = length;
-    let mut buffer = ZeroizingBuffer::new();
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(IO_BUFFER_SIZE as u64))
-            .map_err(|_| NspNszFormatError::ResourceLimit)?;
-        let read = source
-            .read(&mut buffer.0[..wanted])
-            .map_err(|_| NspNszFormatError::SourceIo)?;
-        if read == 0 {
-            return Err(NspNszFormatError::InvalidPackage);
-        }
-        output
-            .write_all(&buffer.0[..read])
-            .map_err(|_| NspNszFormatError::OutputIo)?;
-        remaining -= u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?;
-        on_chunk(u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?)?;
-    }
-    Ok(())
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-struct ZeroizingBuffer(zeroize::Zeroizing<[u8; IO_BUFFER_SIZE]>);
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-impl ZeroizingBuffer {
-    fn new() -> Self {
-        Self(zeroize::Zeroizing::new([0_u8; IO_BUFFER_SIZE]))
-    }
+            section_size,
+        },
+        output,
+        on_chunk,
+    )
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -1106,82 +895,7 @@ impl<W: std::io::Write> std::io::Write for LimitedWriter<W> {
 }
 
 #[cfg(target_os = "macos")]
-struct SpanReader<R> {
-    inner: R,
-    base: u64,
-    length: u64,
-    position: u64,
-}
-
-#[cfg(target_os = "macos")]
-impl<R> SpanReader<R> {
-    fn new(inner: R, base: u64, length: u64) -> Self {
-        Self {
-            inner,
-            base,
-            length,
-            position: 0,
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl<R: std::io::Read + std::io::Seek> std::io::Read for SpanReader<R> {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        use std::io::SeekFrom;
-
-        if buffer.is_empty() || self.position >= self.length {
-            return Ok(0);
-        }
-        let count = usize::try_from((self.length - self.position).min(buffer.len() as u64))
-            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        let absolute = self
-            .base
-            .checked_add(self.position)
-            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        self.inner.seek(SeekFrom::Start(absolute))?;
-        let read = self.inner.read(&mut buffer[..count])?;
-        self.position = self
-            .position
-            .checked_add(read as u64)
-            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        Ok(read)
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl<R: std::io::Read + std::io::Seek> std::io::Seek for SpanReader<R> {
-    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
-        let next = match position {
-            std::io::SeekFrom::Start(value) => value,
-            std::io::SeekFrom::End(value) => self
-                .length
-                .checked_add_signed(value)
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
-            std::io::SeekFrom::Current(value) => self
-                .position
-                .checked_add_signed(value)
-                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?,
-        };
-        if next > self.length {
-            return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
-        }
-        self.position = next;
-        Ok(next)
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn map_ncz_read_error(error: std::io::Error) -> NspNszFormatError {
-    if error.kind() == std::io::ErrorKind::UnexpectedEof {
-        NspNszFormatError::InvalidPackage
-    } else {
-        NspNszFormatError::SourceIo
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn map_nca_header_error(error: crate::nca::HeaderError) -> NspNszFormatError {
+pub(crate) fn map_nca_header_error(error: crate::nca::HeaderError) -> NspNszFormatError {
     match error {
         crate::nca::HeaderError::UnsupportedFormat => NspNszFormatError::UnsupportedProfile,
         crate::nca::HeaderError::TruncatedInput | crate::nca::HeaderError::MalformedInput => {
@@ -1193,10 +907,12 @@ fn map_nca_header_error(error: crate::nca::HeaderError) -> NspNszFormatError {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 #[derive(Clone, Default)]
 struct SourceIoTracker(std::rc::Rc<std::cell::Cell<bool>>);
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 impl SourceIoTracker {
     fn track<R: std::io::Read + std::io::Seek>(&self, inner: R) -> TrackedSourceReader<R> {
         TrackedSourceReader {
@@ -1215,12 +931,14 @@ impl SourceIoTracker {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 struct TrackedSourceReader<R> {
     inner: R,
     tracker: SourceIoTracker,
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 impl<R: std::io::Read> std::io::Read for TrackedSourceReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         match self.inner.read(buffer) {
@@ -1234,6 +952,7 @@ impl<R: std::io::Read> std::io::Read for TrackedSourceReader<R> {
 }
 
 #[cfg(target_os = "macos")]
+#[cfg(test)]
 impl<R: std::io::Seek> std::io::Seek for TrackedSourceReader<R> {
     fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
         match self.inner.seek(position) {

@@ -278,6 +278,40 @@ pub(crate) struct XciSecureMember {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct XciConversionSource {
     pub(crate) secure_members: Vec<XciSecureMember>,
+    pub(crate) secure_partition_offset: u64,
+    pub(crate) secure_partition_length: u64,
+    pub(crate) has_logo_partition: bool,
+    pub(crate) root_hfs0_header_size: u64,
+    pub(crate) root_hfs0_table_size: u64,
+    pub(crate) root_entries: Vec<XciConversionEntry>,
+    pub(crate) secure_hfs0_table_size: u64,
+    pub(crate) secure_entries: Vec<XciConversionEntry>,
+    pub(crate) all_hfs_entry_hashes_absent: bool,
+    pub(crate) root_hash_status: XciRootHashStatus,
+}
+
+/// Raw offsets, sizes, and declared digest fields for one conversion HFS0 entry.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct XciConversionEntry {
+    pub(crate) name: String,
+    pub(crate) offset: u64,
+    pub(crate) length: u64,
+    pub(crate) hashed_size: u32,
+    pub(crate) reserved_offset: [u8; 8],
+    pub(crate) digest: [u8; 32],
+}
+
+/// Describes the card-header root digest check applied to a conversion input.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum XciRootHashStatus {
+    /// Ordinary XCI conversion does not verify this field.
+    NotChecked,
+    /// The digest matches the declared root HFS0 header region.
+    Verified,
+    /// The copied digest is stale and every HFS0 entry hash is exactly absent.
+    StaleUnverified,
 }
 fn add(a: u64, b: u64) -> Result<u64> {
     a.checked_add(b).ok_or(err(MalformedInput))
@@ -292,7 +326,7 @@ fn u64le(b: &[u8]) -> u64 {
 /// codes: 0xFA 1 GiB, 0xF8 2 GiB, 0xF0 4 GiB, 0xE0 8 GiB, 0xE1 16 GiB, and
 /// 0xE2 32 GiB. Returns `None` for a code that does not name a supported
 /// card size.
-fn rom_size_pages(code: u64) -> Option<u64> {
+pub(crate) fn rom_size_pages(code: u64) -> Option<u64> {
     Some(match code {
         0xFA => 1 << 21,
         0xF8 => 1 << 22,
@@ -339,7 +373,7 @@ impl<R: Read + Seek> Parser<'_, R> {
     /// Validates a table, names, hash-target spans, and immediate-parent bounds.
     /// Returns the calculated header size, and each member's span and name in
     /// table order.
-    fn hfs(&mut self, start: u64, end: u64) -> Result<Members> {
+    fn hfs(&mut self, start: u64, end: u64, allow_upstream_empty_table: bool) -> Result<Members> {
         let h = self.read(start, end, 16)?;
         if &h[..4] != b"HFS0" || h[12..].iter().any(|b| *b != 0) {
             return Err(err(MalformedInput));
@@ -347,7 +381,8 @@ impl<R: Read + Seek> Parser<'_, R> {
         let count = u32le(&h[4..8]);
         self.members(count)?;
         let names = u32le(&h[8..12]);
-        if names > META_LIMIT || (count == 0) != (names == 0) {
+        let upstream_empty_table = allow_upstream_empty_table && count == 0 && names == 1;
+        if names > META_LIMIT || ((count == 0) != (names == 0) && !upstream_empty_table) {
             return Err(err(MalformedInput));
         }
         let table = count.checked_mul(64).ok_or(err(MalformedInput))?;
@@ -443,7 +478,7 @@ impl<R: Read + Seek> Parser<'_, R> {
     /// inside the capacity declared by its documented RomSize code and no
     /// later than the declared valid-data end, and keep that valid-data end
     /// within the same capacity.
-    fn xci(&mut self, end: u64) -> Result<bool> {
+    fn xci(&mut self, end: u64, allow_upstream_empty_table: bool) -> Result<bool> {
         let h = self.read(0, end, 0x200)?;
         let page = u32le(&h[0x104..0x108]);
         let root = u64le(&h[0x130..0x138]);
@@ -454,7 +489,7 @@ impl<R: Read + Seek> Parser<'_, R> {
         if declared < 16 || add(root, declared)? > end {
             return Err(err(MalformedInput));
         }
-        let members = self.hfs(root, end)?;
+        let members = self.hfs(root, end, allow_upstream_empty_table)?;
         if members.header_size > declared || members.spans.is_empty() {
             return Err(err(MalformedInput));
         }
@@ -480,7 +515,7 @@ impl<R: Read + Seek> Parser<'_, R> {
             if name == "secure" {
                 secure_start = start;
             }
-            let partition = self.hfs(start, stop)?;
+            let partition = self.hfs(start, stop, allow_upstream_empty_table)?;
             for (begin, finish) in partition.spans {
                 let ncz = self.ncz(begin, finish)?;
                 compressed |= ncz;
@@ -514,19 +549,57 @@ impl<R: Read + Seek> Parser<'_, R> {
 
     #[cfg(target_os = "macos")]
     fn xci_conversion_source(&mut self, end: u64) -> Result<XciConversionSource> {
+        self.conversion_source_with_hash_policy(end, false, false)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn xcz_conversion_source(&mut self, end: u64) -> Result<XciConversionSource> {
+        self.conversion_source_with_hash_policy(end, true, true)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn conversion_source_with_hash_policy(
+        &mut self,
+        end: u64,
+        allow_absent_hashes: bool,
+        allow_upstream_empty_table: bool,
+    ) -> Result<XciConversionSource> {
         let header = self.read(0, end, 0x200)?;
         let root = u64le(&header[0x130..0x138]);
-        let root_members = self.hfs(root, end)?;
-        self.verify_hfs_hashes(&root_members)?;
+        let root_header_size = u64le(&header[0x138..0x140]);
+        let root_members = self.hfs(root, end, allow_upstream_empty_table)?;
+        let root_entries = Self::conversion_hfs_entries(&root_members)?;
+        let mut all_hfs_entry_hashes_absent = allow_absent_hashes;
+        if allow_absent_hashes {
+            self.verify_hfs_hashes_with_policy(
+                &root_members,
+                true,
+                &mut all_hfs_entry_hashes_absent,
+            )?;
+        } else {
+            self.verify_hfs_hashes(&root_members)?;
+        }
 
         let mut secure_members = Vec::new();
         let mut update_seen = false;
         let mut normal_seen = false;
         let mut secure_seen = false;
         let mut logo_seen = false;
+        let mut secure_partition_offset = 0;
+        let mut secure_partition_length = 0;
+        let mut secure_hfs0_table_size = 0;
+        let mut secure_entries = Vec::new();
         for (name, &(start, stop)) in root_members.names.iter().zip(&root_members.spans) {
-            let partition = self.hfs(start, stop)?;
-            self.verify_hfs_hashes(&partition)?;
+            let partition = self.hfs(start, stop, allow_upstream_empty_table)?;
+            if allow_absent_hashes {
+                self.verify_hfs_hashes_with_policy(
+                    &partition,
+                    true,
+                    &mut all_hfs_entry_hashes_absent,
+                )?;
+            } else {
+                self.verify_hfs_hashes(&partition)?;
+            }
             match name.as_str() {
                 "update" => {
                     if update_seen || !partition.spans.is_empty() {
@@ -551,6 +624,10 @@ impl<R: Read + Seek> Parser<'_, R> {
                         return Err(err(UnsupportedStructure));
                     }
                     secure_seen = true;
+                    secure_partition_offset = start;
+                    secure_partition_length = stop.checked_sub(start).ok_or(err(MalformedInput))?;
+                    secure_hfs0_table_size = partition.header_size;
+                    secure_entries = Self::conversion_hfs_entries(&partition)?;
                     if !matches!(partition.spans.len(), 2 | 3) {
                         return Err(err(UnsupportedStructure));
                     }
@@ -576,21 +653,95 @@ impl<R: Read + Seek> Parser<'_, R> {
         if !update_seen || !normal_seen || !secure_seen || !matches!(secure_members.len(), 2 | 3) {
             return Err(err(UnsupportedStructure));
         }
-        Ok(XciConversionSource { secure_members })
+        let root_hash_status = if allow_absent_hashes {
+            let root_end = add(root, root_header_size)?;
+            let calculated = self.hash_prefix(root, root_end, root_header_size)?;
+            let declared: [u8; 32] = header[0x140..0x160]
+                .try_into()
+                .expect("fixed XCI root hash field");
+            if calculated == declared {
+                XciRootHashStatus::Verified
+            } else if all_hfs_entry_hashes_absent {
+                XciRootHashStatus::StaleUnverified
+            } else {
+                return Err(err(MalformedInput));
+            }
+        } else {
+            XciRootHashStatus::NotChecked
+        };
+        Ok(XciConversionSource {
+            secure_members,
+            secure_partition_offset,
+            secure_partition_length,
+            has_logo_partition: logo_seen,
+            root_hfs0_header_size: root_header_size,
+            root_hfs0_table_size: root_members.header_size,
+            root_entries,
+            secure_hfs0_table_size,
+            secure_entries,
+            all_hfs_entry_hashes_absent,
+            root_hash_status,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    fn conversion_hfs_entries(members: &Members) -> Result<Vec<XciConversionEntry>> {
+        if members.spans.len() != members.names.len() || members.hashes.len() != members.names.len()
+        {
+            return Err(err(MalformedInput));
+        }
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(members.names.len())
+            .map_err(|_| err(ContentRecognitionErrorCode::ResourceLimitExceeded))?;
+        for ((name, &(start, end)), hash) in members
+            .names
+            .iter()
+            .zip(&members.spans)
+            .zip(&members.hashes)
+        {
+            entries.push(XciConversionEntry {
+                name: name.clone(),
+                offset: start,
+                length: end.checked_sub(start).ok_or(err(MalformedInput))?,
+                hashed_size: hash.hashed_size,
+                reserved_offset: hash.reserved,
+                digest: hash.digest,
+            });
+        }
+        Ok(entries)
     }
 
     #[cfg(target_os = "macos")]
     fn verify_hfs_hashes(&mut self, members: &Members) -> Result<()> {
+        let mut all_absent = false;
+        self.verify_hfs_hashes_with_policy(members, false, &mut all_absent)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_hfs_hashes_with_policy(
+        &mut self,
+        members: &Members,
+        allow_absent: bool,
+        all_absent: &mut bool,
+    ) -> Result<()> {
         if members.spans.len() != members.hashes.len() {
             return Err(err(MalformedInput));
         }
         for (&(start, end), fields) in members.spans.iter().zip(&members.hashes) {
             let member_length = end.checked_sub(start).ok_or(err(MalformedInput))?;
             let hashed_size = u64::from(fields.hashed_size);
-            if hashed_size == 0
-                || hashed_size > member_length
-                || fields.reserved.iter().any(|byte| *byte != 0)
-            {
+            if fields.reserved.iter().any(|byte| *byte != 0) {
+                return Err(err(MalformedInput));
+            }
+            if hashed_size == 0 {
+                if allow_absent && fields.digest == [0; 32] {
+                    continue;
+                }
+                return Err(err(MalformedInput));
+            }
+            *all_absent = false;
+            if hashed_size > member_length {
                 return Err(err(MalformedInput));
             }
             if self.hash_prefix(start, end, hashed_size)? != fields.digest {
@@ -923,7 +1074,7 @@ pub(crate) fn inspect_xci_for_conversion<R: Read + Seek>(
         if !parser.marker(0, length, 0x100, b"HEAD")? {
             return Err(err(UnsupportedStructure));
         }
-        parser.xci(length)?
+        parser.xci(length, false)?
     };
     if compressed {
         return Err(err(UnsupportedStructure));
@@ -933,6 +1084,39 @@ pub(crate) fn inspect_xci_for_conversion<R: Read + Seek>(
         budget: Budget::default(),
     };
     parser.xci_conversion_source(length)
+}
+
+/// Qualifies an XCZ source for the bounded XCZ-to-XCI profile.
+///
+/// XCZ inputs may represent an absent HFS0 entry digest only when both the
+/// declared hashed size and digest are zero. Any present digest is checked over
+/// its declared bounded prefix. A copied card-header root digest may be stale
+/// only when every HFS0 entry digest is absent; that state is reported without
+/// treating the root digest as verified. Ordinary XCI conversion continues to
+/// use the stricter `inspect_xci_for_conversion` path.
+#[cfg(target_os = "macos")]
+pub(crate) fn inspect_xcz_for_conversion<R: Read + Seek>(
+    reader: &mut R,
+    length: u64,
+) -> Result<XciConversionSource> {
+    let compressed = {
+        let mut parser = Parser {
+            reader,
+            budget: Budget::default(),
+        };
+        if !parser.marker(0, length, 0x100, b"HEAD")? {
+            return Err(err(UnsupportedStructure));
+        }
+        parser.xci(length, true)?
+    };
+    if !compressed {
+        return Err(err(UnsupportedStructure));
+    }
+    let mut parser = Parser {
+        reader,
+        budget: Budget::default(),
+    };
+    parser.xcz_conversion_source(length)
 }
 
 pub(crate) fn recognize<R: Read + Seek>(
@@ -975,7 +1159,7 @@ pub(crate) fn recognize<R: Read + Seek>(
         claims.push((RecognizedFamily::Pfs0, compressed));
     }
     if p.marker(0, size, 0x100, b"HEAD")? {
-        let compressed = p.xci(size)?;
+        let compressed = p.xci(size, false)?;
         claims.push((RecognizedFamily::Xci, compressed));
     }
     let ncz = p.ncz(0, size)?;
@@ -1063,6 +1247,43 @@ pub(crate) fn recognize<R: Read + Seek>(
 mod tests {
     use super::*;
     use std::io::Cursor;
+    #[cfg(target_os = "macos")]
+    use std::io::Write;
+
+    #[cfg(target_os = "macos")]
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: u64,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<R> CountingReader<R> {
+        fn new(inner: R) -> Self {
+            Self {
+                inner,
+                bytes_read: 0,
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(buffer)?;
+            self.bytes_read = self
+                .bytes_read
+                .checked_add(u64::try_from(count).expect("read count fits u64"))
+                .expect("counted read total fits u64");
+            Ok(count)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<R: std::io::Seek> std::io::Seek for CountingReader<R> {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
 
     #[test]
     fn nca_allocation_failure_maps_to_a_recognition_resource_limit() {
@@ -1169,6 +1390,50 @@ mod tests {
             0xF000,
             None,
         )
+    }
+
+    #[cfg(target_os = "macos")]
+    fn xcz() -> Vec<u8> {
+        let mut empty_partition = b"HFS0\0\0\0\0\0\0\0\0\0\0\0\0".to_vec();
+        empty_partition[8..12].copy_from_slice(&1_u32.to_le_bytes());
+        empty_partition.push(0);
+        empty_partition.resize(0x200, 0);
+        let meta = nca();
+        let program = ncz(false);
+        let (mut secure, _) = hfs_image(&[("meta.nca", &meta), ("program.ncz", &program)]);
+        while secure.len() % 0x200 != 0 {
+            secure.push(0);
+        }
+        let (root_image, header_size) = hfs_image(&[
+            ("update", empty_partition.as_slice()),
+            ("normal", empty_partition.as_slice()),
+            ("secure", secure.as_slice()),
+        ]);
+        let root_offset = 0xF000_usize;
+        let secure_start = root_offset + header_size as usize + 2 * empty_partition.len();
+        let mut bytes = vec![0; root_offset];
+        bytes[0x100..0x104].copy_from_slice(b"HEAD");
+        bytes[0x10D] = 0xFA;
+        bytes[0x118..0x11C].copy_from_slice(&0x20_0000_u32.to_le_bytes());
+        bytes[0x104..0x108]
+            .copy_from_slice(&(((secure_start + 0x1000) / 0x200) as u32).to_le_bytes());
+        bytes[0x130..0x138].copy_from_slice(&(root_offset as u64).to_le_bytes());
+        bytes[0x138..0x140].copy_from_slice(&header_size.to_le_bytes());
+        bytes.extend_from_slice(&root_image);
+        bytes
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_xci_root_hash(bytes: &mut [u8]) {
+        let root = usize::try_from(u64le(&bytes[0x130..0x138])).expect("test root offset");
+        let size = usize::try_from(u64le(&bytes[0x138..0x140])).expect("test header size");
+        let digest = Sha256::digest(&bytes[root..root + size]);
+        bytes[0x140..0x160].copy_from_slice(&digest);
+    }
+
+    #[cfg(target_os = "macos")]
+    fn inspect_xcz(bytes: &[u8]) -> Result<XciConversionSource> {
+        inspect_xcz_for_conversion(&mut Cursor::new(bytes), bytes.len() as u64)
     }
 
     /// Builds one partition image: a single member inside a 0x200-padded HFS0
@@ -1492,7 +1757,11 @@ mod tests {
             budget: Budget::default(),
         };
         assert_eq!(
-            parser.hfs(0, direct.len() as u64).err().unwrap().code(),
+            parser
+                .hfs(0, direct.len() as u64, false)
+                .err()
+                .unwrap()
+                .code(),
             MalformedInput
         );
         // Nested: the same overlap inside the root table of a card image.
@@ -1942,7 +2211,7 @@ mod tests {
             reader: &mut reader,
             budget: Budget::default(),
         };
-        parser.xci(bytes.len() as u64).unwrap();
+        parser.xci(bytes.len() as u64, false).unwrap();
         // Both nested archives share the one cumulative counter.
         assert_eq!(parser.budget.work, 6);
         let mut reader = Cursor::new(&bytes);
@@ -1953,7 +2222,7 @@ mod tests {
                 ..Budget::default()
             },
         };
-        assert!(parser.xci(bytes.len() as u64).is_ok());
+        assert!(parser.xci(bytes.len() as u64, false).is_ok());
         let mut reader = Cursor::new(&bytes);
         let mut parser = Parser {
             reader: &mut reader,
@@ -1963,7 +2232,7 @@ mod tests {
             },
         };
         assert_eq!(
-            parser.xci(bytes.len() as u64).unwrap_err().code(),
+            parser.xci(bytes.len() as u64, false).unwrap_err().code(),
             LimitExceeded
         );
     }
@@ -2033,5 +2302,195 @@ mod tests {
         // through black_box so the check stays a runtime assertion.
         let metadata_only_maximum = std::hint::black_box(META_LIMIT) / 3;
         assert!(WORK_LIMIT < metadata_only_maximum);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn xcz_input_accepts_exact_absent_hashes_and_reports_a_stale_root_hash() {
+        let bytes = xcz();
+        let source = inspect_xcz(&bytes).expect("upstream-style absent hashes are qualified");
+        assert!(source.all_hfs_entry_hashes_absent);
+        assert_eq!(source.root_hash_status, XciRootHashStatus::StaleUnverified);
+        assert_eq!(source.secure_members.len(), 2);
+        assert!(inspect_xci_for_conversion(&mut Cursor::new(&bytes), bytes.len() as u64).is_err());
+
+        assert_eq!(
+            recognize(
+                &mut Cursor::new(&bytes),
+                bytes.len() as u64,
+                std::path::Path::new("synthetic.xcz"),
+            )
+            .unwrap_err()
+            .code(),
+            MalformedInput,
+            "public recognition keeps the existing empty-table rule"
+        );
+
+        let root = 0xF000_usize;
+        let root_header_size =
+            usize::try_from(u64le(&bytes[0x138..0x140])).expect("test header size");
+        let update_start = root + root_header_size;
+        let mut unsupported_empty_table = bytes.clone();
+        unsupported_empty_table[update_start + 8..update_start + 12]
+            .copy_from_slice(&2_u32.to_le_bytes());
+        assert!(inspect_xcz(&unsupported_empty_table).is_err());
+
+        let mut malformed_empty_name = bytes.clone();
+        malformed_empty_name[update_start + 16] = b'X';
+        assert!(inspect_xcz(&malformed_empty_name).is_err());
+
+        let mut partial_absence = bytes.clone();
+        partial_absence[0xF010 + 32] = 1;
+        assert!(inspect_xcz(&partial_absence).is_err());
+
+        let mut nonzero_reserved = bytes.clone();
+        nonzero_reserved[0xF010 + 24] = 1;
+        assert!(inspect_xcz(&nonzero_reserved).is_err());
+
+        let mut nonzero_nested_reserved = bytes;
+        let nested_entry = usize::try_from(source.secure_partition_offset)
+            .expect("nested HFS0 offset fits usize")
+            + 16
+            + 24;
+        nonzero_nested_reserved[nested_entry] = 1;
+        assert!(inspect_xcz(&nonzero_nested_reserved).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn xcz_input_checks_declared_prefix_hashes_and_root_header_hash_separately() {
+        let mut bytes = xcz();
+        let root = 0xF000_usize;
+        let root_header_size =
+            usize::try_from(u64le(&bytes[0x138..0x140])).expect("test header size");
+        let update_start = root + root_header_size;
+        let prefix = &bytes[update_start..update_start + 16];
+        let digest = Sha256::digest(prefix);
+        bytes[root + 16 + 20..root + 16 + 24].copy_from_slice(&16_u32.to_le_bytes());
+        bytes[root + 16 + 32..root + 16 + 64].copy_from_slice(&digest);
+
+        assert!(
+            inspect_xcz(&bytes).is_err(),
+            "a stale card-header root hash is allowed only when every entry hash is absent"
+        );
+
+        set_xci_root_hash(&mut bytes);
+        let source = inspect_xcz(&bytes).expect("declared prefix and root hashes verify");
+        assert!(!source.all_hfs_entry_hashes_absent);
+        assert_eq!(source.root_hash_status, XciRootHashStatus::Verified);
+
+        bytes[root + 16 + 32] ^= 0x80;
+        assert!(inspect_xcz(&bytes).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bounded_hfs_prefixes_keep_large_member_hashing_inside_the_shared_budget() {
+        const LARGE_MEMBER_LENGTH: u64 = 150 * 1024 * 1024;
+
+        let nsp = crate::test_synthetic_nsp_qualification::valid();
+        let mut fixture = crate::test_synthetic_xci::build(
+            &nsp.meta_nca,
+            &nsp.program_nca,
+            &nsp.package,
+            &nsp.key_file,
+            ["meta.nca", "program.nca"],
+            false,
+        );
+        let secure = fixture.root_entries[2];
+        let program = fixture.secure_entries[1];
+        let logical_length =
+            usize::try_from(LARGE_MEMBER_LENGTH).expect("the sparse large-member test fits usize");
+        assert!(logical_length >= program.data_len);
+
+        let program_offset =
+            u64::try_from(program.data_offset).expect("synthetic Program offset fits u64");
+        let secure_offset =
+            u64::try_from(secure.data_offset).expect("synthetic secure offset fits u64");
+        let secure_length = program_offset
+            .checked_sub(secure_offset)
+            .and_then(|prefix| prefix.checked_add(LARGE_MEMBER_LENGTH))
+            .expect("synthetic secure length fits u64");
+        fixture.image[program.table_offset + 8..program.table_offset + 16]
+            .copy_from_slice(&LARGE_MEMBER_LENGTH.to_le_bytes());
+        fixture.image[secure.table_offset + 8..secure.table_offset + 16]
+            .copy_from_slice(&secure_length.to_le_bytes());
+        fixture.image[program.data_offset..program.data_offset + 0x200].fill(0);
+        fixture.secure_entries[1].data_len = logical_length;
+        fixture.root_entries[2].data_len =
+            usize::try_from(secure_length).expect("synthetic secure length fits usize");
+
+        for entry in fixture.secure_entries.clone() {
+            fixture.set_prefix_hash(entry, entry.data_len.min(0x200));
+        }
+        for entry in fixture.root_entries.clone() {
+            fixture.set_prefix_hash(entry, entry.data_len.min(0x200));
+        }
+
+        let directory = tempfile::tempdir().expect("temporary sparse-XCI directory");
+        let path = directory.path().join("large-prefix-only.xci");
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("sparse XCI file");
+        file.write_all(&fixture.image).expect("write XCI prefix");
+        file.set_len(
+            u64::try_from(program.data_offset)
+                .expect("Program offset fits u64")
+                .checked_add(LARGE_MEMBER_LENGTH)
+                .expect("sparse XCI length fits u64"),
+        )
+        .expect("extend sparse Program member");
+        let file_length = file.metadata().expect("sparse XCI metadata").len();
+
+        let (source, bytes_read) = {
+            let mut counted = CountingReader::new(&mut file);
+            let source = inspect_xci_for_conversion(&mut counted, file_length)
+                .expect("strict XCI validation hashes only bounded declared prefixes");
+            (source, counted.bytes_read)
+        };
+        assert_eq!(source.secure_members[1].length, LARGE_MEMBER_LENGTH);
+        let cumulative_hash_bytes = source
+            .root_entries
+            .iter()
+            .chain(&source.secure_entries)
+            .map(|entry| u64::from(entry.hashed_size))
+            .sum::<u64>();
+        for entry in source.root_entries.iter().chain(&source.secure_entries) {
+            assert_eq!(
+                u64::from(entry.hashed_size),
+                entry.length.min(0x200),
+                "{} uses exactly the declared HFS0 prefix policy",
+                entry.name
+            );
+        }
+        assert_eq!(READ_LIMIT, 256 * 1024 * 1024);
+        assert_eq!(cumulative_hash_bytes, 5 * 0x200);
+        assert!(cumulative_hash_bytes <= READ_LIMIT);
+        assert!(bytes_read <= READ_LIMIT);
+        assert!(bytes_read < LARGE_MEMBER_LENGTH);
+
+        // A byte outside the declared HFS0 prefix can change while strict
+        // structural inspection still succeeds. Full NCA integrity therefore
+        // comes from semantic full-content qualification, not this parser.
+        let changed_byte_offset = program
+            .data_offset
+            .checked_add(0x1000)
+            .expect("Program offset fits usize");
+        assert!(changed_byte_offset < program.data_offset + logical_length);
+        file.seek(SeekFrom::Start(
+            u64::try_from(changed_byte_offset).expect("mutation offset fits u64"),
+        ))
+        .expect("seek beyond the HFS0 prefix");
+        file.write_all(&[0x80])
+            .expect("change data beyond the HFS0 prefix");
+        let changed = inspect_xci_for_conversion(&mut file, file_length)
+            .expect("strict validation does not claim full-member integrity");
+        assert_eq!(
+            changed.secure_entries[1].digest,
+            source.secure_entries[1].digest
+        );
     }
 }

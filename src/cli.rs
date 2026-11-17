@@ -516,6 +516,7 @@ pub(crate) fn requires_reporting_session(args: &[OsString]) -> bool {
         || is_split_command(args)
         || args.first().is_some_and(|argument| {
             argument == OsStr::new("xci-to-nsp")
+                || argument == OsStr::new("xcz-to-xci")
                 || argument == OsStr::new("nsp-to-nsz")
                 || argument == OsStr::new("nsz-to-nsp")
         })
@@ -576,6 +577,7 @@ fn run_with_control(
         argument == OsStr::new("multi-content-build")
             || argument == OsStr::new("multi-content-split")
             || argument == OsStr::new("xci-to-nsp")
+            || argument == OsStr::new("xcz-to-xci")
             || argument == OsStr::new("nsp-to-nsz")
             || argument == OsStr::new("nsz-to-nsp")
     }) {
@@ -712,6 +714,15 @@ enum MultiContentInvocation {
         json: bool,
         jsonl: bool,
     },
+    XczToXci {
+        source: PathBuf,
+        destination: PathBuf,
+        workspace: PathBuf,
+        key_file: PathBuf,
+        conflict_policy: ConflictPolicy,
+        json: bool,
+        jsonl: bool,
+    },
     NspToNsz {
         source: PathBuf,
         destination: PathBuf,
@@ -759,10 +770,12 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
     let is_build = command == "multi-content-build";
     let is_split = command == "multi-content-split";
     let is_xci_to_nsp = command == "xci-to-nsp";
+    let is_xcz_to_xci = command == "xcz-to-xci";
+    let is_xci_xcz_conversion = is_xci_to_nsp || is_xcz_to_xci;
     let is_nsp_to_nsz = command == "nsp-to-nsz";
     let is_nsz_to_nsp = command == "nsz-to-nsp";
     let is_nsp_nsz = is_nsp_to_nsz || is_nsz_to_nsp;
-    if !is_build && !is_split && !is_xci_to_nsp && !is_nsp_nsz {
+    if !is_build && !is_split && !is_xci_xcz_conversion && !is_nsp_nsz {
         return Err(());
     }
 
@@ -792,14 +805,15 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                 match option {
                     "--source" => sources.push(PathBuf::from(value)),
                     "--output"
-                        if (is_build || is_xci_to_nsp || is_nsp_nsz) && destination.is_none() =>
+                        if (is_build || is_xci_xcz_conversion || is_nsp_nsz)
+                            && destination.is_none() =>
                     {
                         destination = Some(PathBuf::from(value));
                     }
                     "--output-directory" if !is_build && destination_directory.is_none() => {
                         destination_directory = Some(PathBuf::from(value));
                     }
-                    "--keys" if (is_xci_to_nsp || is_nsp_nsz) && key_file.is_none() => {
+                    "--keys" if (is_xci_xcz_conversion || is_nsp_nsz) && key_file.is_none() => {
                         key_file = Some(PathBuf::from(value));
                     }
                     "--workspace" if workspace.is_none() => {
@@ -870,6 +884,19 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
             return Err(());
         }
         Ok(MultiContentInvocation::XciToNsp {
+            source: sources.remove(0),
+            destination: destination.ok_or(())?,
+            workspace,
+            key_file: key_file.ok_or(())?,
+            conflict_policy,
+            json,
+            jsonl,
+        })
+    } else if is_xcz_to_xci {
+        if sources.len() != 1 || destination_directory.is_some() {
+            return Err(());
+        }
+        Ok(MultiContentInvocation::XczToXci {
             source: sources.remove(0),
             destination: destination.ok_or(())?,
             workspace,
@@ -1099,6 +1126,25 @@ fn run_multi_content_command(
             "xci-to-nsp",
             "xci_to_nsp.job_result",
         ),
+        MultiContentInvocation::XczToXci {
+            source,
+            destination,
+            workspace,
+            key_file,
+            conflict_policy,
+            json,
+            jsonl,
+        } => (
+            engine.plan_xcz_to_xci(
+                nscb::XczToXciRequest::new(source, destination, workspace, key_file)
+                    .with_conflict_policy(conflict_policy),
+            ),
+            json,
+            jsonl,
+            "decompress",
+            "xcz-to-xci",
+            "xcz_to_xci.job_result",
+        ),
         MultiContentInvocation::NspToNsz {
             source,
             destination,
@@ -1290,6 +1336,11 @@ fn multi_content_usage(args: &[OsString]) -> &'static str {
         .is_some_and(|value| value == OsStr::new("nsz-to-nsp"))
     {
         "usage: nsz-to-nsp --source NSZ --output NSP --workspace DIR --keys FILE [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+    } else if args
+        .first()
+        .is_some_and(|value| value == OsStr::new("xcz-to-xci"))
+    {
+        "usage: xcz-to-xci --source XCZ --output XCI --workspace DIR --keys FILE [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     } else {
         "usage: xci-to-nsp --source XCI --output NSP --workspace DIR --keys FILE [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     }
