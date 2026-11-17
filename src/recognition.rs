@@ -1250,6 +1250,41 @@ mod tests {
     #[cfg(target_os = "macos")]
     use std::io::Write;
 
+    #[cfg(target_os = "macos")]
+    struct CountingReader<R> {
+        inner: R,
+        bytes_read: u64,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<R> CountingReader<R> {
+        fn new(inner: R) -> Self {
+            Self {
+                inner,
+                bytes_read: 0,
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.inner.read(buffer)?;
+            self.bytes_read = self
+                .bytes_read
+                .checked_add(u64::try_from(count).expect("read count fits u64"))
+                .expect("counted read total fits u64");
+            Ok(count)
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl<R: std::io::Seek> std::io::Seek for CountingReader<R> {
+        fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(position)
+        }
+    }
+
     #[test]
     fn nca_allocation_failure_maps_to_a_recognition_resource_limit() {
         assert_eq!(
@@ -2410,8 +2445,12 @@ mod tests {
         .expect("extend sparse Program member");
         let file_length = file.metadata().expect("sparse XCI metadata").len();
 
-        let source = inspect_xci_for_conversion(&mut file, file_length)
-            .expect("strict XCI validation hashes only bounded declared prefixes");
+        let (source, bytes_read) = {
+            let mut counted = CountingReader::new(&mut file);
+            let source = inspect_xci_for_conversion(&mut counted, file_length)
+                .expect("strict XCI validation hashes only bounded declared prefixes");
+            (source, counted.bytes_read)
+        };
         assert_eq!(source.secure_members[1].length, LARGE_MEMBER_LENGTH);
         let cumulative_hash_bytes = source
             .root_entries
@@ -2419,8 +2458,39 @@ mod tests {
             .chain(&source.secure_entries)
             .map(|entry| u64::from(entry.hashed_size))
             .sum::<u64>();
+        for entry in source.root_entries.iter().chain(&source.secure_entries) {
+            assert_eq!(
+                u64::from(entry.hashed_size),
+                entry.length.min(0x200),
+                "{} uses exactly the declared HFS0 prefix policy",
+                entry.name
+            );
+        }
         assert_eq!(READ_LIMIT, 256 * 1024 * 1024);
         assert_eq!(cumulative_hash_bytes, 5 * 0x200);
         assert!(cumulative_hash_bytes <= READ_LIMIT);
+        assert!(bytes_read <= READ_LIMIT);
+        assert!(bytes_read < LARGE_MEMBER_LENGTH);
+
+        // A byte outside the declared HFS0 prefix can change while strict
+        // structural inspection still succeeds. Full NCA integrity therefore
+        // comes from semantic full-content qualification, not this parser.
+        let changed_byte_offset = program
+            .data_offset
+            .checked_add(0x1000)
+            .expect("Program offset fits usize");
+        assert!(changed_byte_offset < program.data_offset + logical_length);
+        file.seek(SeekFrom::Start(
+            u64::try_from(changed_byte_offset).expect("mutation offset fits u64"),
+        ))
+        .expect("seek beyond the HFS0 prefix");
+        file.write_all(&[0x80])
+            .expect("change data beyond the HFS0 prefix");
+        let changed = inspect_xci_for_conversion(&mut file, file_length)
+            .expect("strict validation does not claim full-member integrity");
+        assert_eq!(
+            changed.secure_entries[1].digest,
+            source.secure_entries[1].digest
+        );
     }
 }

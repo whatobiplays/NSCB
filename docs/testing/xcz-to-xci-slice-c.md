@@ -5,38 +5,117 @@
 This slice follows owner-approved policy revision
 `e2afa055d1126763c69f0e0392d25b86bab98014`. The owner selected the XCZ-only
 absent-HFS0-hash rule, the shared NCZ decoder boundary, and this policy pin.
-The `min(member_length, 0x200)` output HFS0 hash prefix is an implementation
-design decision, not a separate owner-approved invariant.
+The output HFS0 prefix length `min(member_length, 0x200)` is an implementation
+design decision, not a separately owner-approved invariant.
 
 The source policy file at the pinned revision embeds distribution pin
 `142422527de28b8e20dea1158d2f54d020dcdcd5`; the installed
 `/Users/daniel/.agents/skills/delegation-executor/SKILL.md` embeds the
 owner-approved `e2afa...` revision. The observed difference is limited to the
-pin line. The discrepancy is recorded here; no policy file was changed.
-Production Skill activation remains pending.
+pin line. It is recorded here; no policy file was changed. Production Skill
+activation remains pending.
 
-## 2. Upstream fixture provenance and limits
+## 2. Upstream interoperability fixture
 
-The external fixture used upstream NSZ commit
-[`148218ff89bb4b607d07730a8cf87d5e1f249ebc`](https://github.com/nicoboss/nsz/tree/148218ff89bb4b607d07730a8cf87d5e1f249ebc).
-Its outer XCI/HFS0 container was written with that revision's `XciStream` and
-`Hfs0Stream` classes. It reproduces the upstream zero-sized, zero-digest HFS0
-entries, one-NUL-byte empty partition tables, and copied card header. The
-fixture's Program NCZ member was generated from the independent synthetic
-Program NCA using NSCB's existing encoder; it was not produced by the upstream
-full compression command.
+### 2.1. Repository-controlled complete fixture
 
-The pinned upstream CLI was also tried with the synthetic NCA and key file,
-but rejected the synthetic key material before compression. As a result, this
-qualification demonstrates upstream container-writer compatibility and
-NSCB decompression of the supported NCZ record; it does not claim a complete
-upstream-compressor-to-NSCB end-to-end oracle.
+The acceptance fixture is a rights-free synthetic two-member Application. The
+repository helpers build and retain the source XCI, Meta NCA, and uncompressed
+Program NCA. Pinned upstream NSZ generates the Program NCZ payload and the
+solid XCZ container. NSCB's encoder does not produce the NCZ payload.
 
-Fixture files and the generator were kept under `/tmp/nscb-upstream-fixture`
-and were not stored in the repository. The fixture does not need a repository
-binary registry entry. Recorded fixture SHA-256 values:
+The upstream source is
+[NSZ commit `148218ff89bb4b607d07730a8cf87d5e1f249ebc`](https://github.com/nicoboss/nsz/tree/148218ff89bb4b607d07730a8cf87d5e1f249ebc).
+The CLI entry path is `nsz.py -> nsz.main -> compress -> solidCompressXci ->
+processContainer`. The generator invokes `nsz.py` with `-C --solid --level 1
+--threads 1 --multi 1`; it omits `--block`. The run uses an XCI input, solid
+compression, one worker and one stream, and a synthetic key file. The synthetic
+keys pass the pinned parser's CRC checks, and the derived Application KAEK is
+checked against the NCA evidence. No production or proprietary keys are used.
 
-| Artifact | SHA-256 |
+The recorded generator environment is Python 3.14.4 with these pinned package
+versions:
+
+| Package | Version |
+| --- | ---: |
+| `blessed` | 1.52.0 |
+| `enlighten` | 1.14.1 |
+| `jinxed` | 2.1.0 |
+| `prefixed` | 0.9.0 |
+| `pycryptodome` | 4.5.0 |
+| `wcwidth` | 0.9.4 |
+| `zstandard` | 0.25.0 |
+
+`tests/fixtures/xcz-to-xci/upstream-nsz/generate.py` verifies the upstream
+checkout's exact commit and requires its tracked and untracked working tree to
+be clean before importing NSZ code. It disables Python bytecode writes in that
+checkout. The generator verifies the source XCI's Meta and Program members
+against retained evidence, creates the temporary synthetic key file inside the
+fixture directory, invokes the upstream CLI, and extracts the Program NCZ
+member from the resulting XCZ. The key file is removed when the generator
+exits. The CLI test reads its input evidence from checked-in artifacts and
+creates and removes its own temporary directory. It does not rely on artifacts
+left in `/tmp` or an upstream checkout.
+
+A negative generator check added an untracked sentinel to the upstream
+checkout and confirmed generation stopped with a clean-checkout error. After
+removing the sentinel, generation succeeded and reproduced the recorded
+artifact hashes.
+
+The raw upstream output is retained as `upstream-raw.xcz`. Its root HFS0 table
+declares a secure-partition extent that ends 410 bytes after the raw file. The
+acceptance fixture `upstream.xcz` appends exactly 410 zero alignment bytes so
+the declared region is present. The generator confirms the missing length
+before applying this adaptation. It does not change the card header, HFS0
+tables, entry records, or compressed member bytes. The raw artifact remains
+available so this difference is inspectable.
+
+An upstream `--quick-verify` attempt on this source reported a hash mismatch.
+The cause was not isolated, and that command is not used as passing evidence.
+Acceptance instead checks the reconstructed Meta and Program members byte for
+byte and by full-content SHA-256 against the retained uncompressed files.
+
+To rebuild the upstream-produced artifacts, check out the pinned upstream
+commit, install the versions in `requirements.lock`, then run:
+
+```sh
+git clone https://github.com/nicoboss/nsz.git /path/to/nsz-checkout
+git -C /path/to/nsz-checkout checkout 148218ff89bb4b607d07730a8cf87d5e1f249ebc
+python3.14 -m venv /path/to/nsz-env
+/path/to/nsz-env/bin/python -m pip install -r tests/fixtures/xcz-to-xci/upstream-nsz/requirements.lock
+/path/to/nsz-env/bin/python tests/fixtures/xcz-to-xci/upstream-nsz/generate.py --upstream-root /path/to/nsz-checkout
+```
+
+The fixture generator prints a JSON manifest with settings, the synthetic key
+file SHA-256, the alignment adjustment, and artifact hashes. The key file
+itself is transient. Its recorded SHA-256 is
+`56c8ea6f228e6acee7a886481eecf035d62277daca67a7aa94b5ae837bc9fa0a`.
+
+| Stored artifact | SHA-256 |
+| --- | --- |
+| `source.xci` | `32f9ceef52681b648bfc296e5603e8fb92a452ea23d9e1f529e9e7e059832573` |
+| `meta.nca` | `87bfa1629b651e3f49a9ba053fb3842c5c34e31c9303e6e1807703cd84e68e7f` |
+| `program.nca` | `166f438248bd9fbad65125fb76af5e002812e7a104902a516d626f3a6850bd2c` |
+| `program.ncz` | `7047c3de8d7b777769181a037e7b6b538d6de9ac1833e460ef9b0fab6be58321` |
+| `upstream-raw.xcz` | `7cd4b1890666d573426b08d834da788b30cd630f7014acdbb14d4e2eed5434c3` |
+| `upstream.xcz` | `55e2c70ccd5e0c3de60158104426147fb90a30614273c7a3dc400dd84ee70115` |
+
+The six binary artifacts are registered in `tests/fixtures/registry.json`
+because they are stored in the repository. The reconstructed XCI is generated
+inside the CLI test and is not stored or registered.
+
+### 2.2. Earlier partial fixture record
+
+An earlier external fixture combined an upstream XCI/HFS0 container writer with
+a Program NCZ produced by NSCB's encoder. It established compatibility with
+upstream's zero-sized, zero-digest HFS0 entries, one-NUL-byte empty partition
+tables, and copied card header. The pinned upstream compression CLI rejected
+that fixture's initial synthetic key material. This hybrid did not satisfy the
+complete upstream-producer criterion and is retained here only as historical
+evidence. Its files were kept under `/tmp`, were not stored in the repository,
+and therefore had no registry entry.
+
+| Earlier external artifact | SHA-256 |
 | --- | --- |
 | `upstream.xcz` | `11bba8dc02535bbc8e1d631c6011702726b4e86605ff70a4d7f8767e8e522417` |
 | `meta.nca` | `6004d5de4eb90696acb8a118c0d8953d0754027e788f67c90edffbbcdd847577` |
@@ -44,94 +123,113 @@ binary registry entry. Recorded fixture SHA-256 values:
 | `program.ncz` | `b235f7e37898189282340a6982bf0d25b2bdbfd537ac5ffc3c8797dc7f401d4c` |
 | `reconstructed.xci` | `20736de6953b022384fca27d7a16e547b7a9aee68949e499816b233314739777` |
 
-The successful standalone CLI conversion returned `succeeded` with outcome
-`decompressed`. Its result also reported `cleanup_incomplete`: the existing
-operation artifact-retention path kept staged artifacts in the external
-workspace. This is not a conversion failure, but the retained artifact state
-is recorded rather than hidden.
+That conversion returned `succeeded` with outcome `decompressed`, and the
+reconstructed Meta and Program bytes matched the external uncompressed
+evidence. The run also reported `cleanup_incomplete` because it retained
+staging artifacts in an external workspace. The output was inspected for HFS0
+prefix hashes, the root digest, geometry, opaque fields, and image length. This
+partial fixture is superseded by the repository-controlled fixture above.
 
-Independent inspection confirmed that reconstructed Meta and Program bytes
-and full SHA-256 digests match the synthetic uncompressed evidence. It also
-checked every output HFS0 prefix hash, root digest, card-header geometry,
-preserved opaque bytes, and output length. The staged image was recognized by
-the existing XCI recognizer. Output HFS0 hash reads totaled 2,560 bytes for
-this fixture.
+## 3. PAC acceptance evidence
 
-## 3. PAC and TAC evidence
+### PAC-1: upstream interoperability and content qualification
 
-### PAC-1 — Correct decompression
+The native CLI test rebuilds the source XCI from repository helpers and checks
+it byte for byte against `source.xci`. It confirms the upstream XCZ contains
+the retained `program.ncz`, then runs `xcz-to-xci` and compares both output NCA
+members to the retained Meta and Program files by full bytes and full SHA-256.
+The semantic qualifier independently checks the two-member Application CNMT
+relationships, sizes, content IDs, types, and title identity. These full NCA
+checks are separate from HFS0 prefix hashes.
 
-The Engine end-to-end test and the external fixture both reconstruct the
-Program NCA and preserve the Meta NCA. The semantic qualifier checks the
-two-member Application CNMT against full NCA sizes, digests, content IDs,
-types, and title identity. Full NCA digests are separate from output HFS0
-prefix hashes.
+The source has upstream's absent HFS0 entry hashes and a copied card-header
+root hash. XCZ qualification accepts only the approved absent tuple
+`(hashed_size = 0, digest = all-zero)`. It treats the copied root hash as stale
+evidence rather than successful verification. Output construction recomputes
+the card-header root HFS0 hash and independently verifies it in staged output.
+The ordinary XCI path still rejects zero-sized entry hashes.
 
-### PAC-2 — Failure safety
+### PAC-2: failure safety and strict ordinary conversion
 
-Tests cover malformed NCZ framing and records, unsupported NCZBLOCK framing,
-malformed HFS0 names and hashes, incorrect present hashes, invalid absent
-hash tuples, stale root-hash handling, malformed keys, missing keys,
-unsupported profiles, and bounded size/geometry arithmetic. Failures do not
-publish a partial destination.
+Existing tests cover malformed NCZ framing and records, unsupported NCZBLOCK
+framing, malformed HFS0 names and hashes, incorrect present hashes, invalid
+absent-hash tuples, stale root-hash handling, malformed and missing keys,
+unsupported profiles, and bounded size and geometry arithmetic. They also
+cover source and key identity changes, cancellation, destination races,
+staged-output rejection, conflict handling, and failure without publishing a
+partial destination. Output uses protected staging and is independently
+checked before conflict resolution and atomic publication.
 
-### PAC-3 — Publication safety
+Ordinary XCI conversion remains strict. `tests/xci_to_nsp.rs` explicitly
+rejects zero-sized HFS0 hashes and bad prefix digests. NSP-to-NSZ and NSZ-to-NSP
+continue to use the shared bounded NCZ decoder and retain their existing
+contracts.
 
-Tests cover cancellation during member hashing and semantic qualification,
-source and key identity changes, destination races, staged-output rejection,
-and conflict behavior. Output is written in protected staging and checked
-independently before destination conflict resolution and atomic publication.
+### PAC-3: large-member HFS0 prefix validation
 
-### PAC-4 — Public integration
+`recognition::tests::bounded_hfs_prefixes_keep_large_member_hashing_inside_the_shared_budget`
+builds a sparse XCI with a nominal 150 MiB Program member. It runs the strict
+root and nested HFS0 parser through a byte-counting reader. The test checks
+every declared prefix equals `min(member_length, 0x200)`, checks the entry
+digests by requiring strict parsing to succeed, and counts actual bytes read
+across the parser passes against the unchanged 256 MiB cumulative budget. The
+sparse extension avoids allocating a 150 MiB in-memory payload.
 
-The operation is exposed through the typed Engine and `xcz-to-xci` CLI
-integration. Public recognition and ordinary XCI conversion remain strict.
-NSP↔NSZ regression tests continue to exercise the shared decoder and existing
-operation behavior.
+The test changes a byte beyond the Program entry's 0x200-byte prefix and
+confirms that the HFS0 digest remains unchanged. Prefix validation therefore
+does not claim full-member integrity. Full-content NCA SHA-256 and CNMT
+qualification supply the separate semantic checks. Existing unit tests cover
+short members, `u64`-sized lengths, checked HFS0 hash sizing, and distinct
+prefix and full-content spans without allocating multi-gigabyte fixtures.
 
-## 4. Native validation
+### PAC-4: CLI contract
 
-Native qualification uses macOS arm64 and the repository's pinned Rust 1.98.1
-toolchain. An earlier `make all` completed before the final cancellation-probe
-follow-up. On the final rerun, content policy (53 tests), all-target checks,
-formatting, and strict Clippy passed. The run reached `tests/test_cleanup.py`
-while the host disk was full; several cleanup cases errored and I interrupted
-the suite to prevent further disk exhaustion. That last `make all` run is not
-a pass.
+`tests/xcz_to_xci_cli.rs` runs the actual `nscb xcz-to-xci` executable with
+synthetic inputs and keys. The successful JSON test checks the exact existing
+top-level schema, version, operation kind, result state, and outcome. The JSONL
+test checks one JSON object per line, schema version, event kind, increasing
+event sequence, and exactly one terminal result after all events. Both modes
+compare reconstructed Meta and Program bytes and full digests to retained
+evidence.
 
-After the final bounded-reader reuse, the pinned toolchain passed the full
-library suite (594 passed, four ignored), the NSP↔NSZ integration suite (17
-passed), and the ordinary XCI-to-NSP integration suites (19 and 4 passed).
-Strict Clippy passed for all targets and features. The x86_64 Apple and x86_64
-Linux all-target checks passed. The final library suite includes the
-cancellation checkpoint tests. A separately instrumented standalone CLI run
-converted the upstream fixture, and its invalid-argument and usage paths
-completed with their expected CLI errors.
+The subprocess tests also check invalid arguments (exit 2), missing keys and
+malformed input (exit 3), stable error documents, no output on failure, and
+sanitized diagnostics without temporary paths or synthetic key bytes. A
+non-macOS arm64 test checks `unsupported_capability` before opening input
+paths. No public JSON or JSONL fields were added.
 
-The first draft CI run found that `Write` was imported unconditionally even
-though only a macOS-gated sparse-XCI test uses it. The import is now gated by
-the same platform condition, and pinned Linux all-target strict Clippy passes.
-The updated commit's CI result is tracked separately on the draft PR.
+## 4. Validation and coverage
 
-The x86_64-apple-darwin target passed `cargo check --locked --all-targets
---all-features` with Rust 1.98.1. The x86_64-unknown-linux-gnu target also
-passed `cargo check --locked --all-targets --all-features` with Rust 1.98.1,
-including the unsupported-capability planner branch. Linux AArch64 cross-
-compilation could not run because
-`aarch64-linux-gnu-gcc` is unavailable. Windows MSVC cross-compilation could
-not run because the host toolchain lacks Windows SDK/C headers. These are not
-runtime qualification results. Native qualification for other platforms
-remains outstanding; CI results are recorded with the published draft PR.
+Native runtime qualification uses macOS arm64 and the repository's Rust
+1.98.1 toolchain. The final `cargo test --locked --all-features` run passed all
+24 test targets: 1,211 passed, 0 failed, and 4 ignored. This includes the
+150 MiB sparse HFS0 test, all five XCZ CLI tests, NSP↔NSZ tests, ordinary
+XCI-to-NSP tests, and three doctests. Both `rustc` and `rustdoc` were pinned to
+1.98.1 for this run.
 
-Coverage is generated with Rust's `-C instrument-coverage` and the matching
-Xcode `llvm-profdata` and `llvm-cov`. The changed-code calculation counts
-changed Rust lines that LLVM records as executable, and excludes comments,
-inline `#[cfg(test)]` modules, documentation, unchanged source lines, and
-test-only helpers. It combines library coverage with the separate instrumented
-CLI run. This is the last measured snapshot before the cancellation-probe
-follow-up. The final code adds executable cancellation paths; aggregate
-coverage was not rerun, so the percentages below do not describe the exact
-final diff.
+`cargo fmt --check` and strict all-target, all-feature Clippy also passed on
+the pinned toolchain. The focused sparse-parser test passed independently. The
+x86_64 Linux all-target check compiled the unsupported-platform CLI test. The
+x86_64 macOS all-target check compiled with existing unused-code warnings in
+architecture-gated NCZ and provider modules. These cross-target checks establish
+compilation only.
+
+The x86_64 Linux all-target check exercises compilation of the
+unsupported-platform CLI test. The x86_64 macOS all-target check also compiles;
+it reports existing unused-code warnings in architecture-gated NCZ and
+provider modules. No runtime claim follows from either cross-target check.
+
+The instrumented `cargo test --locked --all-features` attempt exited 1. The
+non-instrumented run exposed a toolchain mismatch: the shell paired pinned Rust
+1.98.1 `rustc` with Homebrew `rustdoc`, which caused incompatible-crate errors
+in doctests. The full suite passed after both tools were pinned. The
+`cargo-llvm-cov` subcommand is unavailable. Xcode's `llvm-cov` could read the
+generated profiles but did not produce a trustworthy changed-line aggregate,
+so no current coverage percentage is reported.
+
+The following coverage table is the last measured snapshot from before the
+cancellation-probe follow-up. It is retained as historical evidence only and
+does not describe the current PR head:
 
 | Source file | Covered changed executable lines |
 | --- | ---: |
@@ -146,89 +244,64 @@ final diff.
 | `src/xcz_to_xci.rs` | 1,292 / 1,400 (92.29%) |
 | **Changed Rust executable lines** | **2,086 / 2,266 (92.06%)** |
 
-The aggregate exceeds the 90% target. The changed `src/operation.rs` lines are
-below 90%; remaining gaps are in rare staging, I/O, and resource-limit failure
-branches. Whole-file coverage for shared files is not presented as slice
-coverage. The unsupported-capability branch compiled in the Linux cross-check
-is not part of the native macOS runtime coverage profile.
+That earlier calculation excluded comments, inline `#[cfg(test)]` modules,
+documentation, unchanged source lines, and test-only helpers. It combined
+library coverage with a separately instrumented CLI run. `src/operation.rs`
+was below the former 90% target; the gaps were in rare staging, I/O, and
+resource-limit failure branches. The table is not current coverage evidence.
 
-## 5. Independent review and release boundary
+Earlier validation history includes a `make all` run interrupted at
+`tests/test_cleanup.py` when the host disk was full; cleanup cases errored, so
+that run did not pass. Linux AArch64 cross-compilation was not available when
+`aarch64-linux-gnu-gcc` was missing, and Windows MSVC compilation was not
+available without the Windows SDK and C headers. Those checks are not runtime
+qualification.
 
-Local Cubic passes reviewed the source, recognition, integration, fixture,
-and documentation changes. One pass questioned the staged root-offset check.
-XCZ planning first uses the strict XCI structural parser, which rejects a
-root HFS0 offset other than `0xF000`; the reconstructed output uses that same
-offset. The concern does not apply to this qualified profile.
+## 5. Independent review history
 
-Another pass found that the Engine exposed XCZ planning on every target while
-the operation planner existed only on macOS. The planner now returns
-`UnsupportedCapability` outside macOS and on macOS targets other than arm64.
-The pinned Rust 1.98.1 x86_64 Linux all-target check passes with this branch.
+Earlier local Cubic passes reviewed the implementation, recognition rules,
+integration, fixtures, and documentation. Their findings and dispositions
+remain part of this record:
 
-A later pass questioned whether the input root digest could cover partition
-data or exceed the read budget, and whether `ncz` compiled outside macOS. The
-parser requires the root table to fit in the declared root region, the region
-to fit the input file, and each root entry to begin after that region. It
-hashes only the declared region, including padding, and charges those bytes
-to the unchanged cumulative 256 MiB budget. The Linux all-target check also
-passed.
+1. A staged root-offset concern was assessed against the existing strict XCI
+   parser. XCZ planning accepts only the qualified profile with root HFS0 at
+   `0xF000`, and reconstructed output uses the same offset.
+2. A cross-platform planning concern was fixed. The Engine now returns
+   `UnsupportedCapability` outside macOS arm64 before opening inputs.
+3. A root digest range and read-budget concern was assessed against
+   `inspect_xcz_for_conversion`: the parser bounds the declared root region to
+   the input, requires the table and entries to fit, and charges root hashing
+   to the existing cumulative 256 MiB budget.
+4. Two P1 architecture findings requested shared copy-through planning and a
+   feature-specific `XczSemanticInput` adapter. A later pass repeated the
+   shared-planning finding. The operation reuses
+   `plan_copy_through_unix_for_output` to collect source and destination
+   evidence, protected staging, and conflict metadata, then sets
+   `OperationKind::XczToXci` and attaches `XczToXciPlan`. The plan carries no
+   copy-through-only state, and review found no copy-through behavior in the
+   XCZ route. `XczSemanticInput` exposes bounded reads over the retained Meta
+   span and reconstructed Program spool so the existing semantic qualifier
+   can check CNMT relationships without changing its interface.
+5. The later review also reported a P2 maintainability finding: `src/xcz_to_xci.rs`
+   groups source qualification, the virtual package view, XCI layout and
+   serialization, staged verification, and tests. Splitting it would add
+   module boundaries beyond the approved design, so the suggestion remains
+   deferred.
+6. An independent specification review found that staged semantic
+   qualification did not poll cancellation while hashing full NCA members and
+   checking CNMT relationships. Qualification now polls cancellation during
+   bounded member hashing and at work checkpoints. Tests cover cancellation in
+   those phases.
+7. A Cubic pass found a duplicate bounded `SpanReader` in `nsp_nsz.rs` and
+   `ncz.rs`. The duplicate was removed and NSP↔NSZ now uses the shared reader
+   in the NCZ module. Follow-up review found no issue with that correction.
 
-An earlier complete-diff Cubic pass reported two P1 architecture findings:
-the use of shared copy-through planning for XCZ and the feature-specific
-`XczSemanticInput` virtual PFS0 adapter. A later pass reported one P1 and one
-P2:
+An earlier review also objected that the first upstream fixture was external
+and hybrid. The repository-controlled upstream fixture in §2.1 supersedes that
+limitation. The earlier partial fixture and its hashes remain in §2.2.
 
-1. The P1 finding says XCZ is modeled as copy-through because planning starts
-   with `plan_copy_through_unix_for_output`.
-2. The P2 finding notes that the 1,785-line `src/xcz_to_xci.rs` module
-   contains qualification, the virtual reader, layout and serialization,
-   staged verification, and tests.
-
-The plan reuses the output planner for source and destination evidence,
-protected staging, and conflict metadata. It then sets
-`OperationKind::XczToXci` and attaches `XczToXciPlan`; execution selects the
-XCZ producer. The plan carries no CopyThrough-specific state, and I found no
-copy-through behavior leak. Shared key-identity and staging-context helpers
-use names that describe their cross-route use.
-
-`XczSemanticInput` exposes bounded reads and seeks over the preserved Meta
-span and reconstructed Program spool. It revalidates source and spool
-identities and lets the existing qualifier check CNMT relationships without
-writing another package or changing the qualifier interface. The module is
-large; its implementation groups the source profile, virtual package view,
-XCI layout, writer, and verifier for this operation. Splitting those pieces
-would add module boundaries beyond the approved design. These findings remain
-recorded as architecture and maintainability concerns. Neither review found
-a reproducible correctness or safety defect that required a behavior change.
-
-The final Cubic pass reported a P1 concern that the XCZ root digest might
-extend beyond the declared root region. The finding does not account for the
-first parser pass in `inspect_xcz_for_conversion`: `Parser::xci` requires the
-declared region to fit in the input, the parsed table to fit in that region,
-and every root entry to begin after it. The conversion pass then hashes
-exactly the declared region, including padding, under the same 256 MiB read
-budget. I found no unbounded root-hash read and made no behavior change.
-
-An independent spec review found that staged semantic qualification did not
-poll cancellation while `qualify_xci` hashed full NCA members and checked CNMT
-relationships. The validator now uses `qualify_xci_with_cancellation_probe`,
-which polls during bounded member hashing and passes the probe through the
-virtual-input qualifier's work checkpoints. Tests cover cancellation in both
-phases. The review also noted that the upstream-writer fixture is external
-and cannot be replayed by CI from this candidate. Its provenance and hashes
-remain recorded here; it was generated outside the repository, so no binary
-fixture registry entry was added.
-
-The final local Cubic pass found a duplicate bounded `SpanReader` in
-`nsp_nsz.rs` and `ncz.rs`. Since NSP↔NSZ already uses the shared NCZ module,
-`nsp_nsz.rs` now imports the shared reader and the duplicate implementation
-has been removed. That pass also repeated the module-size P2 concern. Splitting
-the operation's qualification, virtual input, writer, and verifier into more
-modules would broaden the approved architecture, so that maintainability
-suggestion remains deferred. A follow-up local Cubic review after the reader
-change found no issues.
-
-Cubic reviewed the local diff without GitHub repository context. No GitHub
-review was requested. CI is tracked separately on the draft PR linked to
-Issue #17. This slice does not authorize merge, issue closure, or production
-policy activation.
+The current cumulative-diff Cubic review record, including the reviewed
+candidate tree, reviewer provenance, findings, and correction-delta
+dispositions, is stored with the local qualification evidence for this PR.
+No GitHub review was requested. The draft PR and Issue #17 remain open until
+ChatGPT completes renewed direct source and test review.

@@ -45,6 +45,27 @@ fn canonical_package(meta_nca: &[u8], program_nca: &[u8]) -> Vec<u8> {
     canonical_package_members(&[("meta.nca", meta_nca), ("program.nca", program_nca)])
 }
 
+/// Builds an uncompressed XCI containing the two-member synthetic Application.
+pub fn xci(meta_nca: &[u8], program_nca: &[u8], package: &[u8], key_file: &[u8]) -> Fixture {
+    let secure_members = [
+        Member {
+            name: "meta.nca",
+            bytes: meta_nca,
+        },
+        Member {
+            name: "program.nca",
+            bytes: program_nca,
+        },
+    ];
+    build_profile_with_members(
+        &secure_members,
+        &["update", "normal", "secure"],
+        None,
+        package.to_vec(),
+        key_file.to_vec(),
+    )
+}
+
 fn canonical_package_members(members: &[(&str, &[u8])]) -> Vec<u8> {
     let mut strings = Vec::new();
     let mut entries = Vec::new();
