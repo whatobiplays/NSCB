@@ -26,6 +26,8 @@ mod key_file;
 mod multi_content_format;
 mod nca;
 mod nca_crypto;
+#[cfg(target_os = "macos")]
+mod ncz;
 mod nsp_nsz;
 mod nsp_semantic_qualification;
 mod operation;
@@ -42,6 +44,7 @@ mod split_trust;
 mod strict_json;
 mod verification;
 mod xci_to_nsp;
+mod xcz_to_xci;
 
 #[cfg(test)]
 mod test_allocator;
@@ -133,3 +136,4 @@ pub use verification::{
     VerificationReason, VerificationRequest, VerificationResult,
 };
 pub use xci_to_nsp::XciToNspRequest;
+pub use xcz_to_xci::XczToXciRequest;
