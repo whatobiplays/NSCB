@@ -35,6 +35,16 @@ pub(crate) struct OutputGeometry {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct OutputLayout {
+    secure_offset: u64,
+    secure_length: u64,
+    meta_offset: u64,
+    program_offset: u64,
+    output_length: u64,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[derive(Clone)]
 pub(crate) struct HfsEntry<'a> {
     pub(crate) name: &'a str,
@@ -43,14 +53,13 @@ pub(crate) struct HfsEntry<'a> {
     pub(crate) digest: [u8; 32],
 }
 
+/// Computes the checked offsets and serialized length shared by XCI layout paths.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) fn output_geometry(
+fn checked_output_layout(
     meta_length: u64,
     program_length: u64,
     has_logo: bool,
-    rom_size: u8,
-    valid_data_end: u32,
-) -> Result<OutputGeometry, crate::operation::OperationFailureCode> {
+) -> Result<OutputLayout, crate::operation::OperationFailureCode> {
     if meta_length == 0 || program_length == 0 {
         return Err(crate::operation::OperationFailureCode::UnsupportedContentProfile);
     }
@@ -58,10 +67,9 @@ pub(crate) fn output_geometry(
         .checked_add(HFS_HEADER_SIZE)
         .and_then(|offset| offset.checked_add(CARD_HEADER_SIZE * 2))
         .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?;
-    let secure_data_start = secure_offset
+    let meta_offset = secure_offset
         .checked_add(HFS_HEADER_SIZE)
         .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?;
-    let meta_offset = secure_data_start;
     let meta_end = meta_offset
         .checked_add(meta_length)
         .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?;
@@ -84,7 +92,27 @@ pub(crate) fn output_geometry(
         return Err(crate::operation::OperationFailureCode::ResourceLimitExceeded);
     }
 
-    let physical_end = output_length
+    Ok(OutputLayout {
+        secure_offset,
+        secure_length,
+        meta_offset,
+        program_offset,
+        output_length,
+    })
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn output_geometry(
+    meta_length: u64,
+    program_length: u64,
+    has_logo: bool,
+    rom_size: u8,
+    valid_data_end: u32,
+) -> Result<OutputGeometry, crate::operation::OperationFailureCode> {
+    let layout = checked_output_layout(meta_length, program_length, has_logo)?;
+
+    let physical_end = layout
+        .output_length
         .checked_add(0x1000)
         .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?;
     let physical_end_pages = div_ceil(physical_end, CARD_HEADER_SIZE)?;
@@ -93,7 +121,8 @@ pub(crate) fn output_geometry(
     if physical_end_pages > capacity_pages || physical_end_pages > u64::from(valid_data_end) {
         return Err(crate::operation::OperationFailureCode::UnsupportedXciProfile);
     }
-    let physical_secure_page = secure_offset
+    let physical_secure_page = layout
+        .secure_offset
         .checked_add(0x1000)
         .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?
         / CARD_HEADER_SIZE;
@@ -102,11 +131,11 @@ pub(crate) fn output_geometry(
     Ok(OutputGeometry {
         root_offset: ROOT_PLACEMENT,
         root_header_size: HFS_HEADER_SIZE,
-        secure_offset,
-        secure_length,
-        meta_offset,
-        program_offset,
-        output_length,
+        secure_offset: layout.secure_offset,
+        secure_length: layout.secure_length,
+        meta_offset: layout.meta_offset,
+        program_offset: layout.program_offset,
+        output_length: layout.output_length,
         rom_area_start_page,
     })
 }
@@ -118,37 +147,7 @@ pub(crate) fn output_length_bound(
     program_length: u64,
     has_logo: bool,
 ) -> Result<u64, crate::operation::OperationFailureCode> {
-    if meta_length == 0 || program_length == 0 {
-        return Err(crate::operation::OperationFailureCode::UnsupportedContentProfile);
-    }
-    let secure_offset = ROOT_PLACEMENT
-        .checked_add(HFS_HEADER_SIZE)
-        .and_then(|offset| offset.checked_add(CARD_HEADER_SIZE * 2))
-        .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?;
-    let meta_offset = secure_offset
-        .checked_add(HFS_HEADER_SIZE)
-        .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?;
-    let program_offset = align_card_page(
-        meta_offset
-            .checked_add(meta_length)
-            .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?,
-    )?;
-    let secure_end = align_card_page(
-        program_offset
-            .checked_add(program_length)
-            .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?,
-    )?;
-    let output_length = if has_logo {
-        secure_end
-            .checked_add(CARD_HEADER_SIZE)
-            .ok_or(crate::operation::OperationFailureCode::ResourceLimitExceeded)?
-    } else {
-        secure_end
-    };
-    if output_length > crate::nsp_nsz::MAX_PACKAGE_BYTES {
-        return Err(crate::operation::OperationFailureCode::ResourceLimitExceeded);
-    }
-    Ok(output_length)
+    checked_output_layout(meta_length, program_length, has_logo).map(|layout| layout.output_length)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -434,4 +433,117 @@ pub(crate) fn verify_hfs_entries(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+mod output_layout_tests {
+    use super::{
+        CARD_HEADER_SIZE, HFS_HEADER_SIZE, ROOT_PLACEMENT, checked_output_layout, output_geometry,
+        output_length_bound,
+    };
+    use crate::{OperationFailureCode, nsp_nsz::MAX_PACKAGE_BYTES};
+
+    fn geometry(meta_length: u64, program_length: u64, has_logo: bool) -> super::OutputGeometry {
+        output_geometry(meta_length, program_length, has_logo, 0xE2, u32::MAX)
+            .expect("synthetic member lengths fit the supported card")
+    }
+
+    #[test]
+    fn checked_layout_places_aligned_members_and_includes_optional_logo() {
+        let layout = checked_output_layout(0x400, 0x800, false).expect("aligned layout");
+        let layout_with_logo =
+            checked_output_layout(0x400, 0x800, true).expect("aligned layout with logo");
+        let expected_secure_offset = ROOT_PLACEMENT + HFS_HEADER_SIZE + CARD_HEADER_SIZE * 2;
+        let expected_meta_offset = expected_secure_offset + HFS_HEADER_SIZE;
+
+        assert_eq!(layout.secure_offset, expected_secure_offset);
+        assert_eq!(layout.meta_offset, expected_meta_offset);
+        assert_eq!(layout.program_offset, expected_meta_offset + 0x400);
+        assert_eq!(layout.output_length, 0x20_000);
+        assert_eq!(
+            layout_with_logo.output_length,
+            layout.output_length + CARD_HEADER_SIZE
+        );
+        assert_eq!(
+            geometry(0x400, 0x800, true).output_length,
+            layout_with_logo.output_length
+        );
+        assert_eq!(
+            output_length_bound(0x400, 0x800, false),
+            Ok(layout.output_length)
+        );
+        assert_eq!(
+            output_length_bound(0x400, 0x800, true),
+            Ok(layout.output_length + CARD_HEADER_SIZE)
+        );
+    }
+
+    #[test]
+    fn checked_layout_rounds_unaligned_member_ends_to_card_pages() {
+        let layout = checked_output_layout(0x401, 0x801, false).expect("unaligned layout");
+        let expected_meta_offset = ROOT_PLACEMENT + HFS_HEADER_SIZE * 2 + CARD_HEADER_SIZE * 2;
+
+        assert_eq!(layout.meta_offset, expected_meta_offset);
+        assert_eq!(layout.program_offset, expected_meta_offset + 0x600);
+        assert_eq!(layout.output_length, 0x20_400);
+        assert_eq!(layout.output_length % CARD_HEADER_SIZE, 0);
+    }
+
+    #[test]
+    fn geometry_and_preflight_bound_share_the_same_measured_layout() {
+        for has_logo in [false, true] {
+            let measured = geometry(0x401, 0x801, has_logo);
+            let exact_bound =
+                output_length_bound(0x401, 0x801, has_logo).expect("exact preflight bound");
+            let larger_bound =
+                output_length_bound(0x401, 0x1_001, has_logo).expect("upper-bound preflight size");
+            let smaller_measured = geometry(0x401, 0x601, has_logo);
+
+            assert_eq!(measured.output_length, exact_bound);
+            assert!(smaller_measured.output_length <= exact_bound);
+            assert!(exact_bound <= larger_bound);
+        }
+    }
+
+    #[test]
+    fn checked_layout_rejects_maximum_size_and_arithmetic_overflow() {
+        assert_eq!(
+            output_length_bound(MAX_PACKAGE_BYTES, 1, false),
+            Err(OperationFailureCode::ResourceLimitExceeded)
+        );
+        assert_eq!(
+            output_geometry(MAX_PACKAGE_BYTES, 1, false, 0xE2, u32::MAX),
+            Err(OperationFailureCode::ResourceLimitExceeded)
+        );
+
+        let meta_offset = ROOT_PLACEMENT + HFS_HEADER_SIZE * 2 + CARD_HEADER_SIZE * 2;
+        assert_eq!(
+            output_length_bound(u64::MAX - meta_offset, 1, false),
+            Err(OperationFailureCode::ResourceLimitExceeded)
+        );
+        assert_eq!(
+            output_length_bound(u64::MAX, 1, false),
+            Err(OperationFailureCode::ResourceLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn checked_geometry_retains_rom_size_and_valid_data_end_constraints() {
+        assert_eq!(
+            output_geometry(1, 1, false, 0xFF, u32::MAX),
+            Err(OperationFailureCode::UnsupportedXciProfile)
+        );
+
+        let layout = checked_output_layout(0x400, 0x800, false).expect("small layout");
+        let physical_end = layout.output_length + 0x1000;
+        let physical_end_pages = physical_end.div_ceil(CARD_HEADER_SIZE);
+        assert_eq!(
+            output_geometry(0x400, 0x800, false, 0xE2, physical_end_pages as u32 - 1),
+            Err(OperationFailureCode::UnsupportedXciProfile)
+        );
+        assert_eq!(
+            output_geometry(1 << 30, 1, false, 0xFA, u32::MAX),
+            Err(OperationFailureCode::UnsupportedXciProfile)
+        );
+    }
 }
