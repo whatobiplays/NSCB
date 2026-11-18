@@ -13,6 +13,7 @@ use crate::pfs0;
 use crate::split_operation::{SplitPlan, SplitRequest};
 use crate::split_trust::SplitTrustWriter;
 use crate::xci_to_nsp::XciToNspRequest;
+use crate::xci_to_xcz::XciToXczRequest;
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
@@ -89,6 +90,17 @@ impl Engine {
         request: XciToNspRequest,
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_xci_to_nsp(request)
+    }
+
+    /// Plans compression of a qualified rights-free base Application XCI as XCZ.
+    ///
+    /// Only native macOS arm64 executes this conversion. Its Program section
+    /// key and counter are written to standard plaintext NCZ metadata.
+    pub fn plan_xci_to_xcz(
+        &self,
+        request: XciToXczRequest,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_xci_to_xcz(request.into_parts())
     }
 
     /// Plans reconstruction of one rights-free Application XCZ as an XCI.
