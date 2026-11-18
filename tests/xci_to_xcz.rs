@@ -1,10 +1,14 @@
 mod support;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use nscb::{
-    CancellationHandle, ConflictPolicy, Engine, JobState, OperationFailureCode, OperationOutcome,
-    OperationSession, XciToNspRequest, XciToXczRequest, XczToXciRequest,
+    CancellationHandle, ConflictPolicy, JobState, OperationOutcome, OperationSession,
+    XciToNspRequest, XczToXciRequest,
 };
+use nscb::{Engine, OperationFailureCode, XciToXczRequest};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::fs;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::{Path, PathBuf};
 
 #[allow(dead_code)]
@@ -17,6 +21,7 @@ mod synthetic_nsp_qualification;
 #[path = "support/synthetic_xci.rs"]
 mod synthetic_xci;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 struct TestFiles {
     source: PathBuf,
     destination: PathBuf,
@@ -24,6 +29,7 @@ struct TestFiles {
     workspace: PathBuf,
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn write_fixture(directory: &Path, fixture: &synthetic_xci::Fixture) -> TestFiles {
     let files = TestFiles {
         source: directory.join("source.xci"),
@@ -37,6 +43,7 @@ fn write_fixture(directory: &Path, fixture: &synthetic_xci::Fixture) -> TestFile
     files
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn qualified_fixture() -> (synthetic_xci::Fixture, synthetic_nsp_qualification::Fixture) {
     let payload = vec![0xA5; 0x9000];
     let nsp = synthetic_nsp_qualification::build_with_program_payload(&payload, |_| {});
@@ -51,6 +58,7 @@ fn qualified_fixture() -> (synthetic_xci::Fixture, synthetic_nsp_qualification::
     (xci, nsp)
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn three_member_fixture() -> synthetic_xci::Fixture {
     let title_id = synthetic_nsp_qualification::PROGRAM_ID;
     let control = synthetic_control_nca::build_for_program_id(
@@ -72,6 +80,7 @@ fn three_member_fixture() -> synthetic_xci::Fixture {
     )
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn pfs0_member<'a>(package: &'a [u8], expected_name: &str) -> &'a [u8] {
     assert_eq!(&package[..4], b"PFS0");
     let count = u32::from_le_bytes(package[4..8].try_into().expect("PFS0 count")) as usize;
@@ -150,6 +159,7 @@ fn xci_secure_member_names(image: &[u8]) -> Vec<String> {
     hfs_table(image, secure_offset).0
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn compression_plan(
     files: &TestFiles,
     compression: nscb::NszCompression,
@@ -157,6 +167,7 @@ fn compression_plan(
     compression_plan_with_policy(files, compression, ConflictPolicy::Fail)
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn compression_plan_with_policy(
     files: &TestFiles,
     compression: nscb::NszCompression,
