@@ -10,10 +10,10 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
 use crate::ncz::SpanReader;
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+use crate::ncz::{NczCodecIdentity, NczDictionaryPolicy, QUALIFIED_ZSTD_VERSION};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) use crate::ncz::ZeroizingBuffer;
-#[cfg(target_os = "macos")]
-pub(crate) use crate::ncz::{DEFAULT_ZSTD_WINDOW_LOG, NCZ_FRAME_OFFSET, read_ncz_record};
+pub(crate) use crate::ncz::{NczCompressionSettings, ProgramCrypto, read_ncz_record};
 
 /// Selects a supported Zstandard compression level for an NSZ output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -197,12 +197,6 @@ pub(crate) struct NspNszMember {
     pub(crate) section_size: Option<u64>,
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) struct ProgramCrypto {
-    pub(crate) section_key: zeroize::Zeroizing<[u8; 16]>,
-    pub(crate) section_counter: zeroize::Zeroizing<[u8; 8]>,
-}
-
 /// Source member order and content-derived roles captured during planning.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NspNszPackage {
@@ -231,70 +225,7 @@ pub(crate) const MAX_PACKAGE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const MAX_PFS0_METADATA_BYTES: usize = 1024 * 1024;
 #[cfg(target_os = "macos")]
-const QUALIFIED_ZSTD_VERSION: &str = "1.5.7";
-#[cfg(target_os = "macos")]
 const IO_BUFFER_SIZE: usize = 64 * 1024;
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NczCodecIdentity {
-    Zstandard,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum NczDictionaryPolicy {
-    None,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct NczCompressionSettings {
-    codec: NczCodecIdentity,
-    codec_version: &'static str,
-    compression_level: i32,
-    window_log: u32,
-    checksum: bool,
-    content_size: bool,
-    worker_threads: u32,
-    dictionary: NczDictionaryPolicy,
-    pledged_src_size: u64,
-}
-
-#[cfg(target_os = "macos")]
-impl NczCompressionSettings {
-    #[cfg(target_arch = "aarch64")]
-    pub(crate) fn for_plan(compression_level: i32, pledged_src_size: u64) -> Option<Self> {
-        let codec_version = zstd::zstd_safe::version_string();
-        if !(1..=19).contains(&compression_level)
-            || pledged_src_size == 0
-            || codec_version != QUALIFIED_ZSTD_VERSION
-        {
-            return None;
-        }
-        Some(Self {
-            codec: NczCodecIdentity::Zstandard,
-            codec_version,
-            compression_level,
-            window_log: DEFAULT_ZSTD_WINDOW_LOG,
-            checksum: true,
-            content_size: true,
-            worker_threads: 0,
-            dictionary: NczDictionaryPolicy::None,
-            pledged_src_size,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_codec_version_for_test(&mut self, codec_version: &'static str) {
-        self.codec_version = codec_version;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_pledged_src_size_for_test(&mut self, pledged_src_size: u64) {
-        self.pledged_src_size = pledged_src_size;
-    }
-}
 
 #[cfg(target_os = "macos")]
 pub(crate) fn inspect_package(
@@ -627,52 +558,48 @@ pub(crate) fn read_program_crypto(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub(crate) fn ncz_member_bound(nca_size: u64) -> Result<u64, NspNszFormatError> {
-    if nca_size <= NCZ_PREFIX_SIZE {
+pub(crate) fn inspect_program_section(
+    source: &mut std::fs::File,
+    member: &NspNszMember,
+    keys: &crate::key_file::NspQualificationKeys,
+) -> Result<(u64, u64), NspNszFormatError> {
+    use std::io::Seek;
+
+    if member.role != NspNszMemberRole::Program {
         return Err(NspNszFormatError::UnsupportedProfile);
     }
-    let suffix_size = nca_size
-        .checked_sub(NCZ_PREFIX_SIZE)
-        .ok_or(NspNszFormatError::ResourceLimit)?;
-    let suffix_size = usize::try_from(suffix_size).map_err(|_| NspNszFormatError::ResourceLimit)?;
-    let frame_bound = u64::try_from(zstd::compress_bound(suffix_size))
-        .map_err(|_| NspNszFormatError::ResourceLimit)?;
-    NCZ_FRAME_OFFSET
-        .checked_add(frame_bound)
-        .ok_or(NspNszFormatError::ResourceLimit)
+    let mut span = SpanReader::new(&mut *source, member.source_offset, member.source_size);
+    let block =
+        crate::nca::read_header_block(&mut span, member.nca_size, keys.header_key.as_bytes())
+            .map_err(map_nca_header_error)?;
+    let header =
+        crate::nca::parse_header_block(&block, member.nca_size).map_err(map_nca_header_error)?;
+    validate_supported_header(&block, &header, member.nca_size)?;
+    if header.content_type != crate::nca::ContentType::Program {
+        return Err(NspNszFormatError::UnsupportedProfile);
+    }
+    let partition = header
+        .partitions
+        .first()
+        .ok_or(NspNszFormatError::UnsupportedProfile)?;
+    if partition.offset > NCZ_PREFIX_SIZE
+        || partition
+            .offset
+            .checked_add(partition.size)
+            .filter(|end| *end == member.nca_size)
+            .is_none()
+    {
+        return Err(NspNszFormatError::UnsupportedProfile);
+    }
+    source
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(|_| NspNszFormatError::SourceIo)?;
+    Ok((partition.offset, partition.size))
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-fn copy_file_span<W: std::io::Write>(
-    source: &mut std::fs::File,
-    offset: u64,
-    length: u64,
-    output: &mut W,
-    on_chunk: &mut impl FnMut(u64) -> Result<(), NspNszFormatError>,
-) -> Result<(), NspNszFormatError> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    source
-        .seek(SeekFrom::Start(offset))
-        .map_err(|_| NspNszFormatError::SourceIo)?;
-    let mut remaining = length;
-    let mut buffer = ZeroizingBuffer::new();
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(IO_BUFFER_SIZE as u64))
-            .map_err(|_| NspNszFormatError::ResourceLimit)?;
-        let read = source
-            .read(&mut buffer.0[..wanted])
-            .map_err(|_| NspNszFormatError::SourceIo)?;
-        if read == 0 {
-            return Err(NspNszFormatError::InvalidPackage);
-        }
-        output
-            .write_all(&buffer.0[..read])
-            .map_err(|_| NspNszFormatError::OutputIo)?;
-        remaining -= u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?;
-        on_chunk(u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?)?;
-    }
-    Ok(())
+pub(crate) fn ncz_member_bound(nca_size: u64) -> Result<u64, NspNszFormatError> {
+    crate::ncz::member_bound(nca_size)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -682,151 +609,30 @@ pub(crate) fn encode_ncz_member(
     crypto: &ProgramCrypto,
     settings: &NczCompressionSettings,
     output: &mut std::fs::File,
-    mut on_chunk: impl FnMut(u64) -> Result<(), NspNszFormatError>,
+    on_chunk: impl FnMut(u64) -> Result<(), NspNszFormatError>,
 ) -> Result<(), NspNszFormatError> {
-    use std::io::{Read, Seek, SeekFrom, Write};
-
-    if settings.codec != NczCodecIdentity::Zstandard
-        || settings.codec_version != QUALIFIED_ZSTD_VERSION
-        || settings.codec_version != zstd::zstd_safe::version_string()
-        || !(1..=19).contains(&settings.compression_level)
-        || settings.window_log != DEFAULT_ZSTD_WINDOW_LOG
-        || !settings.checksum
-        || !settings.content_size
-        || settings.worker_threads != 0
-    {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-    match settings.dictionary {
-        NczDictionaryPolicy::None => {}
-    }
-
     if member.role != NspNszMemberRole::Program {
         return Err(NspNszFormatError::UnsupportedProfile);
     }
-    let source_offset = member.source_offset;
-    let nca_size = member.nca_size;
     let section_offset = member
         .section_offset
         .ok_or(NspNszFormatError::UnsupportedProfile)?;
     let section_size = member
         .section_size
         .ok_or(NspNszFormatError::UnsupportedProfile)?;
-    let suffix_size = nca_size
-        .checked_sub(NCZ_PREFIX_SIZE)
-        .filter(|size| *size > 0)
-        .ok_or(NspNszFormatError::UnsupportedProfile)?;
-    if settings.pledged_src_size != suffix_size {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-    if section_offset > NCZ_PREFIX_SIZE
-        || section_offset
-            .checked_add(section_size)
-            .filter(|end| *end == nca_size)
-            .is_none()
-        || NCZ_PREFIX_SIZE < section_offset
-    {
-        return Err(NspNszFormatError::UnsupportedProfile);
-    }
-    let bound = ncz_member_bound(nca_size)?;
-    let mut limited = LimitedWriter::new(output, bound);
-    copy_file_span(
+    crate::ncz::encode_member(
         source,
-        source_offset,
-        NCZ_PREFIX_SIZE,
-        &mut limited,
-        &mut on_chunk,
-    )?;
-
-    limited
-        .write_all(b"NCZSECTN")
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    limited
-        .write_all(&1_u64.to_le_bytes())
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    limited
-        .write_all(&NCZ_PREFIX_SIZE.to_le_bytes())
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    limited
-        .write_all(&suffix_size.to_le_bytes())
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    limited
-        .write_all(&3_u64.to_le_bytes())
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    limited
-        .write_all(&[0_u8; 8])
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    limited
-        .write_all(&crypto.section_key[..])
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    let mut serialized_counter = zeroize::Zeroizing::new([0_u8; 16]);
-    for (destination, source) in serialized_counter[..8]
-        .iter_mut()
-        .zip(crypto.section_counter.iter().rev())
-    {
-        *destination = *source;
-    }
-    limited
-        .write_all(&serialized_counter[..])
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-
-    let mut member = SpanReader::new(&mut *source, source_offset, nca_size);
-    let mut section = crate::nca_crypto::NcaCtrReader::new(
-        &mut member,
-        section_offset,
-        section_size,
-        &crypto.section_key,
-        *crypto.section_counter,
-    );
-    let start = NCZ_PREFIX_SIZE
-        .checked_sub(section_offset)
-        .ok_or(NspNszFormatError::UnsupportedProfile)?;
-    section
-        .seek(SeekFrom::Start(start))
-        .map_err(|_| NspNszFormatError::InvalidPackage)?;
-
-    let mut encoder = zstd::stream::write::Encoder::new(&mut limited, settings.compression_level)
-        .map_err(|_| NspNszFormatError::OutputIo)?;
-    encoder
-        .window_log(settings.window_log)
-        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
-    encoder
-        .include_checksum(settings.checksum)
-        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
-    encoder
-        .include_contentsize(settings.content_size)
-        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
-    encoder
-        .set_parameter(zstd::zstd_safe::CParameter::NbWorkers(
-            settings.worker_threads,
-        ))
-        .map_err(|_| NspNszFormatError::UnsupportedProfile)?;
-    encoder
-        .set_pledged_src_size(Some(settings.pledged_src_size))
-        .map_err(|_| NspNszFormatError::ResourceLimit)?;
-
-    let mut buffer = [0_u8; IO_BUFFER_SIZE];
-    let mut remaining = suffix_size;
-    while remaining > 0 {
-        let wanted = usize::try_from(remaining.min(buffer.len() as u64))
-            .map_err(|_| NspNszFormatError::ResourceLimit)?;
-        let read = section
-            .read(&mut buffer[..wanted])
-            .map_err(|_| NspNszFormatError::SourceIo)?;
-        if read == 0 {
-            return Err(NspNszFormatError::InvalidPackage);
-        }
-        encoder
-            .write_all(&buffer[..read])
-            .map_err(|_| NspNszFormatError::OutputIo)?;
-        remaining -= u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?;
-        on_chunk(u64::try_from(read).map_err(|_| NspNszFormatError::ResourceLimit)?)?;
-    }
-    encoder.finish().map_err(|_| NspNszFormatError::OutputIo)?;
-    source
-        .seek(SeekFrom::Start(0))
-        .map_err(|_| NspNszFormatError::SourceIo)?;
-    Ok(())
+        crate::ncz::NczEncodeSpec {
+            source_offset: member.source_offset,
+            nca_size: member.nca_size,
+            section_offset,
+            section_size,
+        },
+        crypto,
+        settings,
+        output,
+        on_chunk,
+    )
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -857,41 +663,6 @@ pub(crate) fn decode_ncz_member(
         output,
         on_chunk,
     )
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-struct LimitedWriter<W> {
-    inner: W,
-    remaining: u64,
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-impl<W> LimitedWriter<W> {
-    fn new(inner: W, limit: u64) -> Self {
-        Self {
-            inner,
-            remaining: limit,
-        }
-    }
-}
-
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-impl<W: std::io::Write> std::io::Write for LimitedWriter<W> {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        if self.remaining == 0 {
-            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
-        }
-        let allowed = usize::try_from(self.remaining.min(buffer.len() as u64))
-            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        let written = self.inner.write(&buffer[..allowed])?;
-        self.remaining -= u64::try_from(written)
-            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
-        Ok(written)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
 }
 
 #[cfg(target_os = "macos")]

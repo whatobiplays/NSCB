@@ -385,6 +385,8 @@ pub enum OperationKind {
     MultiContentSplit,
     /// Conversion of a qualified base Application XCI into an NSP.
     XciToNsp,
+    /// Compression of a qualified base Application XCI into an XCZ.
+    XciToXcz,
     /// Compression of a qualified base Application NSP into an NSZ.
     NspToNsz,
     /// Reconstruction of a qualified base Application NSP from an NSZ.
@@ -1452,6 +1454,8 @@ pub struct OperationPlan {
     #[cfg(target_os = "macos")]
     xci_to_nsp: Option<XciToNspPlan>,
     #[cfg(target_os = "macos")]
+    xci_to_xcz: Option<XciToXczPlan>,
+    #[cfg(target_os = "macos")]
     nsp_nsz: Option<NspNszPlan>,
     #[cfg(target_os = "macos")]
     xcz_to_xci: Option<XczToXciPlan>,
@@ -2368,6 +2372,20 @@ struct XciToNspPlan {
     not(all(target_os = "macos", target_arch = "aarch64")),
     allow(dead_code)
 )]
+struct XciToXczPlan {
+    package: crate::xci_to_xcz::XciToXczPackagePlan,
+    key_file: ResolvedFile,
+    key_baseline: FileEvidence,
+    compression_settings: Option<crate::ncz::NczCompressionSettings>,
+    output_upper_bound: u64,
+    spool_bytes: u64,
+}
+
+#[cfg(target_os = "macos")]
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "aarch64")),
+    allow(dead_code)
+)]
 struct XczToXciPlan {
     package: crate::xcz_to_xci::XczToXciPackagePlan,
     key_file: ResolvedFile,
@@ -2759,6 +2777,261 @@ fn plan_nsp_nsz_unix(
     Ok(plan)
 }
 
+pub(crate) fn plan_xci_to_xcz(
+    request: crate::xci_to_xcz::XciToXczRequestParts,
+) -> Result<OperationPlan, OperationError> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = request;
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        #[cfg(target_arch = "aarch64")]
+        {
+            plan_xci_to_xcz_unix(request)
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            let _ = request;
+            Err(OperationError::new(
+                OperationFailureCode::UnsupportedCapability,
+            ))
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn plan_xci_to_xcz_unix(
+    request: crate::xci_to_xcz::XciToXczRequestParts,
+) -> Result<OperationPlan, OperationError> {
+    let compression_level = request
+        .compression
+        .compression_level()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::InvalidCompressionLevel))?;
+    let source = resolve_file(&request.source, OperationFailureCode::SourceUnavailable)?;
+    let key_file = resolve_file(&request.key_file, OperationFailureCode::KeyFileUnavailable)?;
+    if source.path == key_file.path {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    validate_file_route(&source, None).map_err(OperationError::new)?;
+    validate_file_route(&key_file, None).map_err(OperationError::new)?;
+
+    let source_directory = open_directory(&source.parent)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let key_directory = open_directory(&key_file.parent)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    let mut source_file = open_file_at(&source_directory, &source.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let source_baseline = inspect_file(&mut source_file)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let mut key_handle = open_file_at(&key_directory, &key_file.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    let key_baseline = inspect_file(&mut key_handle)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    if key_baseline.snapshot.len > crate::key_file::MAX_KEY_FILE_BYTES {
+        return Err(OperationError::new(
+            OperationFailureCode::ResourceLimitExceeded,
+        ));
+    }
+    if key_baseline.identity == source_baseline.identity {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let keys = read_nsp_nsz_keys(&mut key_handle, &key_baseline)?;
+
+    let input = crate::recognition::inspect_xci_for_conversion(
+        &mut source_file,
+        source_baseline.snapshot.len,
+    )
+    .map_err(crate::xci_to_nsp::map_recognition_error)
+    .map_err(OperationError::new)?;
+    if input.secure_members.len() != 2 {
+        return Err(OperationError::new(
+            OperationFailureCode::UnsupportedContentProfile,
+        ));
+    }
+    crate::xci_to_xcz::validate_empty_auxiliary_partitions(
+        &mut source_file,
+        source_baseline.snapshot.len,
+        &input,
+    )
+    .map_err(OperationError::new)?;
+    let mut qualification_source = open_file_at(&source_directory, &source.name)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    verify_file_evidence(&mut qualification_source, &source_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    let qualified = crate::xci_to_nsp::qualify_xci_from_conversion_source(
+        qualification_source,
+        &source.path,
+        &key_file.path,
+        &input,
+        source_baseline.snapshot.clone(),
+        key_baseline.snapshot.clone(),
+        || false,
+    )
+    .map_err(OperationError::new)?;
+    let semantic_facts = match qualified.facts {
+        crate::xci_to_nsp::XciToNspQualificationFacts::MetaProgram(facts) => facts,
+        crate::xci_to_nsp::XciToNspQualificationFacts::MetaProgramControl { .. } => {
+            return Err(OperationError::new(
+                OperationFailureCode::UnsupportedContentProfile,
+            ));
+        }
+    };
+    if qualified.members.len() != 2
+        || semantic_facts.profile
+            != crate::nsp_semantic_qualification::NspSemanticQualificationProfile::RightsFreeBaseApplicationV1
+    {
+        return Err(OperationError::new(
+            OperationFailureCode::UnsupportedContentProfile,
+        ));
+    }
+
+    let original_name = |member: &crate::multi_content_format::Pfs0SourceMember| {
+        let mut matches = input.secure_members.iter().filter(|source_member| {
+            source_member.offset == member.source_offset && source_member.length == member.size
+        });
+        let name = matches
+            .next()
+            .map(|source_member| source_member.name.clone())
+            .ok_or_else(|| OperationError::new(OperationFailureCode::ValidationFailed))?;
+        if matches.next().is_some() {
+            return Err(OperationError::new(
+                OperationFailureCode::UnsupportedContentProfile,
+            ));
+        }
+        Ok(name)
+    };
+    let meta_source = qualified
+        .members
+        .first()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::ValidationFailed))?;
+    let program_source = qualified
+        .members
+        .get(1)
+        .ok_or_else(|| OperationError::new(OperationFailureCode::ValidationFailed))?;
+    let meta_name = original_name(meta_source)?;
+    let program_input_name = original_name(program_source)?;
+    let program_stem = program_input_name
+        .strip_suffix(".nca")
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsupportedContentProfile))?;
+    let program_output_name = format!("{program_stem}.ncz");
+    if meta_name == program_output_name {
+        return Err(OperationError::new(
+            OperationFailureCode::UnsupportedContentProfile,
+        ));
+    }
+
+    let meta = crate::nsp_nsz::NspNszMember {
+        input_name: meta_name.clone(),
+        output_name: meta_name,
+        source_offset: meta_source.source_offset,
+        source_size: meta_source.size,
+        source_sha256: meta_source.sha256,
+        role: crate::nsp_nsz::NspNszMemberRole::Meta,
+        nca_size: meta_source.size,
+        section_offset: None,
+        section_size: None,
+    };
+    let mut program = crate::nsp_nsz::NspNszMember {
+        input_name: program_input_name,
+        output_name: program_output_name,
+        source_offset: program_source.source_offset,
+        source_size: program_source.size,
+        source_sha256: program_source.sha256,
+        role: crate::nsp_nsz::NspNszMemberRole::Program,
+        nca_size: program_source.size,
+        section_offset: None,
+        section_size: None,
+    };
+    let (section_offset, section_size) =
+        crate::nsp_nsz::inspect_program_section(&mut source_file, &program, &keys)
+            .map_err(|error| OperationError::new(map_nsp_nsz_format_error(error)))?;
+    program.section_offset = Some(section_offset);
+    program.section_size = Some(section_size);
+    let suffix_size = program
+        .nca_size
+        .checked_sub(crate::ncz::NCZ_PREFIX_SIZE)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsupportedContentProfile))?;
+    let compression_settings =
+        crate::ncz::NczCompressionSettings::for_plan(compression_level, suffix_size)
+            .ok_or_else(|| OperationError::new(OperationFailureCode::UnsupportedCapability))?;
+    let ncz_bound = crate::ncz::member_bound(program.nca_size)
+        .map_err(|error| OperationError::new(map_nsp_nsz_format_error(error)))?;
+    let output_upper_bound = crate::xci_format::output_length_bound(
+        meta.source_size,
+        ncz_bound,
+        input.has_logo_partition,
+    )
+    .map_err(OperationError::new)?;
+    let spool_bytes = ncz_bound
+        .checked_add(program.nca_size)
+        .ok_or_else(|| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    verify_file_evidence(&mut source_file, &source_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+    verify_file_evidence(&mut key_handle, &key_baseline)
+        .map_err(|_| OperationError::new(OperationFailureCode::KeyFileChanged))?;
+
+    let copy_request = CopyThroughRequest::new(
+        request.source.clone(),
+        request.destination.clone(),
+        request.workspace.clone(),
+    )
+    .with_conflict_policy(request.conflict_policy);
+    let mut plan = plan_copy_through_unix_for_deferred_output(copy_request, None)?;
+    if plan.source_baseline != source_baseline
+        || plan.destination.path == key_file.path
+        || plan.snapshot.destination_lock_path == key_file.path
+        || plan
+            .destination_baseline
+            .as_ref()
+            .is_some_and(|baseline| baseline.identity == key_baseline.identity)
+    {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let stage_directory_name = plan
+        .stage_directory_name
+        .as_deref()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+    let stage_directory_path = plan.workspace.path.join(stage_directory_name);
+    plan.snapshot.planned_artifacts.extend([
+        PlannedArtifact {
+            role: OperationArtifactRole::PrivateMemberSpool,
+            path: stage_directory_path.join("program-ncz.spool"),
+            expected_length: None,
+            expected_sha256: None,
+        },
+        PlannedArtifact {
+            role: OperationArtifactRole::PrivateMemberSpool,
+            path: stage_directory_path.join("program-nca-verify.spool"),
+            expected_length: Some(program.nca_size),
+            expected_sha256: Some(program.source_sha256),
+        },
+    ]);
+    plan.snapshot.operation_kind = OperationKind::XciToXcz;
+    plan.snapshot.required_keys = vec![
+        String::from("nca_header_key"),
+        String::from("key_area_key_application_00"),
+    ];
+    plan.xci_to_xcz = Some(XciToXczPlan {
+        package: crate::xci_to_xcz::XciToXczPackagePlan {
+            input,
+            meta,
+            program,
+            semantic_facts,
+        },
+        key_file,
+        key_baseline,
+        compression_settings: Some(compression_settings),
+        output_upper_bound,
+        spool_bytes,
+    });
+    Ok(plan)
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn read_nsp_nsz_keys(
     file: &mut File,
@@ -2904,6 +3177,7 @@ fn plan_xcz_to_xci_unix(
     let keys = read_nsp_nsz_keys(&mut key_handle, &key_baseline)?;
     let mut program_spool = tempfile::tempfile()
         .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+    let mut no_cancellation = |_| Ok(());
     let package = crate::xcz_to_xci::qualify_source(crate::xcz_to_xci::XczQualificationContext {
         source_file: &mut source_file,
         source_path: &source.path,
@@ -2914,6 +3188,7 @@ fn plan_xcz_to_xci_unix(
         key_snapshot: key_baseline.snapshot.clone(),
         keys: &keys,
         program_spool: &mut program_spool,
+        on_decode_chunk: &mut no_cancellation,
     })
     .map_err(OperationError::new)?;
 
@@ -3905,6 +4180,7 @@ fn plan_multi_content_build_unix(
         published_recovery_name,
         multi_content: Some(MultiContentPlan::Build(source)),
         xci_to_nsp: None,
+        xci_to_xcz: None,
         nsp_nsz: None,
         xcz_to_xci: None,
     })
@@ -4123,6 +4399,7 @@ fn plan_multi_content_split_unix(
             staged_directory_name,
         }),
         xci_to_nsp: None,
+        xci_to_xcz: None,
         nsp_nsz: None,
         xcz_to_xci: None,
     })
@@ -4471,6 +4748,8 @@ fn plan_copy_through_unix_for_output_inner(
         multi_content: None,
         #[cfg(target_os = "macos")]
         xci_to_nsp: None,
+        #[cfg(target_os = "macos")]
+        xci_to_xcz: None,
         nsp_nsz: None,
         xcz_to_xci: None,
     })
@@ -5822,6 +6101,8 @@ fn check_storage_capacity(
         (conversion.output_length, 0)
     } else if let Some(conversion) = xcz_to_xci(plan) {
         (conversion.output_length, conversion.spool_bytes)
+    } else if let Some(conversion) = xci_to_xcz(plan) {
+        (conversion.output_upper_bound, conversion.spool_bytes)
     } else if let Some(conversion) = nsp_nsz(plan) {
         (conversion.output_upper_bound, conversion.spool_bytes)
     } else {
@@ -5895,6 +6176,11 @@ fn xci_to_nsp(plan: &OperationPlan) -> Option<&XciToNspPlan> {
 }
 
 #[cfg(target_os = "macos")]
+fn xci_to_xcz(plan: &OperationPlan) -> Option<&XciToXczPlan> {
+    plan.xci_to_xcz.as_ref()
+}
+
+#[cfg(target_os = "macos")]
 fn nsp_nsz(plan: &OperationPlan) -> Option<&NspNszPlan> {
     plan.nsp_nsz.as_ref()
 }
@@ -5947,6 +6233,20 @@ fn validate_staged_content_package(
 
 #[cfg(target_os = "macos")]
 fn verify_conversion_key_identity(plan: &OperationPlan) -> Result<(), OperationFailureCode> {
+    if let Some(conversion) = xci_to_xcz(plan) {
+        validate_file_route(&conversion.key_file, None)
+            .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+        let directory = open_directory(&conversion.key_file.parent)
+            .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+        if handle_identity(&directory) != Some(conversion.key_file.parent_identity) {
+            return Err(OperationFailureCode::KeyFileChanged);
+        }
+        let mut key_file = open_file_at(&directory, &conversion.key_file.name)
+            .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+        verify_file_evidence(&mut key_file, &conversion.key_baseline)
+            .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+        return Ok(());
+    }
     let Some(conversion) = xci_to_nsp(plan) else {
         if let Some(conversion) = xcz_to_xci(plan) {
             validate_file_route(&conversion.key_file, None)
@@ -6000,7 +6300,9 @@ fn verify_nsp_nsz_key(plan: &OperationPlan) -> Result<(), OperationFailureCode> 
 fn read_nsp_nsz_execution_keys(
     plan: &OperationPlan,
 ) -> Result<crate::key_file::NspQualificationKeys, OperationFailureCode> {
-    let (key_file, key_baseline) = if let Some(conversion) = nsp_nsz(plan) {
+    let (key_file, key_baseline) = if let Some(conversion) = xci_to_xcz(plan) {
+        (&conversion.key_file, &conversion.key_baseline)
+    } else if let Some(conversion) = nsp_nsz(plan) {
         (&conversion.key_file, &conversion.key_baseline)
     } else if let Some(conversion) = xcz_to_xci(plan) {
         (&conversion.key_file, &conversion.key_baseline)
@@ -6079,6 +6381,109 @@ fn validate_xcz_to_xci_package(
     _path: &Path,
     _plan: &OperationPlan,
     _session: &OperationSession,
+    _checkpoint: &mut impl FnMut(ExecutionCheckpoint),
+) -> Result<(), OperationFailureCode> {
+    Err(OperationFailureCode::UnsupportedCapability)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn validate_xci_to_xcz_package(
+    source_file: &mut File,
+    stage_file: &mut File,
+    path: &Path,
+    plan: &OperationPlan,
+    session: &OperationSession,
+    stage: &mut ConversionStageContext<'_>,
+    checkpoint: &mut impl FnMut(ExecutionCheckpoint),
+) -> Result<(), OperationFailureCode> {
+    check_cancelled(session)?;
+    let conversion = xci_to_xcz(plan).ok_or(OperationFailureCode::StalePlan)?;
+    verify_conversion_key_identity(plan)?;
+    let stage_evidence =
+        inspect_file(stage_file).map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if stage_evidence.snapshot.len > conversion.output_upper_bound {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    crate::xci_to_xcz::verify_staged_output(
+        source_file,
+        stage_file,
+        stage_evidence.snapshot.len,
+        &conversion.package,
+        |amount| {
+            checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
+            session.record_progress(amount);
+            check_cancelled(session)
+        },
+    )?;
+    check_cancelled(session)?;
+
+    let keys = read_nsp_nsz_execution_keys(plan)?;
+    let spool_name = OsStr::new("program-nca-verify.spool");
+    let (mut program_spool, spool_identity) = create_artifact(
+        stage.directory,
+        stage.directory_path,
+        spool_name,
+        OperationArtifactRole::PrivateMemberSpool,
+        stage.artifacts,
+        stage.cleanup_artifact_retained,
+    )?;
+    let mut decoded_bytes = 0_u64;
+    let mut on_decode_chunk = |amount: u64| {
+        decoded_bytes = decoded_bytes
+            .checked_add(amount)
+            .ok_or(crate::nsp_nsz::NspNszFormatError::ResourceLimit)?;
+        checkpoint(ExecutionCheckpoint::XciToNspSemanticVerification);
+        session.record_progress(decoded_bytes);
+        check_cancelled(session).map_err(|_| crate::nsp_nsz::NspNszFormatError::Cancelled)
+    };
+    let decoded = crate::xcz_to_xci::qualify_source(crate::xcz_to_xci::XczQualificationContext {
+        source_file: stage_file,
+        source_path: path,
+        source_length: stage_evidence.snapshot.len,
+        source_identity: stage_evidence.identity,
+        source_snapshot: stage_evidence.snapshot.clone(),
+        key_path: &conversion.key_file.path,
+        key_snapshot: conversion.key_baseline.snapshot.clone(),
+        keys: &keys,
+        program_spool: &mut program_spool,
+        on_decode_chunk: &mut on_decode_chunk,
+    })?;
+    program_spool
+        .sync_all()
+        .map_err(|_| OperationFailureCode::WriteFailed)?;
+    let spool_evidence = record_private_spool_evidence(
+        &mut program_spool,
+        spool_identity,
+        spool_name,
+        stage.artifacts,
+    )?;
+    let expected_program = &conversion.package.program;
+    if decoded.semantic_facts != conversion.package.semantic_facts
+        || decoded.program_nca_size != expected_program.nca_size
+        || decoded.program_section_offset != expected_program.section_offset.unwrap_or(u64::MAX)
+        || decoded.program_section_size != expected_program.section_size.unwrap_or(u64::MAX)
+        || decoded.meta.name != conversion.package.meta.output_name
+        || decoded.program.name != expected_program.output_name
+        || spool_evidence.identity != spool_identity
+        || spool_evidence.snapshot.len != expected_program.nca_size
+        || spool_evidence.sha256 != expected_program.source_sha256
+    {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    verify_conversion_key_identity(plan)?;
+    verify_file_evidence(stage_file, &stage_evidence)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    check_cancelled(session)
+}
+
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+fn validate_xci_to_xcz_package(
+    _source_file: &mut File,
+    _stage_file: &mut File,
+    _path: &Path,
+    _plan: &OperationPlan,
+    _session: &OperationSession,
+    _stage: &mut ConversionStageContext<'_>,
     _checkpoint: &mut impl FnMut(ExecutionCheckpoint),
 ) -> Result<(), OperationFailureCode> {
     Err(OperationFailureCode::UnsupportedCapability)
@@ -6351,6 +6756,120 @@ struct ConversionStageContext<'a> {
     directory_path: &'a Path,
     artifacts: &'a mut Vec<OwnedArtifact>,
     cleanup_artifact_retained: &'a mut bool,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn produce_xci_to_xcz(
+    plan: &OperationPlan,
+    source_file: &mut File,
+    stage_file: &mut File,
+    session: &OperationSession,
+    stage: &mut ConversionStageContext<'_>,
+) -> Result<(), OperationFailureCode> {
+    let conversion = xci_to_xcz(plan).ok_or(OperationFailureCode::StalePlan)?;
+    let keys = read_nsp_nsz_execution_keys(plan)?;
+    let crypto =
+        crate::nsp_nsz::read_program_crypto(source_file, &conversion.package.program, &keys)
+            .map_err(map_nsp_nsz_format_error)?;
+    let settings = conversion
+        .compression_settings
+        .as_ref()
+        .ok_or(OperationFailureCode::StalePlan)?;
+    let stage_directory = stage.directory;
+    let stage_directory_path = stage.directory_path;
+    let artifacts = &mut *stage.artifacts;
+    let cleanup_artifact_retained = &mut *stage.cleanup_artifact_retained;
+    let spool_name = OsStr::new("program-ncz.spool");
+    let (mut program_spool, spool_identity) = create_artifact(
+        stage_directory,
+        stage_directory_path,
+        spool_name,
+        OperationArtifactRole::PrivateMemberSpool,
+        artifacts,
+        cleanup_artifact_retained,
+    )?;
+    check_cancelled(session)?;
+
+    let mut completed = 0_u64;
+    crate::ncz::encode_member(
+        source_file,
+        crate::ncz::NczEncodeSpec {
+            source_offset: conversion.package.program.source_offset,
+            nca_size: conversion.package.program.nca_size,
+            section_offset: conversion
+                .package
+                .program
+                .section_offset
+                .ok_or(OperationFailureCode::StalePlan)?,
+            section_size: conversion
+                .package
+                .program
+                .section_size
+                .ok_or(OperationFailureCode::StalePlan)?,
+        },
+        &crypto,
+        settings,
+        &mut program_spool,
+        |amount| {
+            completed = completed
+                .checked_add(amount)
+                .ok_or(crate::nsp_nsz::NspNszFormatError::ResourceLimit)?;
+            session.record_progress(completed);
+            check_cancelled(session).map_err(|_| crate::nsp_nsz::NspNszFormatError::Cancelled)
+        },
+    )
+    .map_err(map_nsp_nsz_runtime_error)?;
+    program_spool
+        .sync_all()
+        .map_err(|_| OperationFailureCode::WriteFailed)?;
+    let spool_evidence =
+        record_private_spool_evidence(&mut program_spool, spool_identity, spool_name, artifacts)?;
+    let ncz_bound = crate::ncz::member_bound(conversion.package.program.nca_size)
+        .map_err(map_nsp_nsz_format_error)?;
+    if spool_evidence.identity != spool_identity
+        || spool_evidence.snapshot.len > ncz_bound
+        || spool_evidence.snapshot.len <= crate::ncz::NCZ_FRAME_OFFSET
+    {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    update_artifact_evidence(
+        artifacts,
+        spool_name,
+        Some(spool_identity),
+        OperationArtifactRole::PrivateMemberSpool,
+        Some(spool_evidence.snapshot.len),
+        Some(spool_evidence.sha256),
+    );
+
+    let output_length = crate::xci_to_xcz::write_xcz(
+        source_file,
+        &mut program_spool,
+        &conversion.package,
+        stage_file,
+        |amount| {
+            completed = completed
+                .checked_add(amount)
+                .ok_or(OperationFailureCode::ResourceLimitExceeded)?;
+            session.record_progress(completed);
+            check_cancelled(session)
+        },
+    )?;
+    if output_length > conversion.output_upper_bound {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    verify_conversion_key_identity(plan)?;
+    check_cancelled(session)
+}
+
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+fn produce_xci_to_xcz(
+    _plan: &OperationPlan,
+    _source_file: &mut File,
+    _stage_file: &mut File,
+    _session: &OperationSession,
+    _stage: &mut ConversionStageContext<'_>,
+) -> Result<(), OperationFailureCode> {
+    Err(OperationFailureCode::UnsupportedCapability)
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -7560,13 +8079,14 @@ where
         .map_err(|_| OperationFailureCode::StalePlan)?;
     ensure_destination_baseline(plan, &destination_directory)?;
     if nsp_nsz(plan).is_none()
+        && xci_to_xcz(plan).is_none()
         && plan.snapshot.conflict_policy == ConflictPolicy::Fail
         && plan.destination_baseline.is_some()
         && !plan.already_up_to_date
     {
         return Err(OperationFailureCode::DestinationConflict);
     }
-    if plan.skipped && nsp_nsz(plan).is_none() {
+    if plan.skipped && nsp_nsz(plan).is_none() && xci_to_xcz(plan).is_none() {
         verify_source_entry(plan, &source_directory)?;
         verify_conversion_key_identity(plan)?;
         validate_plan_routes(
@@ -7612,6 +8132,7 @@ where
     ensure_destination_baseline(plan, &destination_directory)?;
     verify_conversion_key_identity(plan)?;
     if nsp_nsz(plan).is_none()
+        && xci_to_xcz(plan).is_none()
         && plan.snapshot.conflict_policy == ConflictPolicy::Fail
         && plan.destination_baseline.is_some()
         && !plan.already_up_to_date
@@ -7683,7 +8204,7 @@ where
         return Ok(OperationOutcome::AlreadyUpToDate);
     }
 
-    if plan.already_up_to_date && nsp_nsz(plan).is_none() {
+    if plan.already_up_to_date && nsp_nsz(plan).is_none() && xci_to_xcz(plan).is_none() {
         validate_plan_routes(
             plan,
             workspace_runtime_identity,
@@ -7860,6 +8381,22 @@ where
                 | FormatError::AmbiguousGrouping,
             ) => Err(OperationFailureCode::ValidationFailed),
         }
+    } else if xci_to_xcz(plan).is_some() {
+        verify_conversion_key_identity(plan)?;
+        check_cancelled(session)?;
+        let mut conversion_stage = ConversionStageContext {
+            directory: &stage_directory,
+            directory_path: &stage_directory_path,
+            artifacts: &mut *artifacts,
+            cleanup_artifact_retained: &mut *cleanup_artifact_retained,
+        };
+        produce_xci_to_xcz(
+            plan,
+            source_file,
+            &mut stage_file,
+            session,
+            &mut conversion_stage,
+        )
     } else if nsp_nsz(plan).is_some() {
         verify_conversion_key_identity(plan)?;
         check_cancelled(session)?;
@@ -7909,6 +8446,7 @@ where
     }
     if let Err(producer_failure) = produced {
         if nsp_nsz(plan).is_none()
+            && xci_to_xcz(plan).is_none()
             && let Ok(observed) = &stage_after_production
         {
             let (expected_length, expected_sha256) = planned_staged_output(plan);
@@ -7939,6 +8477,14 @@ where
             stage_after_production.snapshot.len,
             stage_after_production.sha256,
         )
+    } else if let Some(conversion) = xci_to_xcz(plan) {
+        if stage_after_production.snapshot.len > conversion.output_upper_bound {
+            return Err(OperationFailureCode::ValidationFailed);
+        }
+        (
+            stage_after_production.snapshot.len,
+            stage_after_production.sha256,
+        )
     } else {
         let (length, sha256) = planned_staged_output(plan);
         if stage_after_production.snapshot.len != length || stage_after_production.sha256 != sha256
@@ -7962,6 +8508,7 @@ where
     }
     if multi_content_build_output(plan).is_none()
         && xci_to_nsp(plan).is_none()
+        && xci_to_xcz(plan).is_none()
         && xcz_to_xci(plan).is_none()
         && nsp_nsz(plan).is_none()
         && !files_equal_with_checkpoint(
@@ -7991,6 +8538,24 @@ where
             &stage_directory_path.join(&stage_name),
             plan,
             session,
+            checkpoint,
+        )?;
+        verify_source_entry(plan, &source_directory)?;
+    }
+    if xci_to_xcz(plan).is_some() {
+        let mut conversion_stage = ConversionStageContext {
+            directory: &stage_directory,
+            directory_path: &stage_directory_path,
+            artifacts: &mut *artifacts,
+            cleanup_artifact_retained: &mut *cleanup_artifact_retained,
+        };
+        validate_xci_to_xcz_package(
+            source_file,
+            &mut stage_file,
+            &stage_directory_path.join(&stage_name),
+            plan,
+            session,
+            &mut conversion_stage,
             checkpoint,
         )?;
         verify_source_entry(plan, &source_directory)?;
@@ -8038,7 +8603,7 @@ where
     milestones.push(OperationMilestone::Validated);
     session.record_milestone(OperationMilestone::Validated);
 
-    if nsp_nsz(plan).is_some()
+    if (nsp_nsz(plan).is_some() || xci_to_xcz(plan).is_some())
         && let Some(expected_destination) = plan.destination_baseline.as_ref()
     {
         ensure_destination_baseline(plan, &destination_directory)?;
@@ -8192,6 +8757,8 @@ where
             crate::nsp_nsz::NspNszDirection::NspToNsz => OperationOutcome::Compressed,
             crate::nsp_nsz::NspNszDirection::NszToNsp => OperationOutcome::Decompressed,
         })
+    } else if xci_to_xcz(plan).is_some() && result == OperationOutcome::Copied {
+        Ok(OperationOutcome::Compressed)
     } else if multi_content_build_output(plan).is_some() && result == OperationOutcome::Copied {
         Ok(OperationOutcome::Built)
     } else {

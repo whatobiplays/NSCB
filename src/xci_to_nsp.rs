@@ -119,6 +119,33 @@ where
     }
     let source = crate::recognition::inspect_xci_for_conversion(&mut source_file, source_length)
         .map_err(map_recognition_error)?;
+    qualify_xci_from_conversion_source(
+        source_file,
+        source_path,
+        key_file,
+        &source,
+        expected_source_snapshot,
+        expected_key_snapshot,
+        is_cancelled,
+    )
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn qualify_xci_from_conversion_source<F>(
+    mut source_file: std::fs::File,
+    source_path: &std::path::Path,
+    key_file: &std::path::Path,
+    source: &crate::recognition::XciConversionSource,
+    expected_source_snapshot: crate::file_identity::FileSnapshot,
+    expected_key_snapshot: crate::file_identity::FileSnapshot,
+    mut is_cancelled: F,
+) -> Result<XciToNspPackagePlan, OperationFailureCode>
+where
+    F: FnMut() -> bool,
+{
+    if is_cancelled() {
+        return Err(OperationFailureCode::Cancelled);
+    }
     if !matches!(source.secure_members.len(), 2 | 3) {
         return Err(OperationFailureCode::UnsupportedXciProfile);
     }
@@ -127,10 +154,10 @@ where
     detected
         .try_reserve_exact(source.secure_members.len())
         .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-    for member in source.secure_members {
-        let sha256 = hash_member(&mut source_file, &member, &mut is_cancelled)?;
+    for member in &source.secure_members {
+        let sha256 = hash_member(&mut source_file, member, &mut is_cancelled)?;
         detected.push(DetectedMember {
-            source: member,
+            source: member.clone(),
             sha256,
         });
     }

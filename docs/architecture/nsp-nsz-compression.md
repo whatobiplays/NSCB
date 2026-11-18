@@ -12,6 +12,12 @@ byte-for-byte. The package must already pass the existing NSP semantic
 qualifier. This operation does not establish Nintendo authenticity, console
 installability, or Full Verification.
 
+`src/nsp_nsz.rs` owns NSP/NSZ qualification and orchestration. The shared
+`src/ncz.rs` module owns NCZ member framing and the container-independent
+encoder and decoder. The adapter supplies the already-qualified Program NCA
+span and section geometry; moving the encoder does not change NSP/NSZ
+qualification or output layout.
+
 ## Planning and output sizing
 
 Planning reads and qualifies the source and records immutable file identities,
@@ -54,15 +60,16 @@ uses `NszCompression`: `Fast` resolves to level 3, `Balanced` resolves to level
 9, `Maximum` resolves to level 19, and `Level(i32)` accepts levels 1 through
 19. The request constructor defaults to `Balanced`, preserving the existing
 level 9 behavior. The CLI exposes mutually exclusive `--preset
-fast|balanced|maximum` and `--level 1..19` options on `nsp-to-nsz` only.
+fast|balanced|maximum` and `--level 1..19` options on `nsp-to-nsz` and
+`xci-to-xcz`.
 
 The private plan freezes the Zstandard identity and version, resolved level,
 window log 27, checksum enabled, content size enabled, zero worker threads,
 no dictionary, and the exact NCZ section suffix length as the pledged source
 size. Execution uses those values and rejects a version or input-size mismatch;
 it does not resolve the preset again or adjust settings. The numeric ceiling
-of 19 is the supported range for this operation. Zstandard 1.5.7 accepts a
-wider set of provider levels, but those levels are outside this operation's
+of 19 is the supported range for both compression operations. Zstandard 1.5.7
+accepts a wider set of provider levels, but those levels are outside the
 qualified profile. Zstandard documents that higher levels generally require
 more memory, so the operation's cap is a profile boundary rather than the
 codec's maximum.
@@ -96,7 +103,9 @@ select Meta or Program roles.
 ## Key handling
 
 The owner approved standard interoperable NCZ, including plaintext section
-keys in the published NCZ artifact, in [Issue #17](https://github.com/whatobiplays/NSCB/issues/17#issuecomment-6894369005).
+keys in the published NCZ artifact, for the NSP-to-NSZ first slice in
+[Issue #17](https://github.com/whatobiplays/NSCB/issues/17#issuecomment-6894369005).
+XCI-to-XCZ uses a separate authorization recorded in the same issue.
 The implementation keeps key material out of plans, results, progress events,
 and diagnostics. In-memory key and counter buffers are zeroized on drop.
 Temporary files use mode `0600` in private directories with mode `0700`.

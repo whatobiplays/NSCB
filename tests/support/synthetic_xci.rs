@@ -291,6 +291,243 @@ pub fn with_nonempty_partition(partition_name: &str) -> Fixture {
     )
 }
 
+/// Adds bytes after an otherwise empty auxiliary HFS0 table and extends that
+/// root partition's declared span so the fixture remains structurally valid.
+pub fn with_auxiliary_unreferenced_bytes(partition_name: &str, extra: &[u8]) -> Fixture {
+    let mut fixture = valid();
+    let index = match partition_name {
+        "update" => 0,
+        "normal" => 1,
+        _ => panic!("the synthetic base fixture contains update and normal"),
+    };
+    let entry = fixture.root_entries[index];
+    let insert_at = entry
+        .data_offset
+        .checked_add(entry.data_len)
+        .expect("synthetic auxiliary span fits usize");
+    let extra_length = u64::try_from(extra.len()).expect("extra span fits u64");
+    fixture
+        .image
+        .splice(insert_at..insert_at, extra.iter().copied());
+    let new_length = u64::try_from(entry.data_len)
+        .expect("auxiliary span fits u64")
+        .checked_add(extra_length)
+        .expect("synthetic auxiliary span fits u64");
+    fixture.image[entry.table_offset + 8..entry.table_offset + 16]
+        .copy_from_slice(&new_length.to_le_bytes());
+
+    for (root_index, root_entry) in fixture.root_entries.iter_mut().enumerate() {
+        if root_index == index || root_entry.data_offset < insert_at {
+            continue;
+        }
+        let old_offset = u64::from_le_bytes(
+            fixture.image[root_entry.table_offset..root_entry.table_offset + 8]
+                .try_into()
+                .expect("fixed HFS0 offset field"),
+        );
+        fixture.image[root_entry.table_offset..root_entry.table_offset + 8].copy_from_slice(
+            &old_offset
+                .checked_add(extra_length)
+                .expect("synthetic HFS0 offset fits u64")
+                .to_le_bytes(),
+        );
+        root_entry.data_offset += extra.len();
+    }
+    for nested_entry in &mut fixture.secure_entries {
+        if nested_entry.table_offset >= insert_at {
+            nested_entry.table_offset += extra.len();
+            nested_entry.data_offset += extra.len();
+        }
+    }
+    fixture.root_entries[index].data_len += extra.len();
+
+    let old_secure_offset = usize::try_from(
+        u64::from(u32::from_le_bytes(
+            fixture.image[0x104..0x108]
+                .try_into()
+                .expect("fixed RomArea page field"),
+        ))
+        .checked_mul(0x200)
+        .expect("synthetic secure page fits usize")
+            - 0x1000,
+    )
+    .expect("synthetic secure offset fits usize");
+    let secure_offset = old_secure_offset
+        + if old_secure_offset >= insert_at {
+            extra.len()
+        } else {
+            0
+        };
+    fixture.image[0x104..0x108].copy_from_slice(
+        &u32::try_from((secure_offset + 0x1000) / 0x200)
+            .expect("synthetic RomArea page fits u32")
+            .to_le_bytes(),
+    );
+
+    let root_header_size = usize::try_from(u64::from_le_bytes(
+        fixture.image[0x138..0x140]
+            .try_into()
+            .expect("fixed root header-size field"),
+    ))
+    .expect("synthetic root header fits usize");
+    let digest = Sha256::digest(&fixture.image[ROOT_OFFSET..ROOT_OFFSET + root_header_size]);
+    fixture.image[0x140..0x160].copy_from_slice(&digest);
+    fixture
+}
+
+/// Inserts bytes into an unreferenced gap after an empty auxiliary partition.
+pub fn with_auxiliary_gap_bytes(partition_name: &str, gap: &[u8]) -> Fixture {
+    let mut fixture = valid();
+    let index = match partition_name {
+        "update" => 0,
+        "normal" => 1,
+        _ => panic!("the synthetic base fixture contains update and normal"),
+    };
+    let entry = fixture.root_entries[index];
+    let insert_at = entry
+        .data_offset
+        .checked_add(entry.data_len)
+        .expect("synthetic auxiliary span fits usize");
+    let gap_length = u64::try_from(gap.len()).expect("synthetic gap fits u64");
+    fixture
+        .image
+        .splice(insert_at..insert_at, gap.iter().copied());
+
+    for (root_index, root_entry) in fixture.root_entries.iter_mut().enumerate() {
+        if root_index <= index || root_entry.data_offset < insert_at {
+            continue;
+        }
+        let old_offset = u64::from_le_bytes(
+            fixture.image[root_entry.table_offset..root_entry.table_offset + 8]
+                .try_into()
+                .expect("fixed HFS0 offset field"),
+        );
+        fixture.image[root_entry.table_offset..root_entry.table_offset + 8].copy_from_slice(
+            &old_offset
+                .checked_add(gap_length)
+                .expect("synthetic HFS0 offset fits u64")
+                .to_le_bytes(),
+        );
+        root_entry.data_offset += gap.len();
+    }
+    for nested_entry in &mut fixture.secure_entries {
+        if nested_entry.table_offset >= insert_at {
+            nested_entry.table_offset += gap.len();
+            nested_entry.data_offset += gap.len();
+        }
+    }
+
+    let secure_offset = fixture.root_entries[2].data_offset;
+    fixture.image[0x104..0x108].copy_from_slice(
+        &u32::try_from(
+            secure_offset
+                .checked_add(0x1000)
+                .expect("synthetic physical card offset fits usize")
+                / 0x200,
+        )
+        .expect("synthetic RomArea page fits u32")
+        .to_le_bytes(),
+    );
+    let root_header_size = usize::try_from(u64::from_le_bytes(
+        fixture.image[0x138..0x140]
+            .try_into()
+            .expect("fixed root header-size field"),
+    ))
+    .expect("synthetic root header fits usize");
+    let digest = Sha256::digest(&fixture.image[ROOT_OFFSET..ROOT_OFFSET + root_header_size]);
+    fixture.image[0x140..0x160].copy_from_slice(&digest);
+    fixture
+}
+
+pub fn with_nonzero_empty_partition_padding(partition_name: &str) -> Fixture {
+    let mut fixture = valid();
+    let index = match partition_name {
+        "update" => 0,
+        "normal" => 1,
+        _ => panic!("the synthetic base fixture contains update and normal"),
+    };
+    let entry = fixture.root_entries[index];
+    fixture.image[entry.data_offset + 0x80] = 0xA5;
+    fixture.set_prefix_hash(entry, entry.data_len);
+    fixture
+}
+
+/// Expands the root HFS0 region using only zero-filled header padding.
+pub fn with_expanded_root_header_padding() -> Fixture {
+    expand_root_header_padding(valid())
+}
+
+pub fn expand_root_header_padding(mut fixture: Fixture) -> Fixture {
+    let original_size = u64::from_le_bytes(
+        fixture.image[0x138..0x140]
+            .try_into()
+            .expect("fixed root header-size field"),
+    );
+    let expanded_size = 0x8000_u64;
+    let padding =
+        usize::try_from(expanded_size - original_size).expect("synthetic root padding fits usize");
+    let original_end = ROOT_OFFSET
+        .checked_add(usize::try_from(original_size).expect("root size fits usize"))
+        .expect("root span fits usize");
+    fixture
+        .image
+        .splice(original_end..original_end, std::iter::repeat_n(0, padding));
+    fixture.image[0x138..0x140].copy_from_slice(&expanded_size.to_le_bytes());
+
+    for entry in &mut fixture.root_entries {
+        let offset = u64::from_le_bytes(
+            fixture.image[entry.table_offset..entry.table_offset + 8]
+                .try_into()
+                .expect("fixed HFS0 offset field"),
+        );
+        fixture.image[entry.table_offset..entry.table_offset + 8].copy_from_slice(
+            &offset
+                .checked_add(u64::try_from(padding).expect("padding fits u64"))
+                .expect("shifted root offset fits u64")
+                .to_le_bytes(),
+        );
+        entry.data_offset += padding;
+    }
+    for entry in &mut fixture.secure_entries {
+        entry.table_offset += padding;
+        entry.data_offset += padding;
+    }
+
+    let secure = fixture.root_entries[2].data_offset;
+    fixture.image[0x104..0x108].copy_from_slice(
+        &u32::try_from((secure + 0x1000) / 0x200)
+            .expect("synthetic RomArea page fits u32")
+            .to_le_bytes(),
+    );
+    let digest = Sha256::digest(&fixture.image[ROOT_OFFSET..ROOT_OFFSET + expanded_size as usize]);
+    fixture.image[0x140..0x160].copy_from_slice(&digest);
+    fixture
+}
+
+pub fn with_nonzero_root_header_padding() -> Fixture {
+    let mut fixture = expand_root_header_padding(valid());
+    let count = u32::from_le_bytes(
+        fixture.image[ROOT_OFFSET + 4..ROOT_OFFSET + 8]
+            .try_into()
+            .expect("fixed HFS0 count field"),
+    ) as usize;
+    let names_size = u32::from_le_bytes(
+        fixture.image[ROOT_OFFSET + 8..ROOT_OFFSET + 12]
+            .try_into()
+            .expect("fixed HFS0 names field"),
+    ) as usize;
+    let table_size = ROOT_OFFSET + 0x10 + count * 0x40 + names_size;
+    fixture.image[table_size + 8] = 0xA5;
+    let expanded_size = u64::from_le_bytes(
+        fixture.image[0x138..0x140]
+            .try_into()
+            .expect("fixed root header-size field"),
+    ) as usize;
+    let digest = Sha256::digest(&fixture.image[ROOT_OFFSET..ROOT_OFFSET + expanded_size]);
+    fixture.image[0x140..0x160].copy_from_slice(&digest);
+    fixture
+}
+
 pub fn with_root_partition_names(names: &[&str]) -> Fixture {
     let nsp = crate::synthetic_nsp_qualification::valid();
     let package = canonical_package(&nsp.meta_nca, &nsp.program_nca);

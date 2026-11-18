@@ -43,7 +43,10 @@ mod split_resolution;
 mod split_trust;
 mod strict_json;
 mod verification;
+#[cfg(target_os = "macos")]
+mod xci_format;
 mod xci_to_nsp;
+mod xci_to_xcz;
 mod xcz_to_xci;
 
 #[cfg(test)]
@@ -136,4 +139,5 @@ pub use verification::{
     VerificationReason, VerificationRequest, VerificationResult,
 };
 pub use xci_to_nsp::XciToNspRequest;
+pub use xci_to_xcz::XciToXczRequest;
 pub use xcz_to_xci::XczToXciRequest;

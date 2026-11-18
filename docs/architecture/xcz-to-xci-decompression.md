@@ -14,6 +14,12 @@ layout. It does not claim byte-for-byte restoration of the original XCI,
 signature validity, Nintendo authenticity, console installability, or Full
 Verification.
 
+`src/xci_format.rs` contains the shared card-header geometry, HFS0 layout,
+hashing, and bounded copy helpers used by XCZ-to-XCI and XCI-to-XCZ. Each
+operation keeps its own qualification, orchestration, verification, and
+publication path. The extraction preserves the decompressor's prior layout
+and card-header rules.
+
 ## XCZ input qualification
 
 XCZ input has a private HFS0 policy. A declared entry hash is checked as
