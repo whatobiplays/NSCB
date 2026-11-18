@@ -516,6 +516,7 @@ pub(crate) fn requires_reporting_session(args: &[OsString]) -> bool {
         || is_split_command(args)
         || args.first().is_some_and(|argument| {
             argument == OsStr::new("xci-to-nsp")
+                || argument == OsStr::new("xci-to-xcz")
                 || argument == OsStr::new("xcz-to-xci")
                 || argument == OsStr::new("nsp-to-nsz")
                 || argument == OsStr::new("nsz-to-nsp")
@@ -577,6 +578,7 @@ fn run_with_control(
         argument == OsStr::new("multi-content-build")
             || argument == OsStr::new("multi-content-split")
             || argument == OsStr::new("xci-to-nsp")
+            || argument == OsStr::new("xci-to-xcz")
             || argument == OsStr::new("xcz-to-xci")
             || argument == OsStr::new("nsp-to-nsz")
             || argument == OsStr::new("nsz-to-nsp")
@@ -714,6 +716,16 @@ enum MultiContentInvocation {
         json: bool,
         jsonl: bool,
     },
+    XciToXcz {
+        source: PathBuf,
+        destination: PathBuf,
+        workspace: PathBuf,
+        key_file: PathBuf,
+        conflict_policy: ConflictPolicy,
+        compression: nscb::NszCompression,
+        json: bool,
+        jsonl: bool,
+    },
     XczToXci {
         source: PathBuf,
         destination: PathBuf,
@@ -770,11 +782,13 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
     let is_build = command == "multi-content-build";
     let is_split = command == "multi-content-split";
     let is_xci_to_nsp = command == "xci-to-nsp";
+    let is_xci_to_xcz = command == "xci-to-xcz";
     let is_xcz_to_xci = command == "xcz-to-xci";
-    let is_xci_xcz_conversion = is_xci_to_nsp || is_xcz_to_xci;
+    let is_xci_xcz_conversion = is_xci_to_nsp || is_xci_to_xcz || is_xcz_to_xci;
     let is_nsp_to_nsz = command == "nsp-to-nsz";
     let is_nsz_to_nsp = command == "nsz-to-nsp";
     let is_nsp_nsz = is_nsp_to_nsz || is_nsz_to_nsp;
+    let is_compression = is_nsp_to_nsz || is_xci_to_xcz;
     if !is_build && !is_split && !is_xci_xcz_conversion && !is_nsp_nsz {
         return Err(());
     }
@@ -828,7 +842,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                             _ => return Err(()),
                         };
                     }
-                    "--preset" if is_nsp_to_nsz && !compression_option_seen => {
+                    "--preset" if is_compression && !compression_option_seen => {
                         compression_option_seen = true;
                         compression = match value.to_str().ok_or(())? {
                             "fast" => nscb::NszCompression::Fast,
@@ -837,7 +851,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                             _ => return Err(()),
                         };
                     }
-                    "--level" if is_nsp_to_nsz && !compression_option_seen => {
+                    "--level" if is_compression && !compression_option_seen => {
                         compression_option_seen = true;
                         let level = value.to_str().ok_or(())?.parse::<i32>().map_err(|_| ())?;
                         compression = nscb::NszCompression::Level(level);
@@ -889,6 +903,20 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
             workspace,
             key_file: key_file.ok_or(())?,
             conflict_policy,
+            json,
+            jsonl,
+        })
+    } else if is_xci_to_xcz {
+        if sources.len() != 1 || destination_directory.is_some() {
+            return Err(());
+        }
+        Ok(MultiContentInvocation::XciToXcz {
+            source: sources.remove(0),
+            destination: destination.ok_or(())?,
+            workspace,
+            key_file: key_file.ok_or(())?,
+            conflict_policy,
+            compression,
             json,
             jsonl,
         })
@@ -982,6 +1010,17 @@ mod nsp_nsz_cli_tests {
                 "--keys",
                 "keys.txt",
             ],
+            [
+                "xci-to-xcz",
+                "--source",
+                "input.xci",
+                "--output",
+                "output.xcz",
+                "--workspace",
+                "workspace",
+                "--keys",
+                "keys.txt",
+            ],
         ];
 
         for invocation in invocations {
@@ -994,7 +1033,7 @@ mod nsp_nsz_cli_tests {
     }
 
     #[test]
-    fn compression_selection_is_available_only_on_nsp_to_nsz() {
+    fn compression_selection_is_available_on_compression_commands_only() {
         let cases = [
             ("--preset", "fast", nscb::NszCompression::Fast),
             ("--preset", "balanced", nscb::NszCompression::Balanced),
@@ -1003,14 +1042,18 @@ mod nsp_nsz_cli_tests {
             ("--level", "19", nscb::NszCompression::Level(19)),
         ];
 
-        for (option, value, expected) in cases {
-            let mut args = conversion_args("nsp-to-nsz");
-            args.extend([OsString::from(option), OsString::from(value)]);
-            let invocation = parse_multi_content_invocation(&args).expect("valid selection");
-            let MultiContentInvocation::NspToNsz { compression, .. } = invocation else {
-                panic!("compression command must create an NSP-to-NSZ invocation");
-            };
-            assert_eq!(compression, expected);
+        for command in ["nsp-to-nsz", "xci-to-xcz"] {
+            for (option, value, expected) in cases {
+                let mut args = conversion_args(command);
+                args.extend([OsString::from(option), OsString::from(value)]);
+                let invocation = parse_multi_content_invocation(&args).expect("valid selection");
+                let compression = match invocation {
+                    MultiContentInvocation::NspToNsz { compression, .. }
+                    | MultiContentInvocation::XciToXcz { compression, .. } => compression,
+                    _ => panic!("compression command must create a compression invocation"),
+                };
+                assert_eq!(compression, expected);
+            }
         }
 
         let invocation = parse_multi_content_invocation(&conversion_args("nsp-to-nsz"))
@@ -1020,7 +1063,14 @@ mod nsp_nsz_cli_tests {
         };
         assert_eq!(compression, nscb::NszCompression::Balanced);
 
-        for command in ["nsz-to-nsp", "xci-to-nsp"] {
+        let invocation = parse_multi_content_invocation(&conversion_args("xci-to-xcz"))
+            .expect("default selection");
+        let MultiContentInvocation::XciToXcz { compression, .. } = invocation else {
+            panic!("XCI compression command must create an XCI-to-XCZ invocation");
+        };
+        assert_eq!(compression, nscb::NszCompression::Balanced);
+
+        for command in ["nsz-to-nsp", "xci-to-nsp", "xcz-to-xci"] {
             for option in ["--preset", "--level"] {
                 let mut args = conversion_args(command);
                 args.extend([OsString::from(option), OsString::from("3")]);
@@ -1043,13 +1093,15 @@ mod nsp_nsz_cli_tests {
         invalid.push(vec!["--preset", "fast", "--level", "9"]);
         invalid.push(vec!["--level", "9", "--preset", "fast"]);
 
-        for options in invalid {
-            let mut args = conversion_args("nsp-to-nsz");
-            args.extend(options.into_iter().map(OsString::from));
-            assert!(
-                parse_multi_content_invocation(&args).is_err(),
-                "accepted invalid compression options: {args:?}"
-            );
+        for command in ["nsp-to-nsz", "xci-to-xcz"] {
+            for options in &invalid {
+                let mut args = conversion_args(command);
+                args.extend(options.iter().map(OsString::from));
+                assert!(
+                    parse_multi_content_invocation(&args).is_err(),
+                    "accepted invalid compression options: {args:?}"
+                );
+            }
         }
     }
 }
@@ -1125,6 +1177,27 @@ fn run_multi_content_command(
             "convert",
             "xci-to-nsp",
             "xci_to_nsp.job_result",
+        ),
+        MultiContentInvocation::XciToXcz {
+            source,
+            destination,
+            workspace,
+            key_file,
+            conflict_policy,
+            compression,
+            json,
+            jsonl,
+        } => (
+            engine.plan_xci_to_xcz(
+                nscb::XciToXczRequest::new(source, destination, workspace, key_file)
+                    .with_conflict_policy(conflict_policy)
+                    .with_compression(compression),
+            ),
+            json,
+            jsonl,
+            "compress",
+            "xci-to-xcz",
+            "xci_to_xcz.job_result",
         ),
         MultiContentInvocation::XczToXci {
             source,
@@ -1331,6 +1404,11 @@ fn multi_content_usage(args: &[OsString]) -> &'static str {
         .is_some_and(|value| value == OsStr::new("nsp-to-nsz"))
     {
         "usage: nsp-to-nsz --source NSP --output NSZ --workspace DIR --keys FILE [--preset fast|balanced|maximum | --level 1..19] [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+    } else if args
+        .first()
+        .is_some_and(|value| value == OsStr::new("xci-to-xcz"))
+    {
+        "usage: xci-to-xcz --source XCI --output XCZ --workspace DIR --keys FILE [--preset fast|balanced|maximum | --level 1..19] [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     } else if args
         .first()
         .is_some_and(|value| value == OsStr::new("nsz-to-nsp"))
