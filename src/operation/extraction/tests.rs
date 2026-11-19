@@ -1,12 +1,12 @@
 #[cfg(target_os = "macos")]
 use super::super::CopyThroughRequest;
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use super::super::OperationFailureCode;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use super::super::{
     ExecutionCheckpoint, OperationMilestone, OperationSession,
     execute_with_producer_and_checkpoint_and_cancellation,
 };
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use super::super::OperationFailureCode;
 use super::super::{OperationKind, OperationOutcome};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use super::{ExtractionIoFailurePoint, InjectedExtractionIoFailure};
