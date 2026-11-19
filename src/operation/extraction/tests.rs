@@ -5,7 +5,9 @@ use super::super::{
     ExecutionCheckpoint, OperationMilestone, OperationSession,
     execute_with_producer_and_checkpoint_and_cancellation,
 };
-use super::super::{OperationFailureCode, OperationKind, OperationOutcome};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use super::super::OperationFailureCode;
+use super::super::{OperationKind, OperationOutcome};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use super::{ExtractionIoFailurePoint, InjectedExtractionIoFailure};
 use crate::extraction::ExtractionRequest;

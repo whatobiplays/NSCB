@@ -1,7 +1,10 @@
 //! Typed requests and stable manifest data for standalone Program extraction.
 
-use crate::inspection::{NativeNcaFileSpan, NativeNcaInventory, NcaContentType, ProgramId};
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+use crate::inspection::{NativeNcaFileSpan, NativeNcaInventory};
+use crate::inspection::{NcaContentType, ProgramId};
 use serde::Serialize;
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -138,6 +141,7 @@ impl ExtractionSelectors {
         &self.paths
     }
 
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     pub(crate) fn is_empty(&self) -> bool {
         self.program_id.is_none()
             && self.nca_type.is_none()
@@ -238,6 +242,7 @@ pub struct ExtractionManifestFile {
 }
 
 /// Selected source spans and their stable, validated manifest representation.
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedExtraction {
     /// Files to copy from the checked NCA source.
@@ -252,16 +257,21 @@ pub(crate) struct ResolvedExtraction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExtractionValidationError {
     /// Selectors were requested without any selector values.
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     EmptySelectors,
     /// No file matched the combined selector dimensions.
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     EmptySelection,
     /// At least one supplied selector value matched no file in the final selection.
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     SelectorMiss,
     /// A selected path or bundle component violates the portable naming policy.
     UnsupportedPath,
     /// A selected path aliases another source file or directory.
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     PathCollision,
     /// A published tree exceeds an existing inspection resource limit.
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     ResourceLimitExceeded,
 }
 
@@ -270,6 +280,7 @@ pub(crate) enum ExtractionValidationError {
 /// Selector dimensions are conjunctive; values within partition and path
 /// dimensions are disjunctive. Every supplied value must match at least one
 /// file in the final selection.
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(crate) fn resolve_extraction(
     selection: &ExtractionSelection,
     inventory: &NativeNcaInventory,
@@ -504,6 +515,7 @@ pub(crate) fn resolve_extraction(
     })
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 fn content_path(partition_index: u8, path: &str) -> Result<String, ExtractionValidationError> {
     let partition = partition_index.to_string();
     let capacity = partition
@@ -521,6 +533,7 @@ fn content_path(partition_index: u8, path: &str) -> Result<String, ExtractionVal
     Ok(full_path)
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 fn insert_directory(
     directories: &mut HashSet<String>,
     path: &str,
@@ -533,6 +546,7 @@ fn insert_directory(
     Ok(())
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 fn copy_string(value: &str) -> Result<String, ExtractionValidationError> {
     let mut copy = String::new();
     copy.try_reserve_exact(value.len())
@@ -542,6 +556,7 @@ fn copy_string(value: &str) -> Result<String, ExtractionValidationError> {
 }
 
 /// Validates one selected relative path using the portable published-name policy.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn validate_selected_relative_path(path: &str) -> Result<(), ExtractionValidationError> {
     if path.is_empty() {
         return Err(ExtractionValidationError::UnsupportedPath);
@@ -598,6 +613,7 @@ fn is_reserved_device_name(component: &str) -> bool {
 
 /// Rejects source aliases that could change the meaning of selected paths on a
 /// case-insensitive filesystem or after Windows trailing-dot/space handling.
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(crate) fn validate_selected_path_aliases(
     selected_files: &[String],
     selected_directories: &[String],
@@ -629,6 +645,7 @@ pub(crate) fn validate_selected_path_aliases(
     Ok(())
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 fn selected_paths_by_key(
     paths: &[String],
     allow_exact_duplicates: bool,
@@ -650,6 +667,7 @@ fn selected_paths_by_key(
     Ok(canonical)
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 fn source_paths_by_key(
     paths: &[String],
 ) -> Result<HashMap<String, Option<&str>>, ExtractionValidationError> {
@@ -676,6 +694,7 @@ fn source_paths_by_key(
     Ok(canonical)
 }
 
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 fn comparison_key(path: &str) -> Result<String, ExtractionValidationError> {
     let mut key = String::new();
     key.try_reserve(path.len())
