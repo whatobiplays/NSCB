@@ -211,12 +211,37 @@ impl StandaloneConfig {
         }
     }
 
+    /// Resolves the configured or default parent for a new extraction bundle.
+    pub(crate) fn extraction_output_parent(&self) -> Result<PathBuf, OutputPathError> {
+        self.output_parent_with_selection()
+            .map(|(directory, _selection)| directory)
+    }
+
+    /// Resolves the native Documents-based output directory without creating it.
+    pub(crate) fn default_output_parent() -> Result<PathBuf, OutputPathError> {
+        let documents = dirs::document_dir().ok_or(OutputPathError::OutputDirectoryUnavailable)?;
+        if !documents.is_absolute() || !documents.is_dir() {
+            return Err(OutputPathError::OutputDirectoryUnavailable);
+        }
+        Ok(documents.join("NSCB_output"))
+    }
+
     /// Resolves an implicit Copy destination and records which durable policy
     /// chose it. Retry uses this provenance to re-run current configuration
     /// after configuration changes.
     pub(crate) fn copy_destination_with_selection(
         &self,
         source: &Path,
+    ) -> Result<(PathBuf, CopyDestinationSelection), OutputPathError> {
+        let (directory, selection) = self.output_parent_with_selection()?;
+        let file_name = source
+            .file_name()
+            .ok_or(OutputPathError::OutputDestinationInvalid)?;
+        Ok((directory.join(file_name), selection))
+    }
+
+    fn output_parent_with_selection(
+        &self,
     ) -> Result<(PathBuf, CopyDestinationSelection), OutputPathError> {
         let configured = self
             .document
@@ -228,17 +253,10 @@ impl StandaloneConfig {
                 directory,
                 CopyDestinationSelection::ConfiguredOutputDirectory,
             ),
-            None => {
-                let documents =
-                    dirs::document_dir().ok_or(OutputPathError::OutputDirectoryUnavailable)?;
-                if !documents.is_absolute() || !documents.is_dir() {
-                    return Err(OutputPathError::OutputDirectoryUnavailable);
-                }
-                (
-                    documents.join("NSCB_output"),
-                    CopyDestinationSelection::NativeDocumentsOutput,
-                )
-            }
+            None => (
+                Self::default_output_parent()?,
+                CopyDestinationSelection::NativeDocumentsOutput,
+            ),
         };
         match fs::metadata(&directory) {
             Ok(metadata) if metadata.is_dir() => {}
@@ -246,10 +264,7 @@ impl StandaloneConfig {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(_) => return Err(OutputPathError::OutputDirectoryUnavailable),
         }
-        let file_name = source
-            .file_name()
-            .ok_or(OutputPathError::OutputDestinationInvalid)?;
-        Ok((directory.join(file_name), selection))
+        Ok((directory, selection))
     }
 
     /// Selects the standalone outer bundle path for a Split operation.
@@ -912,6 +927,26 @@ mod tests {
                 && value.value == "/synthetic/output"
                 && value.source == "file"
         }));
+    }
+
+    #[test]
+    fn extraction_output_parent_uses_configured_directory_without_creating_it() {
+        let root = tempfile::tempdir().expect("extraction output parent");
+        let output = root.path().join("configured-output");
+        let document = format!(
+            "schema_version = 1\nkeys_path = \"/synthetic/keys\"\noutput_dir = {:?}\n",
+            output.to_string_lossy()
+        )
+        .parse::<DocumentMut>()
+        .unwrap();
+        let config = StandaloneConfig {
+            path: root.path().join("config.toml"),
+            source_schema_version: 1,
+            document,
+        };
+
+        assert_eq!(config.extraction_output_parent().unwrap(), output);
+        assert!(!config.extraction_output_parent().unwrap().exists());
     }
 
     #[test]

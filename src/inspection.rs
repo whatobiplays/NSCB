@@ -11,6 +11,7 @@ use std::fmt;
 use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -370,7 +371,37 @@ impl ProgramId {
     pub fn to_hex(self) -> String {
         format!("{:016x}", self.0)
     }
+
+    /// Parses exactly 16 ASCII hexadecimal digits, accepting either letter case.
+    pub fn from_hex(value: &str) -> Result<Self, ProgramIdParseError> {
+        if value.len() != 16 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(ProgramIdParseError);
+        }
+        u64::from_str_radix(value, 16)
+            .map(Self)
+            .map_err(|_| ProgramIdParseError)
+    }
 }
+
+impl FromStr for ProgramId {
+    type Err = ProgramIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(value)
+    }
+}
+
+/// A Program ID string did not contain exactly 16 ASCII hexadecimal digits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProgramIdParseError;
+
+impl fmt::Display for ProgramIdParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Program ID must contain exactly 16 ASCII hexadecimal digits")
+    }
+}
+
+impl std::error::Error for ProgramIdParseError {}
 
 impl Serialize for ProgramId {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -379,6 +410,32 @@ impl Serialize for ProgramId {
     {
         serializer.serialize_str(&self.to_hex())
     }
+}
+
+/// A checked regular-file span inside a validated native PartitionFs inventory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeNcaFileSpan {
+    /// Header partition index containing the file.
+    pub(crate) partition_index: u8,
+    /// Normalized path relative to that partition.
+    pub(crate) path: String,
+    /// Absolute byte offset in the NCA file.
+    pub(crate) offset: u64,
+    /// Declared file length.
+    pub(crate) size: u64,
+}
+
+/// Native NCA and PartitionFs facts shared by Inspection and extraction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeNcaInventory {
+    /// Parsed encrypted NCA header.
+    pub(crate) header: crate::nca::Header,
+    /// Validated partition metadata and normalized entry lists.
+    pub(crate) partitions: Vec<NcaPartition>,
+    /// Validated directories relative to the extraction content root.
+    pub(crate) directories: Vec<String>,
+    /// Validated files with checked absolute NCA byte spans.
+    pub(crate) files: Vec<NativeNcaFileSpan>,
 }
 
 /// Numeric process exit classes fixed by ADR 0023.
@@ -731,42 +788,25 @@ pub(crate) fn validate_provider_report(
 ) -> Result<InspectionResult, InspectionErrorCode> {
     let facts = &report.facts;
     let header = &report.header;
+    // Keep this gate before provider corroboration: unsupported NCA profiles
+    // have a stable Inspection error precedence for existing callers.
     validate_nca_profile(header)?;
     corroborate_header(facts, header)?;
-
-    let mut validation = PartitionFsValidation::default();
-    let mut partitions = Vec::new();
-    for partition in &header.partitions {
-        let mut span = SpanReader::new(report.input.file(), partition.offset, partition.size);
-        let probe = crate::pfs0::probe(&mut span, partition.size).map_err(map_pfs_error)?;
-        let entries = validation
-            .validate_partition(
-                partition.index,
-                probe
-                    .entries
-                    .iter()
-                    .map(|entry| (entry.name.as_str(), entry.size)),
-            )
-            .map_err(map_partition_fs_error)?;
-        partitions.push(NcaPartition {
-            index: partition.index,
-            offset: partition.offset,
-            size: partition.size,
-            filesystem: NcaFilesystem::PartitionFs,
-            hash_type: NcaHashType::None,
-            encryption: NcaEncryptionType::None,
-            entries: entries
-                .into_iter()
-                .map(|(path, size)| InspectionEntry { path, size })
-                .collect(),
-        });
-    }
-    if validation.total_entries() == 0 {
+    let inventory = validate_native_inventory(report.input.file(), header)?;
+    if inventory.files.is_empty() {
         return Err(InspectionErrorCode::ProviderContentUnreadable);
     }
-    if validation.expected_directories() != &facts.tree_directories
-        || validation.expected_files() != &facts.tree_files
-    {
+    let directories_match = inventory.directories.len() == facts.tree_directories.len()
+        && inventory
+            .directories
+            .iter()
+            .all(|directory| facts.tree_directories.contains(directory));
+    let files_match = inventory.files.len() == facts.tree_files.len()
+        && inventory.files.iter().all(|file| {
+            let path = format!("{}/{}", file.partition_index, file.path);
+            facts.tree_files.contains(&path)
+        });
+    if !directories_match || !files_match {
         return Err(InspectionErrorCode::ProviderPostconditionMismatch);
     }
     if !report.input.unchanged() {
@@ -785,8 +825,110 @@ pub(crate) fn validate_provider_report(
         program_id: ProgramId::from_u64(header.program_id),
         content_index: header.content_index,
         declared_size: header.declared_size,
-        partitions,
+        partitions: inventory.partitions,
     }))
+}
+
+/// Parses every supported PartitionFs table and returns validated paths and byte spans.
+///
+/// This native check does not launch or consume data from an Inspection provider.
+pub(crate) fn validate_native_inventory(
+    file: &mut std::fs::File,
+    header: &crate::nca::Header,
+) -> Result<NativeNcaInventory, InspectionErrorCode> {
+    validate_nca_profile(header)?;
+    let mut validation = PartitionFsValidation::default();
+    let mut partitions = Vec::new();
+    partitions
+        .try_reserve_exact(header.partitions.len())
+        .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+    let mut files = Vec::new();
+
+    for partition in &header.partitions {
+        let mut span = SpanReader::new(file, partition.offset, partition.size);
+        let probe = crate::pfs0::probe(&mut span, partition.size).map_err(map_pfs_error)?;
+        let entries = validation
+            .validate_partition(
+                partition.index,
+                probe
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.name.as_str(), entry.size)),
+            )
+            .map_err(map_partition_fs_error)?;
+        files
+            .try_reserve(probe.entries.len())
+            .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+        for entry in &probe.entries {
+            if entries.get(&entry.name) != Some(&entry.size) {
+                return Err(InspectionErrorCode::MalformedInput);
+            }
+            let offset = partition
+                .offset
+                .checked_add(entry.file_offset)
+                .ok_or(InspectionErrorCode::MalformedInput)?;
+            let end = offset
+                .checked_add(entry.size)
+                .ok_or(InspectionErrorCode::MalformedInput)?;
+            let partition_end = partition
+                .offset
+                .checked_add(partition.size)
+                .ok_or(InspectionErrorCode::MalformedInput)?;
+            if end > partition_end {
+                return Err(InspectionErrorCode::MalformedInput);
+            }
+            files.push(NativeNcaFileSpan {
+                partition_index: partition.index,
+                path: entry.name.clone(),
+                offset,
+                size: entry.size,
+            });
+        }
+
+        let mut inspection_entries = Vec::new();
+        inspection_entries
+            .try_reserve_exact(entries.len())
+            .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+        inspection_entries.extend(
+            entries
+                .into_iter()
+                .map(|(path, size)| InspectionEntry { path, size }),
+        );
+        partitions.push(NcaPartition {
+            index: partition.index,
+            offset: partition.offset,
+            size: partition.size,
+            filesystem: NcaFilesystem::PartitionFs,
+            hash_type: NcaHashType::None,
+            encryption: NcaEncryptionType::None,
+            entries: inspection_entries,
+        });
+    }
+
+    files.sort_unstable_by(|left, right| {
+        left.partition_index
+            .cmp(&right.partition_index)
+            .then_with(|| left.path.as_bytes().cmp(right.path.as_bytes()))
+    });
+    let mut directories = Vec::new();
+    directories
+        .try_reserve_exact(validation.expected_directories().len())
+        .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+    for path in validation.expected_directories() {
+        let mut copy = String::new();
+        copy.try_reserve_exact(path.len())
+            .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+        copy.push_str(path);
+        directories.push(copy);
+    }
+    directories.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+
+    Ok(NativeNcaInventory {
+        header: header.clone(),
+        partitions,
+        directories,
+        files,
+    })
 }
 
 pub(crate) fn validate_nca_profile(header: &crate::nca::Header) -> Result<(), InspectionErrorCode> {
@@ -1180,5 +1322,73 @@ mod tests {
             serde_json::to_string(&super::ProgramId::from_u64(0x0102_0304_0506_0708)).unwrap(),
             "\"0102030405060708\""
         );
+    }
+
+    #[test]
+    fn program_id_parser_accepts_only_sixteen_ascii_hex_digits() {
+        let parsed = super::ProgramId::from_hex("ABCDEFabcdef0123").unwrap();
+        assert_eq!(parsed.to_hex(), "abcdefabcdef0123");
+        assert_eq!(
+            "0102030405060708".parse::<super::ProgramId>().unwrap(),
+            super::ProgramId::from_u64(0x0102_0304_0506_0708)
+        );
+
+        for value in [
+            "",
+            "010203040506070",
+            "00102030405060708",
+            "0x02030405060708",
+            "abcdefghijklmnop",
+            "00000000000000é",
+        ] {
+            assert!(super::ProgramId::from_hex(value).is_err(), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn native_inventory_returns_sorted_checked_file_spans_and_empty_roots() {
+        use std::io::Write;
+
+        let built =
+            crate::test_synthetic_verification::build(crate::test_synthetic_verification::Spec {
+                distribution: 0,
+                extra_partitions: 1,
+                ..Default::default()
+            });
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&built.nca).unwrap();
+        let header = crate::nca::read_header(
+            &mut file,
+            built.nca.len() as u64,
+            &crate::test_synthetic_verification::HEADER_KEY,
+        )
+        .unwrap();
+        let inventory = super::validate_native_inventory(&mut file, &header).unwrap();
+
+        assert!(!inventory.files.is_empty());
+        assert!(inventory.directories.contains(&"0".to_owned()));
+        assert!(inventory.directories.contains(&"1".to_owned()));
+        assert!(
+            inventory
+                .directories
+                .windows(2)
+                .all(|pair| pair[0].as_bytes() < pair[1].as_bytes())
+        );
+        assert!(inventory.files.windows(2).all(|pair| {
+            (pair[0].partition_index, pair[0].path.as_bytes())
+                < (pair[1].partition_index, pair[1].path.as_bytes())
+        }));
+        for partition in &inventory.partitions {
+            for entry in &partition.entries {
+                let span = inventory
+                    .files
+                    .iter()
+                    .find(|span| span.partition_index == partition.index && span.path == entry.path)
+                    .expect("each validated entry has one checked source span");
+                assert_eq!(span.size, entry.size);
+                assert!(span.offset >= partition.offset);
+                assert!(span.offset + span.size <= partition.offset + partition.size);
+            }
+        }
     }
 }

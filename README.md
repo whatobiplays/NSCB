@@ -116,6 +116,29 @@ See [Inspection architecture](docs/architecture/inspection.md), [NSTool v1.9.2
 provider qualification](docs/providers/nstool-v1.9.2.md), and [Inspection
 qualification evidence](docs/testing/inspection-qualification.md).
 
+## Content extraction
+
+The Slice A extraction contract covers one standalone encrypted-header NCA3
+Program with clear, unhashed PartitionFs partitions. It selects by Program ID,
+Program role/NCA type, partition, and exact partition-relative path, then
+records the selected structure in a versioned manifest.
+
+```text
+nscb extract --source <NCA> [--keys <FILE>] [--output-directory <NEW-DIR>] \
+    (--all | [--program-id <16-HEX>] [--nca-type program | --role program] \
+    [--partition 0..3]... [--path <PARTITION-RELATIVE-PATH>]...) \
+    [--json | --jsonl]
+```
+
+Repeated partition and path values are ORed within their dimension; populated
+dimensions are combined with AND. Every supplied value must match the final
+selection. The bundle contains `manifest.json` and `content/`. See
+[standalone Program extraction](docs/architecture/extraction.md) for the
+manifest schema, path rules, output naming, validation boundary, cancellation,
+and recovery behavior. The Engine and CLI passed extraction tests on native
+macOS arm64 with writable local APFS and rights-free synthetic keyed fixtures.
+Other operating systems and filesystem types remain unqualified.
+
 ## Content verification
 
 The read-only `Engine::verify` operation returns typed per-check evidence for a

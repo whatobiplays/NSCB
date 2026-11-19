@@ -5,6 +5,9 @@
 //! state, writes to a private staging file, validates the staged bytes, and
 //! only then promotes the file into the destination.
 //!
+#[cfg(any(target_os = "macos", test))]
+mod extraction;
+
 #[cfg(target_os = "macos")]
 use crate::file_identity::path_identity;
 use crate::file_identity::{FileIdentity, FileSnapshot};
@@ -364,6 +367,8 @@ pub enum OperationOutcome {
     Built,
     /// Component packages were split and published as one directory.
     Split,
+    /// A validated Program NCA tree and manifest were published as one directory.
+    Extracted,
     /// A qualified secure-partition member set was published as an NSP.
     Converted,
     /// A qualified NSP was compressed into a standard NSZ artifact.
@@ -383,6 +388,8 @@ pub enum OperationKind {
     MultiContentBuild,
     /// Separation of a supported package by byte-derived ProgramId.
     MultiContentSplit,
+    /// Extraction of a qualified native Program NCA into a bundle directory.
+    Extract,
     /// Conversion of a qualified base Application XCI into an NSP.
     XciToNsp,
     /// Compression of a qualified base Application XCI into an XCZ.
@@ -1310,6 +1317,8 @@ pub struct OperationPlanSnapshot {
     sources: Vec<PlannedSource>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     content_groups: Vec<PlannedContentGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_manifest: Option<crate::extraction::ExtractionManifest>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     output_paths: Vec<PathBuf>,
     destination: PathBuf,
@@ -1358,6 +1367,11 @@ impl OperationPlanSnapshot {
     /// Returns the ProgramId groups and member counts resolved from input bytes.
     pub fn content_groups(&self) -> &[PlannedContentGroup] {
         &self.content_groups
+    }
+
+    /// Returns the manifest describing the selected extracted content tree, if any.
+    pub fn extraction_manifest(&self) -> Option<&crate::extraction::ExtractionManifest> {
+        self.extraction_manifest.as_ref()
     }
 
     /// Returns the output package paths planned for the operation.
@@ -1459,6 +1473,8 @@ pub struct OperationPlan {
     nsp_nsz: Option<NspNszPlan>,
     #[cfg(target_os = "macos")]
     xcz_to_xci: Option<XczToXciPlan>,
+    #[cfg(target_os = "macos")]
+    extraction: Option<extraction::ExtractionOperationPlan>,
 }
 
 impl OperationPlan {
@@ -2504,6 +2520,25 @@ pub(crate) fn plan_multi_content_split(
     #[cfg(target_os = "macos")]
     {
         plan_multi_content_split_unix(request)
+    }
+}
+
+/// Plans a selected native Program NCA extraction.
+pub(crate) fn plan_extraction(
+    request: crate::extraction::ExtractionRequest,
+    cancellation: CancellationHandle,
+) -> Result<OperationPlan, OperationError> {
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        let _ = (request, cancellation);
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        extraction::plan(request, cancellation)
     }
 }
 
@@ -4152,6 +4187,7 @@ fn plan_multi_content_build_unix(
         source: planned_source,
         sources,
         content_groups: snapshot_content_groups(&source),
+        extraction_manifest: None,
         output_paths: vec![destination.path.clone()],
         destination: destination.path.clone(),
         workspace: environment.workspace.path.clone(),
@@ -4183,6 +4219,7 @@ fn plan_multi_content_build_unix(
         xci_to_xcz: None,
         nsp_nsz: None,
         xcz_to_xci: None,
+        extraction: None,
     })
 }
 
@@ -4367,6 +4404,7 @@ fn plan_multi_content_split_unix(
         source: planned_source,
         sources,
         content_groups: snapshot_content_groups(&source),
+        extraction_manifest: None,
         output_paths,
         destination: destination.path.clone(),
         workspace: environment.workspace.path.clone(),
@@ -4402,6 +4440,7 @@ fn plan_multi_content_split_unix(
         xci_to_xcz: None,
         nsp_nsz: None,
         xcz_to_xci: None,
+        extraction: None,
     })
 }
 
@@ -4717,6 +4756,7 @@ fn plan_copy_through_unix_for_output_inner(
         },
         sources: Vec::new(),
         content_groups: Vec::new(),
+        extraction_manifest: None,
         output_paths: Vec::new(),
         destination: destination.path.clone(),
         workspace: workspace.path.clone(),
@@ -4752,6 +4792,8 @@ fn plan_copy_through_unix_for_output_inner(
         xci_to_xcz: None,
         nsp_nsz: None,
         xcz_to_xci: None,
+        #[cfg(target_os = "macos")]
+        extraction: None,
     })
 }
 
@@ -5954,6 +5996,7 @@ where
     cleanup_artifact_retained |= cleanup_artifacts(&mut artifacts);
     checkpoint(ExecutionCheckpoint::BeforeArtifactInventory);
     if retain_late_destination_competitors(
+        &plan,
         &mut artifacts,
         &mut cleanup_artifact_retained,
         &mut checkpoint,
@@ -5963,7 +6006,7 @@ where
         execution = Err(OperationFailureCode::PublicationUncertain);
     }
     let (operation_artifacts, inventory_failure) =
-        artifact_inventory_with_checkpoint(&artifacts, &mut checkpoint);
+        artifact_inventory_with_checkpoint(Some(&plan), &artifacts, &mut checkpoint);
     match inventory_failure {
         Some(OperationFailureCode::PublicationUncertain) => {
             execution = Err(OperationFailureCode::PublicationUncertain);
@@ -6233,6 +6276,9 @@ fn validate_staged_content_package(
 
 #[cfg(target_os = "macos")]
 fn verify_conversion_key_identity(plan: &OperationPlan) -> Result<(), OperationFailureCode> {
+    if let Some(extraction) = plan.extraction.as_ref() {
+        return extraction::verify_key_identity(extraction);
+    }
     if let Some(conversion) = xci_to_xcz(plan) {
         validate_file_route(&conversion.key_file, None)
             .map_err(|_| OperationFailureCode::KeyFileChanged)?;
@@ -7970,6 +8016,9 @@ fn execute_unix<P>(
 where
     P: FnOnce(&mut File, &mut File, &OperationSession) -> Result<(), OperationFailureCode>,
 {
+    if plan.extraction.is_some() {
+        return extraction::execute_unix(plan, session, outputs, checkpoint);
+    }
     if matches!(&plan.multi_content, Some(MultiContentPlan::Split { .. })) {
         return execute_multi_content_split_unix(plan, session, outputs, checkpoint);
     }
@@ -10078,12 +10127,61 @@ struct OwnedArtifact {
 
 #[cfg(target_os = "macos")]
 fn retain_late_destination_competitors(
+    plan: &OperationPlan,
     artifacts: &mut Vec<OwnedArtifact>,
     cleanup_artifact_retained: &mut bool,
     checkpoint: &mut impl FnMut(ExecutionCheckpoint),
 ) -> Result<(), OperationFailureCode> {
     const MAX_ANCHORED_COMPETITORS: usize = 32;
     const PRIVATE_DIRECTORY_ATTEMPTS: usize = 8;
+
+    if plan.extraction.is_some() {
+        for artifact in artifacts.iter().filter(|artifact| {
+            artifact.kind == OwnedArtifactKind::Directory
+                && artifact.role == OperationArtifactRole::PublishedDestination
+        }) {
+            if artifact.path != plan.destination.path
+                || artifact.name != plan.destination.name
+                || artifact.identity.is_none()
+            {
+                return Err(OperationFailureCode::PublicationUncertain);
+            }
+            let identity = artifact
+                .identity
+                .ok_or(OperationFailureCode::PublicationUncertain)?;
+            let parent_identity = artifact
+                .parent_identity
+                .ok_or(OperationFailureCode::PublicationUncertain)?;
+            let parent_path = artifact
+                .path
+                .parent()
+                .ok_or(OperationFailureCode::PublicationUncertain)?;
+            if handle_identity(&artifact.directory) != Some(parent_identity)
+                || open_directory(parent_path)
+                    .ok()
+                    .as_ref()
+                    .and_then(handle_identity)
+                    != Some(parent_identity)
+                || validate_file_route(&plan.destination, Some(parent_identity)).is_err()
+            {
+                return Err(OperationFailureCode::PublicationUncertain);
+            }
+            let observed = open_directory_at(&artifact.directory, &artifact.name)
+                .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+            if handle_identity(&observed) != Some(identity)
+                || path_identity(&artifact.path) != Some(identity)
+            {
+                return Err(OperationFailureCode::PublicationUncertain);
+            }
+            let observed_again = open_directory_at(&artifact.directory, &artifact.name)
+                .map_err(|_| OperationFailureCode::PublicationUncertain)?;
+            if handle_identity(&observed_again) != Some(identity)
+                || validate_file_route(&plan.destination, Some(parent_identity)).is_err()
+            {
+                return Err(OperationFailureCode::PublicationUncertain);
+            }
+        }
+    }
 
     let published_indices = artifacts
         .iter()
@@ -10338,11 +10436,12 @@ fn clone_competitor_inventory_directory(directory: &File) -> io::Result<File> {
 fn artifact_inventory(
     artifacts: &[OwnedArtifact],
 ) -> (Vec<OperationArtifact>, Option<OperationFailureCode>) {
-    artifact_inventory_with_checkpoint(artifacts, &mut |_| {})
+    artifact_inventory_with_checkpoint(None, artifacts, &mut |_| {})
 }
 
 #[cfg(target_os = "macos")]
 fn artifact_inventory_with_checkpoint(
+    plan: Option<&OperationPlan>,
     artifacts: &[OwnedArtifact],
     checkpoint: &mut dyn FnMut(ExecutionCheckpoint),
 ) -> (Vec<OperationArtifact>, Option<OperationFailureCode>) {
@@ -10369,7 +10468,7 @@ fn artifact_inventory_with_checkpoint(
             .identity
             .zip(current_entry_identity)
             .is_some_and(|(recorded, observed)| recorded == observed);
-        let refreshed_directory_manifest = if artifact.kind == OwnedArtifactKind::Directory
+        let mut refreshed_directory_manifest = if artifact.kind == OwnedArtifactKind::Directory
             && matches!(
                 artifact.role,
                 OperationArtifactRole::DisplacedDestination
@@ -10414,12 +10513,45 @@ fn artifact_inventory_with_checkpoint(
         if artifact.role == OperationArtifactRole::PublishedDestination {
             checkpoint(ExecutionCheckpoint::AfterPublishedDestinationContentInspection);
         }
-        // Reopen after content inspection so path evidence never comes from a stale handle.
-        let post_inspection_entry = match artifact.kind {
+        let inspected_entry = match artifact.kind {
             OwnedArtifactKind::File => open_file_at(&artifact.directory, &artifact.name).ok(),
             OwnedArtifactKind::Directory => {
                 open_directory_at(&artifact.directory, &artifact.name).ok()
             }
+        };
+        let inspected_entry_length = if artifact.kind == OwnedArtifactKind::File {
+            inspected_entry
+                .as_ref()
+                .and_then(|entry| entry.metadata().ok())
+                .map(|metadata| metadata.len())
+        } else {
+            None
+        };
+        let extraction_published_directory = plan.is_some_and(|plan| {
+            plan.extraction.is_some()
+                && artifact.kind == OwnedArtifactKind::Directory
+                && artifact.role == OperationArtifactRole::PublishedDestination
+                && artifact.path == plan.destination.path
+                && artifact.name == plan.destination.name
+        });
+        if extraction_published_directory {
+            let exact_tree_matches = plan
+                .and_then(|plan| plan.extraction.as_ref())
+                .zip(inspected_entry.as_ref())
+                .is_some_and(|(extraction, bundle)| {
+                    artifact.identity == handle_identity(bundle)
+                        && extraction::validate_published_bundle_tree(bundle, extraction).is_ok()
+                });
+            if !exact_tree_matches {
+                refreshed_directory_manifest = None;
+            }
+        }
+        // Reopen after exact tree validation so identity and route checks use a
+        // fresh child lookup through the held parent directory.
+        let post_inspection_entry = if extraction_published_directory {
+            open_directory_at(&artifact.directory, &artifact.name).ok()
+        } else {
+            inspected_entry
         };
         let post_inspection_entry_identity =
             post_inspection_entry.as_ref().and_then(handle_identity);
@@ -10429,7 +10561,7 @@ fn artifact_inventory_with_checkpoint(
                 .and_then(|entry| entry.metadata().ok())
                 .map(|metadata| metadata.len())
         } else {
-            None
+            inspected_entry_length
         };
         let path_stable_after_inspection = current_entry_identity == post_inspection_entry_identity
             && current_entry_length == post_inspection_entry_length;
@@ -10452,6 +10584,22 @@ fn artifact_inventory_with_checkpoint(
             .zip(parent_path_identity)
             .map(|(recorded, observed)| recorded == observed);
         let parent_path_verified = parent_identity_matches == Some(true);
+        let extraction_published_directory_route_verified = plan
+            .filter(|plan| plan.extraction.is_some())
+            .filter(|_| {
+                artifact.kind == OwnedArtifactKind::Directory
+                    && artifact.role == OperationArtifactRole::PublishedDestination
+            })
+            .is_none_or(|plan| {
+                artifact.path == plan.destination.path
+                    && artifact.name == plan.destination.name
+                    && artifact.identity == post_inspection_entry_identity
+                    && parent_path_verified
+                    && artifact.parent_identity.is_some_and(|parent_identity| {
+                        validate_file_route(&plan.destination, Some(parent_identity)).is_ok()
+                            && path_identity(&plan.destination.path) == artifact.identity
+                    })
+            });
         let retained_uncertain_entry_verified = artifact.role
             != OperationArtifactRole::UncertainEntry
             || !artifact.keep
@@ -10466,7 +10614,9 @@ fn artifact_inventory_with_checkpoint(
                             && Some(evidence.snapshot.len) == artifact.length
                             && Some(evidence.sha256) == artifact.sha256
                 ));
-        let classification = if !path_stable_after_inspection {
+        let classification = if !path_stable_after_inspection
+            || !extraction_published_directory_route_verified
+        {
             Some(OperationFailureCode::PublicationUncertain)
         } else {
             match artifact.role {

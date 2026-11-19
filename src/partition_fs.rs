@@ -97,11 +97,13 @@ impl PartitionFsValidation {
     }
 
     /// Returns the expected provider file paths accumulated so far.
+    #[cfg(test)]
     pub(crate) fn expected_files(&self) -> &HashSet<String> {
         &self.expected_files
     }
 
     /// Returns the number of entries accepted across all partitions so far.
+    #[cfg(test)]
     pub(crate) fn total_entries(&self) -> usize {
         self.total_entries
     }

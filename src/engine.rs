@@ -1,4 +1,5 @@
 use crate::error::{ContainerProbeError, ContainerProbeErrorCode};
+use crate::extraction::ExtractionRequest;
 use crate::inspection::{
     CancellationHandle, InspectionError, InspectionErrorCode, InspectionHost,
     InspectionPreflightStatus, InspectionRequest, InspectionResult,
@@ -78,6 +79,19 @@ impl Engine {
         request: MultiContentSplitRequest,
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_multi_content_split(request)
+    }
+
+    /// Resolves a native Program NCA into an immutable content extraction plan.
+    ///
+    /// Planning validates the supported NCA and PartitionFs profile, resolves
+    /// the requested selection, and records source and key-file evidence. The
+    /// plan is executable only on native macOS arm64 with local writable APFS.
+    pub fn plan_extraction(
+        &self,
+        request: ExtractionRequest,
+        cancellation: CancellationHandle,
+    ) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_extraction(request, cancellation)
     }
 
     /// Resolves a rights-free base Application XCI into a planned NSP output.

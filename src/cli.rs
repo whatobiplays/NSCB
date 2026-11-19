@@ -12,13 +12,14 @@ use nscb::{
     CancellationHandle, ConflictPolicy, ContainerProbeError, ContainerProbeErrorCode,
     CopyBatchCheckpointError, CopyBatchEventConsumer, CopyBatchEventKind, CopyBatchPlan,
     CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyBatchSessionSnapshot,
-    CopyThroughRequest, Engine, InputResolutionCapabilities, InputResolutionControl,
-    InputResolutionRequest, InputSelection, InputSelectionSource, InspectionErrorCode,
-    InspectionHost, InspectionPreflightStatus, InspectionRequest, InspectionResult, JobState,
-    LocalSplitTrustStore, OperationEventConsumer, OperationEventKind, OperationFailureCode,
-    OperationPlan, OperationResult, OperationSession, OperationSessionSnapshot,
-    SplitQualificationKind, SplitRequest, SplitTrustWriter, VerificationErrorCode,
-    VerificationProfile, VerificationRequest,
+    CopyThroughRequest, Engine, ExtractionRequest, ExtractionSelection, ExtractionSelectors,
+    InputResolutionCapabilities, InputResolutionControl, InputResolutionRequest, InputSelection,
+    InputSelectionSource, InspectionErrorCode, InspectionHost, InspectionPreflightStatus,
+    InspectionRequest, InspectionResult, JobState, LocalSplitTrustStore, NcaContentType,
+    OperationEventConsumer, OperationEventKind, OperationFailureCode, OperationPlan,
+    OperationResult, OperationSession, OperationSessionSnapshot, ProgramId, SplitQualificationKind,
+    SplitRequest, SplitTrustWriter, VerificationErrorCode, VerificationProfile,
+    VerificationRequest,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -34,6 +35,248 @@ const EXIT_CONFLICT: i32 = 4;
 const EXIT_CANCELLED: i32 = 6;
 const EXIT_INTERNAL: i32 = 7;
 const EXIT_COMPLETED_WITH_ISSUES: i32 = 8;
+const EXTRACTION_USAGE: &str = concat!(
+    "Usage: nscb extract --source NCA [--keys FILE] [--output-directory NEW_DIR] (--all | SELECTORS) [--json | --jsonl]\n",
+    "Selectors: [--program-id 16-HEX-DIGITS] [--nca-type program | --role program]\n",
+    "           [--partition 0..3]... [--path RELATIVE_PATH]...\n",
+    "Use --all or at least one selector. Different selector dimensions combine with AND; repeated partition and path values combine with OR."
+);
+
+#[cfg(test)]
+mod extraction_cli_contract_tests {
+    use super::run;
+    use nscb::Engine;
+    use std::ffi::OsString;
+
+    #[test]
+    fn extract_missing_input_emits_one_machine_readable_failure() {
+        let root = tempfile::tempdir().expect("create extraction CLI fixture");
+        let source = root.path().join("missing.nca");
+        let key_file = root.path().join("missing.keys");
+        let destination = root.path().join("bundle");
+        let args = vec![
+            OsString::from("extract"),
+            OsString::from("--source"),
+            source.into_os_string(),
+            OsString::from("--keys"),
+            key_file.into_os_string(),
+            OsString::from("--output-directory"),
+            destination.clone().into_os_string(),
+            OsString::from("--all"),
+            OsString::from("--json"),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit_code = run(&args, &Engine::new(), &mut stdout, &mut stderr);
+
+        assert_eq!(exit_code, 3);
+        let document: serde_json::Value =
+            serde_json::from_slice(&stdout).expect("one JSON document");
+        assert_eq!(document["kind"], "error");
+        assert!(document["error"]["code"].is_string());
+        assert!(!destination.exists());
+        assert!(stderr.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod extraction_cli_parser_tests {
+    use super::parse_extraction;
+    use nscb::{ExtractionSelection, NcaContentType, ProgramId};
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn parses_typed_selectors_and_repeated_partition_and_path_values() {
+        let invocation = parse_extraction(&args(&[
+            "extract",
+            "--source",
+            "program.nca",
+            "--keys",
+            "prod.keys",
+            "--output-directory",
+            "bundle",
+            "--program-id",
+            "0102030405060708",
+            "--nca-type",
+            "program",
+            "--partition",
+            "0",
+            "--partition",
+            "3",
+            "--path",
+            "main.npdm",
+            "--path",
+            "romfs/data.bin",
+            "--jsonl",
+        ]))
+        .expect("valid extraction selector invocation");
+
+        assert_eq!(invocation.source, PathBuf::from("program.nca"));
+        assert_eq!(invocation.key_file, Some(PathBuf::from("prod.keys")));
+        assert_eq!(invocation.output_directory, Some(PathBuf::from("bundle")));
+        assert!(invocation.jsonl);
+        assert!(!invocation.json);
+        let ExtractionSelection::Selectors(selectors) = invocation.selection else {
+            panic!("expected explicit selectors");
+        };
+        assert_eq!(
+            selectors.program_id(),
+            Some(ProgramId::from_u64(0x0102_0304_0506_0708))
+        );
+        assert_eq!(selectors.nca_type(), Some(NcaContentType::Program));
+        assert_eq!(selectors.partitions(), &[0, 3]);
+        assert_eq!(
+            selectors.paths(),
+            &[String::from("main.npdm"), String::from("romfs/data.bin")]
+        );
+    }
+
+    #[test]
+    fn accepts_all_only_without_selector_values() {
+        let invocation = parse_extraction(&args(&["extract", "--source", "program.nca", "--all"]))
+            .expect("valid full-tree invocation");
+        assert!(matches!(invocation.selection, ExtractionSelection::All));
+
+        assert!(
+            parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "program.nca",
+                "--all",
+                "--partition",
+                "0",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn requires_exactly_one_selection_mode() {
+        assert!(parse_extraction(&args(&["extract", "--source", "program.nca"])).is_err());
+        assert!(
+            parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "program.nca",
+                "--all",
+                "--all",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_repeated_program_ids_and_role_dimensions() {
+        for program_id in ["00000000000000G0", "000000000000000"] {
+            assert!(
+                parse_extraction(&args(&[
+                    "extract",
+                    "--source",
+                    "program.nca",
+                    "--program-id",
+                    program_id,
+                ]))
+                .is_err()
+            );
+        }
+
+        assert!(
+            parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "program.nca",
+                "--program-id",
+                "0000000000000001",
+                "--program-id",
+                "0000000000000002",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "program.nca",
+                "--nca-type",
+                "program",
+                "--role",
+                "program",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_partitions_unknown_roles_and_conflicting_output_modes() {
+        for partition in ["4", "-1", "03"] {
+            assert!(
+                parse_extraction(&args(&[
+                    "extract",
+                    "--source",
+                    "program.nca",
+                    "--partition",
+                    partition,
+                ]))
+                .is_err()
+            );
+        }
+
+        assert!(
+            parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "program.nca",
+                "--role",
+                "data",
+            ]))
+            .is_err()
+        );
+        assert!(
+            parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "program.nca",
+                "--all",
+                "--json",
+                "--jsonl",
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn implicit_destination_appends_suffix_only_for_a_portable_bundle_leaf() {
+        let parent = PathBuf::from("output");
+        assert_eq!(
+            super::implicit_extraction_destination(Path::new("Game.nca"), &parent),
+            parent.join("Game.nca.extracted")
+        );
+        for source in ["Bad File.nca", "bad@name.nca", "CON.nca"] {
+            assert_eq!(
+                super::implicit_extraction_destination(Path::new(source), &parent),
+                parent.join("nca-extracted")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implicit_destination_falls_back_for_a_non_utf8_source_name() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let source = PathBuf::from(std::ffi::OsString::from_vec(b"game-\xff.nca".to_vec()));
+        assert_eq!(
+            super::implicit_extraction_destination(&source, Path::new("output")),
+            PathBuf::from("output/nca-extracted")
+        );
+    }
+}
 
 #[derive(Serialize)]
 struct SuccessDocument<'a, T> {
@@ -537,6 +780,12 @@ fn run_with_control(
     stderr: &mut dyn Write,
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
 ) -> i32 {
+    if args
+        .first()
+        .is_some_and(|argument| argument == OsStr::new("extract"))
+    {
+        return run_extraction(args, engine, standalone, stdout, stderr);
+    }
     if args
         .first()
         .is_some_and(|argument| argument == OsStr::new("jobs"))
@@ -1854,6 +2103,317 @@ struct InspectionInvocation {
     allow_download: bool,
     preflight: bool,
     json: bool,
+}
+
+/// Arguments for one standalone extraction command.
+struct ExtractionInvocation {
+    source: PathBuf,
+    key_file: Option<PathBuf>,
+    output_directory: Option<PathBuf>,
+    selection: ExtractionSelection,
+    json: bool,
+    jsonl: bool,
+}
+
+/// Parses one source, one selection mode, and optional machine output flags.
+fn parse_extraction(args: &[OsString]) -> Result<ExtractionInvocation, ()> {
+    if args
+        .first()
+        .is_none_or(|argument| argument != OsStr::new("extract"))
+    {
+        return Err(());
+    }
+
+    let mut source = None;
+    let mut key_file = None;
+    let mut output_directory = None;
+    let mut all = false;
+    let mut selectors = ExtractionSelectors::new();
+    let mut json = false;
+    let mut jsonl = false;
+    let mut arguments = args.iter().skip(1);
+
+    while let Some(argument) = arguments.next() {
+        if argument == OsStr::new("--source") {
+            if source.is_some() {
+                return Err(());
+            }
+            source = Some(PathBuf::from(arguments.next().ok_or(())?));
+        } else if argument == OsStr::new("--keys") {
+            if key_file.is_some() {
+                return Err(());
+            }
+            key_file = Some(PathBuf::from(arguments.next().ok_or(())?));
+        } else if argument == OsStr::new("--output-directory") {
+            if output_directory.is_some() {
+                return Err(());
+            }
+            output_directory = Some(PathBuf::from(arguments.next().ok_or(())?));
+        } else if argument == OsStr::new("--all") {
+            if all {
+                return Err(());
+            }
+            all = true;
+        } else if argument == OsStr::new("--program-id") {
+            if selectors.program_id().is_some() {
+                return Err(());
+            }
+            let value = arguments
+                .next()
+                .and_then(|value| value.to_str())
+                .ok_or(())?;
+            let parsed = ProgramId::from_hex(value).map_err(|_| ())?;
+            selectors = selectors.with_program_id(parsed);
+        } else if argument == OsStr::new("--nca-type") || argument == OsStr::new("--role") {
+            if selectors.nca_type().is_some() {
+                return Err(());
+            }
+            let value = arguments
+                .next()
+                .and_then(|value| value.to_str())
+                .ok_or(())?;
+            let parsed = match value {
+                "program" => NcaContentType::Program,
+                _ => return Err(()),
+            };
+            selectors = selectors.with_nca_type(parsed);
+        } else if argument == OsStr::new("--partition") {
+            let value = arguments
+                .next()
+                .and_then(|value| value.to_str())
+                .ok_or(())?;
+            let [digit] = value.as_bytes() else {
+                return Err(());
+            };
+            if !(b'0'..=b'3').contains(digit) {
+                return Err(());
+            }
+            selectors = selectors.with_partition(digit - b'0');
+        } else if argument == OsStr::new("--path") {
+            let value = arguments
+                .next()
+                .and_then(|value| value.to_str())
+                .ok_or(())?;
+            selectors = selectors.with_path(value.to_owned());
+        } else if argument == OsStr::new("--json") {
+            if json {
+                return Err(());
+            }
+            json = true;
+        } else if argument == OsStr::new("--jsonl") {
+            if jsonl {
+                return Err(());
+            }
+            jsonl = true;
+        } else {
+            return Err(());
+        }
+    }
+
+    if json && jsonl {
+        return Err(());
+    }
+    let has_selector = selectors.program_id().is_some()
+        || selectors.nca_type().is_some()
+        || !selectors.partitions().is_empty()
+        || !selectors.paths().is_empty();
+    let selection = match (all, has_selector) {
+        (true, false) => ExtractionSelection::all(),
+        (false, true) => ExtractionSelection::selectors(selectors),
+        _ => return Err(()),
+    };
+
+    Ok(ExtractionInvocation {
+        source: source.ok_or(())?,
+        key_file,
+        output_directory,
+        selection,
+        json,
+        jsonl,
+    })
+}
+
+fn implicit_extraction_destination(source: &Path, output_parent: &Path) -> PathBuf {
+    let leaf = source
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(|file_name| {
+            let mut candidate = file_name.to_owned();
+            candidate.push_str(".extracted");
+            nscb::is_portable_bundle_leaf(&candidate).then_some(candidate)
+        })
+        .unwrap_or_else(|| "nca-extracted".to_owned());
+    output_parent.join(leaf)
+}
+
+fn run_extraction(
+    args: &[OsString],
+    engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let invocation = match parse_extraction(args) {
+        Ok(invocation) => invocation,
+        Err(()) => {
+            if machine_output_requested_before_delimiter(args) {
+                return emit_error(stdout, "usage_error", EXIT_USAGE);
+            }
+            return if writeln!(stderr, "{EXTRACTION_USAGE}").is_ok() {
+                EXIT_USAGE
+            } else {
+                EXIT_INTERNAL
+            };
+        }
+    };
+    let machine_requested = invocation.json || invocation.jsonl;
+    let key_file =
+        match resolve_cli_key_file(invocation.key_file, standalone, inspection_home_directory()) {
+            Ok(path) => path,
+            Err(_) => {
+                return emit_extraction_error(
+                    "invalid_key_path",
+                    EXIT_INPUT,
+                    machine_requested,
+                    stdout,
+                    stderr,
+                );
+            }
+        };
+    let destination = match invocation.output_directory {
+        Some(destination) => destination,
+        None => {
+            let output_parent = match standalone {
+                Some(config) => config.extraction_output_parent(),
+                None => StandaloneConfig::default_output_parent(),
+            };
+            match output_parent {
+                Ok(parent) => implicit_extraction_destination(&invocation.source, &parent),
+                Err(error) => {
+                    return emit_extraction_error(
+                        error.code(),
+                        EXIT_INPUT,
+                        machine_requested,
+                        stdout,
+                        stderr,
+                    );
+                }
+            }
+        }
+    };
+    if machine_requested
+        && !paths_are_json_representable([invocation.source.as_path(), destination.as_path()])
+    {
+        return emit_error(stdout, "unrepresentable_path", EXIT_INPUT);
+    }
+
+    let cancellation = match scoped_cancellation() {
+        Ok(cancellation) => cancellation,
+        Err(_) => {
+            return emit_extraction_error(
+                "signal_handler_failed",
+                EXIT_INTERNAL,
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+    let request = ExtractionRequest::new(
+        &invocation.source,
+        &destination,
+        key_file,
+        invocation.selection,
+    );
+    let plan = match engine.plan_extraction(request, cancellation.handle().clone()) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return emit_extraction_error(
+                error.code().as_str(),
+                exit_for_operation_failure(error.code()),
+                machine_requested,
+                stdout,
+                stderr,
+            );
+        }
+    };
+
+    let session = OperationSession::new();
+    if invocation.jsonl {
+        let consumer = match session.subscribe_events() {
+            Ok(consumer) => consumer,
+            Err(code) => {
+                return emit_extraction_error(
+                    code.as_str(),
+                    exit_for_operation_failure(code),
+                    true,
+                    stdout,
+                    stderr,
+                );
+            }
+        };
+        let (output_ok, terminal_written, result) = std::thread::scope(|scope| {
+            let execution_session = session.clone();
+            let execution_cancellation = cancellation.handle().clone();
+            let worker = scope.spawn(move || {
+                engine.execute_operation_with_cancellation(
+                    plan,
+                    &execution_session,
+                    execution_cancellation,
+                )
+            });
+            let (output_ok, terminal_written) =
+                stream_extraction_job_events(&consumer, stdout, &worker);
+            (output_ok, terminal_written, worker.join().ok())
+        });
+        drop(cancellation);
+        let Some(result) = result else {
+            return emit_extraction_error(
+                "execution_worker_failed",
+                EXIT_INTERNAL,
+                true,
+                stdout,
+                stderr,
+            );
+        };
+        let mut output_ok = output_ok;
+        if !terminal_written && output_ok {
+            output_ok = write_last_job_completion(&session, stdout, None, None);
+        }
+        if !output_ok {
+            return report_output_failure(stderr);
+        }
+        return exit_for_operation_result(&result);
+    }
+
+    let result =
+        engine.execute_operation_with_cancellation(plan, &session, cancellation.handle().clone());
+    drop(cancellation);
+    let output_ok = if invocation.json {
+        write_last_job_completion(&session, stdout, None, None)
+    } else {
+        write_human_extraction_result(&result, stdout, stderr)
+    };
+    if !output_ok {
+        return report_output_failure(stderr);
+    }
+    exit_for_operation_result(&result)
+}
+
+fn emit_extraction_error(
+    code: &'static str,
+    exit_code: i32,
+    machine_requested: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    if machine_requested {
+        emit_error(stdout, code, exit_code)
+    } else if writeln!(stderr, "Extraction failed: {code}.").is_ok() {
+        exit_code
+    } else {
+        EXIT_INTERNAL
+    }
 }
 
 fn parse_inspection(args: &[OsString]) -> Result<InspectionInvocation, ()> {
@@ -4845,6 +5405,80 @@ fn write_last_job_completion(
         },
         stdout,
     )
+}
+
+fn stream_extraction_job_events(
+    consumer: &OperationEventConsumer,
+    stdout: &mut dyn Write,
+    worker: &std::thread::ScopedJoinHandle<'_, OperationResult>,
+) -> (bool, bool) {
+    let mut output_ok = true;
+    let mut terminal_written = false;
+    loop {
+        let event = match consumer.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if !worker.is_finished() {
+                    continue;
+                }
+                match consumer.try_recv() {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        let wrote = match event.event() {
+            OperationEventKind::Completed { result } => {
+                terminal_written = true;
+                write_json(
+                    &JobResultDocument {
+                        schema_version: 1,
+                        kind: "job.result",
+                        nscb_version: env!("CARGO_PKG_VERSION"),
+                        job_id: None,
+                        history_error: None,
+                        sequence: event.sequence(),
+                        snapshot: event.snapshot(),
+                        result,
+                    },
+                    stdout,
+                )
+            }
+            _ => write_json(
+                &JobEventDocument {
+                    schema_version: 1,
+                    kind: "job.event",
+                    nscb_version: env!("CARGO_PKG_VERSION"),
+                    sequence: event.sequence(),
+                    snapshot: event.snapshot(),
+                    event: event.event(),
+                },
+                stdout,
+            ),
+        };
+        output_ok &= wrote && stdout.flush().is_ok();
+    }
+    (output_ok, terminal_written)
+}
+
+fn write_human_extraction_result(
+    result: &OperationResult,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> bool {
+    match result.state() {
+        JobState::Succeeded => writeln!(stdout, "Extraction completed.").is_ok(),
+        JobState::Cancelled => writeln!(stderr, "Extraction cancelled.").is_ok(),
+        JobState::Failed => {
+            let code = result
+                .failure()
+                .map(|failure| failure.code().as_str())
+                .unwrap_or("operation_failed");
+            writeln!(stderr, "Extraction failed: {code}.").is_ok()
+        }
+        _ => writeln!(stderr, "Extraction did not complete.").is_ok(),
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

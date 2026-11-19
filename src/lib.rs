@@ -18,6 +18,7 @@ mod allocation;
 mod control_nca_qualification;
 mod engine;
 mod error;
+mod extraction;
 mod file_identity;
 mod input_resolution;
 mod inspection;
@@ -85,6 +86,11 @@ pub use engine::{
     ContainerFormat, ContainerProbeEntry, ContainerProbeRequest, ContainerProbeResult, Engine,
 };
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
+pub use extraction::{
+    ExtractionCompleteness, ExtractionManifest, ExtractionManifestFile,
+    ExtractionManifestPartition, ExtractionManifestSource, ExtractionRequest, ExtractionSelection,
+    ExtractionSelectionMode, ExtractionSelectors, is_portable_bundle_leaf,
+};
 pub use nsp_semantic_qualification::{
     NspSemanticQualificationError, NspSemanticQualificationErrorCode,
     NspSemanticQualificationFacts, NspSemanticQualificationMember, NspSemanticQualificationOutcome,
@@ -123,7 +129,7 @@ pub use inspection::{
     InspectionErrorCode, InspectionExitClass, InspectionHost, InspectionPreflightStatus,
     InspectionRequest, InspectionResult, MemoryMonitoringPolicy, MemoryMonitoringStatus,
     NcaContentType, NcaDistribution, NcaEncryptionType, NcaFilesystem, NcaHashType, NcaInspection,
-    NcaPartition, ProgramId,
+    NcaPartition, ProgramId, ProgramIdParseError,
 };
 pub use sha256::{InvalidSha256Digest, SHA256_HEX_LENGTH, Sha256Digest};
 pub use split_trust::{
