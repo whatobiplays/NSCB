@@ -135,8 +135,9 @@ dimensions are combined with AND. Every supplied value must match the final
 selection. The bundle contains `manifest.json` and `content/`. See
 [standalone Program extraction](docs/architecture/extraction.md) for the
 manifest schema, path rules, output naming, validation boundary, cancellation,
-and recovery behavior. Engine execution integration and production
-qualification remain in progress.
+and recovery behavior. The Engine and CLI passed extraction tests on native
+macOS arm64 with writable local APFS and rights-free synthetic keyed fixtures.
+Other operating systems and filesystem types remain unqualified.
 
 ## Content verification
 

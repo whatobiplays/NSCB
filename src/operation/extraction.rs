@@ -11,6 +11,8 @@ use std::fs::File;
 #[cfg(target_os = "macos")]
 use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "macos")]
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "macos")]
 use std::path::PathBuf;
 
 #[cfg(target_os = "macos")]
@@ -740,12 +742,6 @@ pub(super) fn execute_unix(
         &manifest_bytes,
         session,
     )?;
-    validate_bundle_tree(
-        &bundle_directory,
-        extraction,
-        &manifest_bytes,
-        Some(session),
-    )?;
     let bundle_manifest_sha256 = super::directory_manifest(&bundle_path, &bundle_directory)?;
     sync_for_extraction(
         &bundle_directory,
@@ -779,6 +775,30 @@ pub(super) fn execute_unix(
     verify_source_for_promotion(plan, &source_directory, source_file, session, checkpoint)?;
     super::verify_conversion_key_identity(plan)?;
     ensure_destination_absent(&destination_directory, &plan.destination.name)?;
+    validate_bundle_tree(
+        &bundle_directory,
+        extraction,
+        &manifest_bytes,
+        Some(session),
+    )?;
+    super::verify_directory_identity(&workspace_directory, workspace_identity)?;
+    super::verify_directory_identity(&destination_directory, destination_parent_identity)?;
+    let named_bundle = super::open_directory_at(&stage_directory, bundle_name)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if handle_identity(&named_bundle) != Some(bundle_identity) {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    super::validate_destination_lock(
+        &destination_lock,
+        &destination_directory,
+        plan,
+        destination_parent_identity,
+    )?;
+    super::validate_plan_routes(
+        plan,
+        Some(workspace_identity),
+        Some(destination_parent_identity),
+    )?;
     if !session
         .begin_promotion()
         .map_err(|_| OperationFailureCode::SessionUnavailable)?
@@ -1368,9 +1388,9 @@ fn validate_bundle_tree(
                 .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
             actual_files.push(relative.clone());
             if relative == "manifest.json" {
-                let mut manifest_file = super::open_file_at(&directory, name)
-                    .map_err(|_| OperationFailureCode::ValidationFailed)?;
-                validate_manifest_file(&mut manifest_file, &extraction.manifest, manifest_bytes)
+                validate_regular_file_at(&directory, name, |manifest_file| {
+                    validate_manifest_file(manifest_file, &extraction.manifest, manifest_bytes)
+                })
             } else {
                 let payload_path = relative
                     .strip_prefix("content/")
@@ -1385,9 +1405,9 @@ fn validate_bundle_tree(
                     })
                     .map_err(|_| OperationFailureCode::ValidationFailed)?;
                 let expected = &extraction.selected_files[selected_index];
-                let mut file = super::open_file_at(&directory, name)
-                    .map_err(|_| OperationFailureCode::ValidationFailed)?;
-                validate_payload_file(&mut file, expected, session)
+                validate_regular_file_at(&directory, name, |file| {
+                    validate_payload_file(file, expected, session)
+                })
             }
         })?;
     }
@@ -1398,6 +1418,41 @@ fn validate_bundle_tree(
         return Err(OperationFailureCode::ValidationFailed);
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn validate_regular_file_at(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    validate_contents: impl FnOnce(&mut File) -> Result<(), OperationFailureCode>,
+) -> Result<(), OperationFailureCode> {
+    let mut file =
+        super::open_file_at(parent, name).map_err(|_| OperationFailureCode::ValidationFailed)?;
+    let expected_identity = single_link_file_identity(&file)?;
+    validate_contents(&mut file)?;
+    if single_link_file_identity(&file)? != expected_identity {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+
+    let named_again =
+        super::open_file_at(parent, name).map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if single_link_file_identity(&named_again)? != expected_identity {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn single_link_file_identity(file: &File) -> Result<(u64, u64), OperationFailureCode> {
+    let metadata = file
+        .metadata()
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    let identity = crate::file_identity::file_identity(&metadata)
+        .ok_or(OperationFailureCode::ValidationFailed)?;
+    Ok((identity.device(), identity.inode()))
 }
 
 #[cfg(target_os = "macos")]

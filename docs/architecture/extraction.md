@@ -5,8 +5,8 @@ Program with an encrypted NCA3 header and clear, unhashed PartitionFs
 partitions. It does not establish title authenticity, signature validity,
 payload integrity, or device eligibility.
 
-Production extraction has been implemented, but runtime qualification is
-still pending.
+The Engine and CLI passed runtime tests on native macOS arm64 with writable
+local APFS and rights-free synthetic keyed fixtures.
 
 ## Request and command line
 
@@ -122,8 +122,10 @@ safe selective extraction. They still pass native structural checks, and an
 unselected name that aliases or makes a selected path ambiguous is an error.
 A full-tree extraction validates the portable rule for every published name.
 
-The bundle contains regular files and directories. It does not materialize
-symlinks, hard links, or special objects. Destination and staging paths are
+The bundle contains regular files and directories. Staged and published
+validation opens payloads and the manifest without following symlinks, requires
+exactly one hard link per regular file, and reopens each directory entry to
+confirm that it still names the checked file. Destination and staging paths are
 revalidated before publication; a path that changes identity or type fails
 closed.
 
@@ -233,11 +235,11 @@ result contract.
 ## Support and qualification
 
 The approved runtime target is native macOS arm64 on writable local APFS with
-rights-free synthetic keyed fixtures. Qualification must record the candidate
-SHA, tested SHA, OS, Rust toolchain, filesystem, commands, results, and
-limitations. Production extraction evidence has not yet been recorded. Other
-operating systems and filesystem types remain unqualified until separately
-tested.
+rights-free synthetic keyed fixtures. The qualification run passed 15
+extraction backend tests, 10 Engine integration tests, and 7 CLI tests with
+Rust 1.98.1. These results cover the exercised extraction path on this host and
+filesystem. Other operating systems and filesystem types remain unqualified
+until separately tested.
 
 Slice A does not claim Nintendo authenticity, Full Verification, installation
 eligibility, encrypted partition support, RomFs support, additional NCA

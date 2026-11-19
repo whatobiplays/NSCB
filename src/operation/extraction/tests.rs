@@ -12,6 +12,8 @@ use super::super::{OperationKind, OperationOutcome};
 use super::{ExtractionIoFailurePoint, InjectedExtractionIoFailure};
 use crate::extraction::ExtractionRequest;
 use crate::{CancellationHandle, Engine};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -46,6 +48,182 @@ fn extraction_plan(
             cancellation,
         )
         .expect("plan synthetic extraction")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn assert_extraction_hard_link_is_rejected(
+    relative_path: Option<&str>,
+    inject_at: ExecutionCheckpoint,
+    substitute_staged_name: bool,
+    expected_failure: OperationFailureCode,
+    published: bool,
+) {
+    let (root, source, key_file, destination) = extraction_fixture();
+    let cancellation = CancellationHandle::new();
+    let plan = extraction_plan(&source, &key_file, &destination, cancellation.clone());
+    let relative_path = relative_path.map_or_else(
+        || {
+            let selected = plan
+                .extraction
+                .as_ref()
+                .and_then(|extraction| extraction.selected_files.first())
+                .expect("synthetic Program NCA has a selected payload file");
+            format!("content/{}", selected.relative_path)
+        },
+        str::to_owned,
+    );
+    let staging_path = plan.workspace.path.join(
+        plan.stage_directory_name
+            .as_deref()
+            .expect("extraction plans have a staging directory"),
+    );
+    let staged_file = staging_path.join("bundle").join(&relative_path);
+    let external_link = root.path().join("external-linked-file");
+    let planned_manifest_bytes = plan
+        .extraction
+        .as_ref()
+        .expect("extraction plan has private extraction evidence")
+        .manifest
+        .to_json_bytes()
+        .expect("serialize the planned manifest");
+    let session = OperationSession::new();
+    let mut linked_evidence = None;
+
+    let result = execute_with_producer_and_checkpoint_and_cancellation(
+        plan,
+        &session,
+        |_, _, _| Ok::<(), OperationFailureCode>(()),
+        |checkpoint| {
+            if checkpoint == inject_at && linked_evidence.is_none() {
+                let staged_metadata =
+                    std::fs::metadata(&staged_file).expect("inspect staged inode before linking");
+                let original_identity = (staged_metadata.dev(), staged_metadata.ino());
+                let expected_bytes = if relative_path == "manifest.json" {
+                    planned_manifest_bytes.clone()
+                } else {
+                    std::fs::read(&staged_file).expect("read staged payload bytes before linking")
+                };
+                assert_eq!(
+                    std::fs::read(&staged_file).expect("read staged bytes before linking"),
+                    expected_bytes
+                );
+                if substitute_staged_name {
+                    std::fs::write(&external_link, &expected_bytes)
+                        .expect("seed external inode with planned manifest bytes");
+                    let seeded_metadata = std::fs::metadata(&external_link)
+                        .expect("inspect seeded external manifest inode");
+                    assert_ne!(
+                        (seeded_metadata.dev(), seeded_metadata.ino()),
+                        original_identity,
+                        "manifest substitution must use a distinct external inode"
+                    );
+                    std::fs::remove_file(&staged_file)
+                        .expect("remove staged name for hard-link substitution");
+                    std::fs::hard_link(&external_link, &staged_file)
+                        .expect("restore staged name from external hard link");
+                } else {
+                    std::fs::hard_link(&staged_file, &external_link)
+                        .expect("create external hard link to staged payload");
+                }
+                let metadata = std::fs::metadata(&external_link)
+                    .expect("inspect external hard link after injection");
+                assert_eq!(metadata.nlink(), 2, "injection creates a second hard link");
+                linked_evidence = Some((
+                    expected_bytes,
+                    (metadata.dev(), metadata.ino()),
+                    original_identity,
+                ));
+            }
+        },
+        &cancellation,
+    );
+
+    let (expected_bytes, linked_identity, original_identity) =
+        linked_evidence.expect("hard link was injected at the requested checkpoint");
+    assert_ne!(result.state(), super::super::JobState::Succeeded);
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(expected_failure)
+    );
+    assert_eq!(
+        result.milestones().contains(&OperationMilestone::Published),
+        published
+    );
+    assert_eq!(destination.exists(), published);
+
+    let external_metadata =
+        std::fs::metadata(&external_link).expect("cleanup must preserve the external hard link");
+    assert_eq!(
+        (external_metadata.dev(), external_metadata.ino()),
+        linked_identity
+    );
+    assert_eq!(
+        linked_identity == original_identity,
+        !substitute_staged_name,
+        "payload links retain their original inode and manifest substitution uses a distinct inode"
+    );
+    assert_eq!(
+        std::fs::read(&external_link).expect("read external hard link after execution"),
+        expected_bytes,
+        "cleanup must preserve externally linked bytes"
+    );
+    if published {
+        let published_file = destination.join(&relative_path);
+        let published_metadata =
+            std::fs::metadata(&published_file).expect("published hard-linked file remains");
+        assert_eq!(
+            (published_metadata.dev(), published_metadata.ino()),
+            linked_identity
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn staged_payload_hard_link_at_final_validation_is_rejected_and_preserved() {
+    assert_extraction_hard_link_is_rejected(
+        None,
+        ExecutionCheckpoint::BeforeAtomicPromotion,
+        false,
+        OperationFailureCode::ValidationFailed,
+        false,
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn staged_manifest_hard_link_substitution_is_rejected_and_preserved() {
+    assert_extraction_hard_link_is_rejected(
+        Some("manifest.json"),
+        ExecutionCheckpoint::BeforeAtomicPromotion,
+        true,
+        OperationFailureCode::ValidationFailed,
+        false,
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn payload_hard_link_added_at_promotion_is_reported_uncertain_and_retained() {
+    assert_extraction_hard_link_is_rejected(
+        None,
+        ExecutionCheckpoint::AtomicPromotionStarted,
+        false,
+        OperationFailureCode::PublicationUncertain,
+        true,
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn manifest_hard_link_substitution_at_promotion_is_reported_uncertain_and_retained() {
+    assert_extraction_hard_link_is_rejected(
+        Some("manifest.json"),
+        ExecutionCheckpoint::AtomicPromotionStarted,
+        true,
+        OperationFailureCode::PublicationUncertain,
+        true,
+    );
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
