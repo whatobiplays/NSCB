@@ -2,8 +2,9 @@ use super::{
     Checkpoint, ControlNcaQualificationError, ControlNcaQualificationErrorCode as ErrorCode,
     ControlNcaQualificationOutcome as Outcome, ControlNcaQualificationReason as Reason,
     ControlNcaQualificationRequest, IVFC_BLOCK_SIZE, MAX_INPUT_BYTES, MAX_IVFC_HASH_OPERATIONS,
-    check_input_size, hash_operation_count, is_supported_table_size, qualify, qualify_bounded_path,
-    qualify_bounded_path_with_cancellation_probe, qualify_inner, qualify_with_checkpoint,
+    check_input_size, derive_control_extraction_key, hash_operation_count, is_supported_table_size,
+    qualify, qualify_bounded_path, qualify_bounded_path_with_cancellation_probe,
+    qualify_for_extraction_opened, qualify_inner, qualify_with_checkpoint,
 };
 use crate::allocation::AllocationSite;
 use crate::control_nca_qualification::synthetic_fixture::{
@@ -11,9 +12,14 @@ use crate::control_nca_qualification::synthetic_fixture::{
     media_aligned_partial_empty_romfs, oversized_metadata_romfs, romfs_with_file,
     too_many_directories_romfs, write_u32, write_u64,
 };
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use crate::control_nca_qualification::synthetic_fixture::{
+    romfs_with_case_alias_files, romfs_with_nonportable_second_file, romfs_with_two_files,
+    romfs_with_zero_length_file,
+};
 use crate::file_identity::{file_snapshot, path_identity};
 use std::fs::{self, FileTimes, OpenOptions};
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
@@ -618,7 +624,10 @@ fn record_count_scanning_observes_cancellation() {
     cancellation.cancel();
     let request = ControlNcaQualificationRequest::new("unused.nca", "unused.keys")
         .with_cancellation(cancellation);
-    let error = super::scan_record_count(&[0; 0x18], 0x18, 20, true, &request)
+    let control = super::QualificationControl {
+        cancellation: request.cancellation.as_ref(),
+    };
+    let error = super::scan_record_count(&[0; 0x18], 0x18, 20, true, &control)
         .expect_err("record scanning checks cancellation before reading records");
     assert_eq!(error.code(), ErrorCode::Cancelled);
 }
@@ -672,6 +681,65 @@ fn qualification_leaves_source_and_key_files_unchanged() {
     assert_eq!(fs::read(key_file.path()).expect("read key file"), key_bytes);
     assert_eq!(input.snapshot(), input_snapshot);
     assert_eq!(key_file.snapshot(), key_snapshot);
+}
+
+#[test]
+fn execution_key_derivation_rejects_stale_source_evidence() {
+    let fixture = build(&romfs_with_file(), Mutation::None);
+    let mut key_reader = Cursor::new(key_file_bytes());
+    let key_size = key_reader.get_ref().len() as u64;
+    let keys = crate::key_file::read_nsp_qualification_keys(&mut key_reader, key_size)
+        .expect("parse synthetic extraction keys");
+    let input_size = fixture.bytes.len() as u64;
+    let cancellation = crate::CancellationHandle::new();
+    let mut source = Cursor::new(fixture.bytes.as_slice());
+    let inventory = qualify_for_extraction_opened(&mut source, input_size, &keys, &cancellation)
+        .expect("qualify synthetic extraction source")
+        .expect("synthetic source matches the Control profile");
+
+    let section_key = derive_control_extraction_key(
+        &mut Cursor::new(fixture.bytes.as_slice()),
+        input_size,
+        &keys,
+        &inventory.metadata,
+    )
+    .expect("derive the section key from the qualified evidence");
+    assert_eq!(
+        section_key.as_ref(),
+        &crate::control_nca_qualification::synthetic_fixture::SECTION_KEY
+    );
+
+    let mut stale_metadata = inventory.metadata;
+    stale_metadata.program_id ^= 1;
+    let error = derive_control_extraction_key(
+        &mut Cursor::new(fixture.bytes.as_slice()),
+        input_size,
+        &keys,
+        &stale_metadata,
+    )
+    .expect_err("a mismatched program identity is stale evidence");
+    assert_eq!(error.code(), ErrorCode::InputChangedDuringQualification);
+
+    let mut stale_metadata = inventory.metadata;
+    stale_metadata.section_ctr[0] ^= 1;
+    let error = derive_control_extraction_key(
+        &mut Cursor::new(fixture.bytes.as_slice()),
+        input_size,
+        &keys,
+        &stale_metadata,
+    )
+    .expect_err("a mismatched section counter is stale evidence");
+    assert_eq!(error.code(), ErrorCode::InputChangedDuringQualification);
+
+    let changed_source = build(&romfs_with_file(), Mutation::WrongNcaMagic);
+    let error = derive_control_extraction_key(
+        &mut Cursor::new(changed_source.bytes.as_slice()),
+        changed_source.bytes.len() as u64,
+        &keys,
+        &inventory.metadata,
+    )
+    .expect_err("a changed NCA header is stale evidence");
+    assert_eq!(error.code(), ErrorCode::InputChangedDuringQualification);
 }
 
 #[test]
@@ -806,5 +874,527 @@ fn bounded_allocation_refusals_remain_typed() {
         );
         assert_eq!(input.snapshot(), input_snapshot);
         assert_eq!(key_file.snapshot(), key_snapshot);
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn setup_engine_extraction(
+    romfs: &[u8],
+) -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let fixture = build(romfs, Mutation::None);
+    let root = tempfile::tempdir().expect("create extraction root");
+    let source = root.path().join("control.nca");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("bundle");
+    fs::write(&source, fixture.bytes).expect("write synthetic Control NCA");
+    fs::write(&key_file, key_file_bytes()).expect("write synthetic keys");
+    (root, source, key_file, destination)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn extraction_inventory_allocation_refusals_are_typed_and_preserve_inputs() {
+    for site in [
+        AllocationSite::ControlRomfsExtractionDirectoryPaths,
+        AllocationSite::ControlRomfsExtractionTraversal,
+        AllocationSite::ControlRomfsExtractionTraversalPathBytes,
+        AllocationSite::ControlRomfsExtractionDirectoryPathBytes,
+        AllocationSite::ControlRomfsExtractionFiles,
+        AllocationSite::ControlRomfsExtractionFilePathBytes,
+    ] {
+        let (_root, source, key_file, destination) = setup_engine_extraction(&romfs_with_file());
+        let source_bytes = fs::read(&source).expect("read synthetic source");
+        let key_bytes = fs::read(&key_file).expect("read synthetic key file");
+        let (result, observation) = crate::test_allocator::with_refusal(site, 1, || {
+            crate::Engine::new().plan_extraction(
+                crate::ExtractionRequest::new(
+                    &source,
+                    &destination,
+                    &key_file,
+                    crate::ExtractionSelection::all(),
+                ),
+                crate::CancellationHandle::new(),
+            )
+        });
+
+        assert!(
+            observation.is_exact_refusal(site, 1),
+            "{site:?}: {observation:?}"
+        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("{site:?} refusal unexpectedly produced an extraction plan"),
+        };
+        assert_eq!(
+            error.code(),
+            crate::OperationFailureCode::ResourceLimitExceeded,
+            "{site:?}"
+        );
+        assert!(!destination.exists(), "{site:?} created a destination");
+        assert_eq!(
+            fs::read(&source).expect("read source after refusal"),
+            source_bytes
+        );
+        assert_eq!(
+            fs::read(&key_file).expect("read keys after refusal"),
+            key_bytes
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn execute_engine_extraction(
+    romfs: &[u8],
+    selection: crate::ExtractionSelection,
+) -> (tempfile::TempDir, std::path::PathBuf, Vec<u8>) {
+    let (root, source, key_file, destination) = setup_engine_extraction(romfs);
+
+    let engine = crate::Engine::new();
+    let plan = engine
+        .plan_extraction(
+            crate::ExtractionRequest::new(&source, &destination, &key_file, selection),
+            crate::CancellationHandle::new(),
+        )
+        .expect("plan synthetic Control extraction");
+    let result = engine.execute_operation(plan, &crate::OperationSession::new());
+    assert_eq!(result.state(), crate::JobState::Succeeded);
+    let manifest = fs::read(destination.join("manifest.json")).expect("read published manifest");
+    (root, destination, manifest)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn engine_extracts_control_romfs_bytes_with_a_complete_manifest() {
+    let (_root, destination, manifest_bytes) =
+        execute_engine_extraction(&romfs_with_file(), crate::ExtractionSelection::all());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest is JSON");
+
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(
+        manifest["required_features"],
+        serde_json::json!(["nca3_control_romfs_ivfc_sha256_aes_ctr"])
+    );
+    assert_eq!(
+        manifest["source"]["profile"],
+        "nca3_control_romfs_ivfc_sha256_aes_ctr"
+    );
+    assert_eq!(manifest["source"]["role"], "control");
+    assert_eq!(manifest["source"]["nca_type"], "control");
+    assert_eq!(manifest["source"]["program_id"], "0100000000001000");
+    assert_eq!(manifest["source"]["content_index"], 0);
+    assert_eq!(manifest["partitions"][0]["filesystem"], "romfs");
+    assert_eq!(
+        manifest["partitions"][0]["directories"],
+        serde_json::json!(["0", "0/assets", "0/info"])
+    );
+    assert_eq!(
+        manifest["partitions"][0]["files"],
+        serde_json::json!([{"path": "0/assets/data"}])
+    );
+    assert_eq!(
+        fs::read(destination.join("content/0/assets/data")).expect("read extracted file"),
+        b"data"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn engine_extracts_all_control_file_spans_with_a_complete_manifest() {
+    let (_root, destination, manifest_bytes) =
+        execute_engine_extraction(&romfs_with_two_files(), crate::ExtractionSelection::all());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest is JSON");
+
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(
+        manifest["partitions"][0]["files"],
+        serde_json::json!([{"path": "0/assets/data"}, {"path": "0/info/note"}])
+    );
+    assert_eq!(
+        fs::read(destination.join("content/0/assets/data")).expect("read first extracted file"),
+        b"data"
+    );
+    assert_eq!(
+        fs::read(destination.join("content/0/info/note")).expect("read second extracted file"),
+        b"note!"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn engine_extracts_an_empty_control_romfs_with_its_partition_root() {
+    let (_root, destination, manifest_bytes) =
+        execute_engine_extraction(&empty_romfs(), crate::ExtractionSelection::all());
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest is JSON");
+
+    assert_eq!(manifest["selection_mode"], "all");
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(
+        manifest["partitions"][0]["directories"],
+        serde_json::json!(["0"])
+    );
+    assert_eq!(manifest["partitions"][0]["files"], serde_json::json!([]));
+    assert!(destination.join("content/0").is_dir());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn engine_extracts_control_selectors_as_an_incomplete_byte_exact_subset() {
+    let selection = crate::ExtractionSelection::selectors(
+        crate::ExtractionSelectors::new()
+            .with_nca_type(crate::NcaContentType::Control)
+            .with_path("assets/data"),
+    );
+    let (_root, destination, manifest_bytes) =
+        execute_engine_extraction(&romfs_with_two_files(), selection);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest is JSON");
+
+    assert_eq!(manifest["selection_mode"], "selectors");
+    assert_eq!(manifest["completeness"], "incomplete");
+    assert_eq!(
+        manifest["partitions"][0]["directories"],
+        serde_json::json!(["0", "0/assets"])
+    );
+    assert_eq!(
+        manifest["partitions"][0]["files"],
+        serde_json::json!([{"path": "0/assets/data"}])
+    );
+    assert_eq!(
+        fs::read(destination.join("content/0/assets/data")).expect("read selected file"),
+        b"data"
+    );
+    assert!(!destination.join("content/0/info/note").exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_manifests_are_deterministic_for_complete_and_incomplete_selections() {
+    let complete = crate::ExtractionSelection::all();
+    let incomplete = crate::ExtractionSelection::selectors(
+        crate::ExtractionSelectors::new().with_path("assets/data"),
+    );
+    let first_complete = execute_engine_extraction(&romfs_with_two_files(), complete.clone()).2;
+    let second_complete = execute_engine_extraction(&romfs_with_two_files(), complete).2;
+    let first_incomplete = execute_engine_extraction(&romfs_with_two_files(), incomplete.clone()).2;
+    let second_incomplete = execute_engine_extraction(&romfs_with_two_files(), incomplete).2;
+
+    assert_eq!(first_complete, second_complete);
+    assert_eq!(first_incomplete, second_incomplete);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&first_complete).unwrap()["completeness"],
+        "complete"
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&first_incomplete).unwrap()["completeness"],
+        "incomplete"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_extraction_rejects_a_corrupt_ivfc_tree_before_planning() {
+    let fixture = build(&romfs_with_file(), Mutation::CorruptMasterHash);
+    let root = tempfile::tempdir().expect("create extraction root");
+    let source = root.path().join("control.nca");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("bundle");
+    fs::write(&source, fixture.bytes).expect("write synthetic Control NCA");
+    fs::write(&key_file, key_file_bytes()).expect("write synthetic keys");
+
+    let error = crate::Engine::new()
+        .plan_extraction(
+            crate::ExtractionRequest::new(
+                &source,
+                &destination,
+                &key_file,
+                crate::ExtractionSelection::all(),
+            ),
+            crate::CancellationHandle::new(),
+        )
+        .err()
+        .expect("a corrupt IVFC tree must fail planning");
+
+    assert_eq!(error.code(), crate::OperationFailureCode::ValidationFailed);
+    assert!(!destination.exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn engine_extracts_zero_length_control_files() {
+    let (_root, destination, manifest_bytes) = execute_engine_extraction(
+        &romfs_with_zero_length_file(),
+        crate::ExtractionSelection::all(),
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest is JSON");
+
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(
+        fs::read(destination.join("content/0/assets/data")).expect("read empty file"),
+        b""
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_selectors_reject_misses_and_case_mismatches() {
+    for path in ["missing", "Assets/data"] {
+        let (_root, source, key_file, destination) =
+            setup_engine_extraction(&romfs_with_two_files());
+        let selection = crate::ExtractionSelection::selectors(
+            crate::ExtractionSelectors::new().with_path(path),
+        );
+        let error = crate::Engine::new()
+            .plan_extraction(
+                crate::ExtractionRequest::new(&source, &destination, &key_file, selection),
+                crate::CancellationHandle::new(),
+            )
+            .err()
+            .expect("unmatched Control path must fail planning");
+        assert_eq!(error.code(), crate::OperationFailureCode::EmptySelection);
+        assert!(!destination.exists());
+    }
+
+    let (_root, source, key_file, destination) = setup_engine_extraction(&romfs_with_two_files());
+    let selection = crate::ExtractionSelection::selectors(
+        crate::ExtractionSelectors::new()
+            .with_nca_type(crate::NcaContentType::Program)
+            .with_path("assets/data"),
+    );
+    let error = crate::Engine::new()
+        .plan_extraction(
+            crate::ExtractionRequest::new(&source, &destination, &key_file, selection),
+            crate::CancellationHandle::new(),
+        )
+        .err()
+        .expect("Program type selector must not match a Control NCA");
+    assert_eq!(error.code(), crate::OperationFailureCode::EmptySelection);
+    assert!(!destination.exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_selector_rejects_a_case_alias_in_an_unselected_source_path() {
+    let (_root, source, key_file, destination) =
+        setup_engine_extraction(&romfs_with_case_alias_files());
+    let selection = crate::ExtractionSelection::selectors(
+        crate::ExtractionSelectors::new().with_path("assets/data"),
+    );
+    let error = crate::Engine::new()
+        .plan_extraction(
+            crate::ExtractionRequest::new(&source, &destination, &key_file, selection),
+            crate::CancellationHandle::new(),
+        )
+        .err()
+        .expect("case-alias path must be rejected");
+    assert_eq!(error.code(), crate::OperationFailureCode::UnsafePath);
+    assert!(!destination.exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_selection_preserves_a_nonportable_unselected_source_name() {
+    let selection = crate::ExtractionSelection::selectors(
+        crate::ExtractionSelectors::new().with_path("assets/data"),
+    );
+    let (_root, destination, manifest_bytes) =
+        execute_engine_extraction(&romfs_with_nonportable_second_file(), selection);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&manifest_bytes).expect("manifest is JSON");
+    assert_eq!(manifest["completeness"], "incomplete");
+    assert_eq!(
+        fs::read(destination.join("content/0/assets/data")).expect("read selected file"),
+        b"data"
+    );
+    assert!(!destination.join("content/0/info/CON").exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_all_rejects_a_nonportable_selected_source_name() {
+    let (_root, source, key_file, destination) =
+        setup_engine_extraction(&romfs_with_nonportable_second_file());
+    let error = crate::Engine::new()
+        .plan_extraction(
+            crate::ExtractionRequest::new(
+                &source,
+                &destination,
+                &key_file,
+                crate::ExtractionSelection::all(),
+            ),
+            crate::CancellationHandle::new(),
+        )
+        .err()
+        .expect("All selects the nonportable source path");
+    assert_eq!(error.code(), crate::OperationFailureCode::UnsafePath);
+    assert!(!destination.exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_execution_rejects_source_and_key_changes_after_planning() {
+    for mutate_key in [false, true] {
+        let (_root, source, key_file, destination) =
+            setup_engine_extraction(&romfs_with_two_files());
+        let engine = crate::Engine::new();
+        let cancellation = crate::CancellationHandle::new();
+        let plan = engine
+            .plan_extraction(
+                crate::ExtractionRequest::new(
+                    &source,
+                    &destination,
+                    &key_file,
+                    crate::ExtractionSelection::all(),
+                ),
+                cancellation.clone(),
+            )
+            .expect("plan before replacing an input");
+
+        if mutate_key {
+            let mut replacement = fs::read(&key_file).expect("read key fixture");
+            let key_offset = replacement.iter().position(|byte| *byte == b'=').unwrap() + 2;
+            replacement[key_offset] ^= 1;
+            fs::write(&key_file, &replacement).expect("replace key file");
+        } else {
+            let mut replacement = fs::read(&source).expect("read source fixture");
+            replacement[0] ^= 1;
+            fs::write(&source, &replacement).expect("replace source file");
+        }
+
+        let result = engine.execute_operation_with_cancellation(
+            plan,
+            &crate::OperationSession::new(),
+            cancellation,
+        );
+        assert_eq!(result.state(), crate::JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(if mutate_key {
+                crate::OperationFailureCode::KeyFileChanged
+            } else {
+                crate::OperationFailureCode::SourceChanged
+            })
+        );
+        assert!(!destination.exists());
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_execution_rejects_source_and_key_replacements_after_planning() {
+    for replace_key in [false, true] {
+        let (root, source, key_file, destination) =
+            setup_engine_extraction(&romfs_with_two_files());
+        let engine = crate::Engine::new();
+        let cancellation = crate::CancellationHandle::new();
+        let plan = engine
+            .plan_extraction(
+                crate::ExtractionRequest::new(
+                    &source,
+                    &destination,
+                    &key_file,
+                    crate::ExtractionSelection::all(),
+                ),
+                cancellation.clone(),
+            )
+            .expect("plan before replacing an input");
+        let path = if replace_key { &key_file } else { &source };
+        let original = fs::read(path).expect("read original input");
+        let retained = root.path().join("retained-original");
+        fs::rename(path, &retained).expect("retain original input");
+        fs::write(path, original).expect("replace input at its original path");
+
+        let result = engine.execute_operation_with_cancellation(
+            plan,
+            &crate::OperationSession::new(),
+            cancellation,
+        );
+        assert_eq!(result.state(), crate::JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(if replace_key {
+                crate::OperationFailureCode::KeyFileChanged
+            } else {
+                crate::OperationFailureCode::SourceChanged
+            })
+        );
+        assert!(!destination.exists());
+        assert!(retained.exists());
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn control_execution_honors_cancellation_and_destination_conflicts() {
+    {
+        let (_root, source, key_file, destination) =
+            setup_engine_extraction(&romfs_with_two_files());
+        let engine = crate::Engine::new();
+        let cancellation = crate::CancellationHandle::new();
+        let plan = engine
+            .plan_extraction(
+                crate::ExtractionRequest::new(
+                    &source,
+                    &destination,
+                    &key_file,
+                    crate::ExtractionSelection::all(),
+                ),
+                cancellation.clone(),
+            )
+            .expect("plan before cancellation");
+        cancellation.cancel();
+
+        let result = engine.execute_operation_with_cancellation(
+            plan,
+            &crate::OperationSession::new(),
+            cancellation,
+        );
+        assert_eq!(result.state(), crate::JobState::Cancelled);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(crate::OperationFailureCode::Cancelled)
+        );
+        assert!(!destination.exists());
+    }
+
+    {
+        let (_root, source, key_file, destination) =
+            setup_engine_extraction(&romfs_with_two_files());
+        let engine = crate::Engine::new();
+        let cancellation = crate::CancellationHandle::new();
+        let plan = engine
+            .plan_extraction(
+                crate::ExtractionRequest::new(
+                    &source,
+                    &destination,
+                    &key_file,
+                    crate::ExtractionSelection::all(),
+                ),
+                cancellation.clone(),
+            )
+            .expect("plan before a destination race");
+        fs::create_dir(&destination).expect("create competing destination");
+        let marker = destination.join("owner.txt");
+        fs::write(&marker, b"keep").expect("write competing destination marker");
+
+        let result = engine.execute_operation_with_cancellation(
+            plan,
+            &crate::OperationSession::new(),
+            cancellation,
+        );
+        assert_eq!(result.state(), crate::JobState::Failed);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(crate::OperationFailureCode::DestinationConflict)
+        );
+        assert_eq!(fs::read(&marker).expect("read competing marker"), b"keep");
     }
 }

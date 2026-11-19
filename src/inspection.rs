@@ -295,6 +295,8 @@ pub enum NcaDistribution {
 pub enum NcaContentType {
     /// Program content.
     Program,
+    /// An NCA with the Control content type.
+    Control,
 }
 
 /// One validated NCA filesystem partition.

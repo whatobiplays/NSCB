@@ -54,7 +54,8 @@ fn extraction_help_lists_the_supported_selector_dimensions() {
     for entry in [
         "Usage: nscb extract",
         "--program-id 16-HEX-DIGITS",
-        "--nca-type program | --role program",
+        "--nca-type program|control",
+        "--role program|control",
         "--partition 0..3",
         "--path RELATIVE_PATH",
         "combine with AND",

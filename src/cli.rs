@@ -37,7 +37,7 @@ const EXIT_INTERNAL: i32 = 7;
 const EXIT_COMPLETED_WITH_ISSUES: i32 = 8;
 const EXTRACTION_USAGE: &str = concat!(
     "Usage: nscb extract --source NCA [--keys FILE] [--output-directory NEW_DIR] (--all | SELECTORS) [--json | --jsonl]\n",
-    "Selectors: [--program-id 16-HEX-DIGITS] [--nca-type program | --role program]\n",
+    "Selectors: [--program-id 16-HEX-DIGITS] [--nca-type program|control | --role program|control]\n",
     "           [--partition 0..3]... [--path RELATIVE_PATH]...\n",
     "Use --all or at least one selector. Different selector dimensions combine with AND; repeated partition and path values combine with OR."
 );
@@ -135,6 +135,24 @@ mod extraction_cli_parser_tests {
             selectors.paths(),
             &[String::from("main.npdm"), String::from("romfs/data.bin")]
         );
+    }
+
+    #[test]
+    fn accepts_control_role_and_nca_type_selectors() {
+        for option in ["--role", "--nca-type"] {
+            let invocation = parse_extraction(&args(&[
+                "extract",
+                "--source",
+                "control.nca",
+                option,
+                "control",
+            ]))
+            .expect("Control selector must be accepted");
+            let ExtractionSelection::Selectors(selectors) = invocation.selection else {
+                panic!("expected typed selectors");
+            };
+            assert_eq!(selectors.nca_type(), Some(NcaContentType::Control));
+        }
     }
 
     #[test]
@@ -2174,6 +2192,7 @@ fn parse_extraction(args: &[OsString]) -> Result<ExtractionInvocation, ()> {
                 .ok_or(())?;
             let parsed = match value {
                 "program" => NcaContentType::Program,
+                "control" => NcaContentType::Control,
                 _ => return Err(()),
             };
             selectors = selectors.with_nca_type(parsed);

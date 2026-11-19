@@ -281,9 +281,83 @@ pub(crate) enum ExtractionValidationError {
 /// dimensions are disjunctive. Every supplied value must match at least one
 /// file in the final selection.
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+struct ExtractionInventoryView<'a> {
+    program_id: u64,
+    content_index: u32,
+    nca_type: NcaContentType,
+    nca_type_name: &'static str,
+    profile: &'static str,
+    role: &'static str,
+    filesystem: &'static str,
+    required_feature: &'static str,
+    partition_indices: Vec<u8>,
+    directories: &'a [String],
+    files: &'a [NativeNcaFileSpan],
+    allow_empty_all: bool,
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 pub(crate) fn resolve_extraction(
     selection: &ExtractionSelection,
     inventory: &NativeNcaInventory,
+) -> Result<ResolvedExtraction, ExtractionValidationError> {
+    let mut partition_indices = Vec::new();
+    partition_indices
+        .try_reserve_exact(inventory.partitions.len())
+        .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
+    partition_indices.extend(inventory.partitions.iter().map(|partition| partition.index));
+    resolve_extraction_from_inventory(
+        selection,
+        ExtractionInventoryView {
+            program_id: inventory.header.program_id,
+            content_index: inventory.header.content_index,
+            nca_type: NcaContentType::Program,
+            nca_type_name: "program",
+            profile: "nca3_program_partition_fs",
+            role: "program",
+            filesystem: "partition_fs",
+            required_feature: "nca3_program_partition_fs",
+            partition_indices,
+            directories: &inventory.directories,
+            files: &inventory.files,
+            allow_empty_all: false,
+        },
+    )
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub(crate) fn resolve_control_extraction(
+    selection: &ExtractionSelection,
+    inventory: &crate::control_nca_qualification::ControlNcaExtractionInventory,
+) -> Result<ResolvedExtraction, ExtractionValidationError> {
+    let mut partition_indices = Vec::new();
+    partition_indices
+        .try_reserve_exact(1)
+        .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
+    partition_indices.push(inventory.metadata.partition_index);
+    resolve_extraction_from_inventory(
+        selection,
+        ExtractionInventoryView {
+            program_id: inventory.metadata.program_id,
+            content_index: inventory.metadata.content_index,
+            nca_type: NcaContentType::Control,
+            nca_type_name: "control",
+            profile: "nca3_control_romfs_ivfc_sha256_aes_ctr",
+            role: "control",
+            filesystem: "romfs",
+            required_feature: "nca3_control_romfs_ivfc_sha256_aes_ctr",
+            partition_indices,
+            directories: &inventory.directories,
+            files: &inventory.files,
+            allow_empty_all: true,
+        },
+    )
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+fn resolve_extraction_from_inventory(
+    selection: &ExtractionSelection,
+    inventory: ExtractionInventoryView<'_>,
 ) -> Result<ResolvedExtraction, ExtractionValidationError> {
     let (selection_mode, selectors) = match selection {
         ExtractionSelection::All => (ExtractionSelectionMode::All, None),
@@ -326,14 +400,14 @@ pub(crate) fn resolve_extraction(
         }
     }
 
-    let source_program_id = ProgramId::from_u64(inventory.header.program_id);
+    let source_program_id = ProgramId::from_u64(inventory.program_id);
     let scalar_selectors_match = selectors.is_none_or(|selectors| {
         selectors
             .program_id()
             .is_none_or(|program_id| program_id == source_program_id)
             && selectors
                 .nca_type()
-                .is_none_or(|nca_type| nca_type == NcaContentType::Program)
+                .is_none_or(|nca_type| nca_type == inventory.nca_type)
     });
 
     let mut selected_files = Vec::new();
@@ -341,7 +415,7 @@ pub(crate) fn resolve_extraction(
         .try_reserve(inventory.files.len())
         .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
     if scalar_selectors_match {
-        for file in &inventory.files {
+        for file in inventory.files {
             let selected = selectors.is_none_or(|selectors| {
                 (selectors.partitions().is_empty()
                     || requested_partitions[file.partition_index as usize])
@@ -366,7 +440,7 @@ pub(crate) fn resolve_extraction(
         {
             return Err(ExtractionValidationError::SelectorMiss);
         }
-    } else if selected_files.is_empty() {
+    } else if selected_files.is_empty() && !inventory.allow_empty_all {
         return Err(ExtractionValidationError::EmptySelection);
     }
 
@@ -421,7 +495,7 @@ pub(crate) fn resolve_extraction(
     directories
         .try_reserve_exact(selected_directory_count)
         .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
-    for directory in &inventory.directories {
+    for directory in inventory.directories {
         if all_files_selected || required_directories.contains(directory) {
             validate_selected_relative_path(directory)?;
             directories.push(copy_string(directory)?);
@@ -433,54 +507,54 @@ pub(crate) fn resolve_extraction(
     source_file_paths
         .try_reserve_exact(inventory.files.len())
         .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
-    for file in &inventory.files {
+    for file in inventory.files {
         source_file_paths.push(content_path(file.partition_index, &file.path)?);
     }
     validate_selected_path_aliases(
         &selected_file_paths,
         &directories,
         &source_file_paths,
-        &inventory.directories,
+        inventory.directories,
     )?;
 
     let mut manifest_partitions = Vec::new();
     manifest_partitions
-        .try_reserve_exact(inventory.partitions.len())
+        .try_reserve_exact(inventory.partition_indices.len())
         .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
     let mut ordered_partitions = Vec::new();
     ordered_partitions
-        .try_reserve_exact(inventory.partitions.len())
+        .try_reserve_exact(inventory.partition_indices.len())
         .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
-    ordered_partitions.extend(inventory.partitions.iter());
-    ordered_partitions.sort_unstable_by_key(|partition| partition.index);
-    for partition in ordered_partitions {
-        let prefix = format!("{}/", partition.index);
+    ordered_partitions.extend(inventory.partition_indices.iter().copied());
+    ordered_partitions.sort_unstable();
+    for partition_index in ordered_partitions {
+        let prefix = format!("{partition_index}/");
         let represented = all_files_selected
             || selected_files
                 .iter()
-                .any(|file| file.partition_index == partition.index);
+                .any(|file| file.partition_index == partition_index);
         if !represented {
             continue;
         }
 
         let mut partition_directories = Vec::new();
         for directory in &directories {
-            if directory == &partition.index.to_string() || directory.starts_with(&prefix) {
+            if directory == &partition_index.to_string() || directory.starts_with(&prefix) {
                 partition_directories.push(copy_string(directory)?);
             }
         }
         let mut partition_files = Vec::new();
         for file in selected_files
             .iter()
-            .filter(|file| file.partition_index == partition.index)
+            .filter(|file| file.partition_index == partition_index)
         {
             partition_files.push(ExtractionManifestFile {
-                path: content_path(partition.index, &file.path)?,
+                path: content_path(partition_index, &file.path)?,
             });
         }
         manifest_partitions.push(ExtractionManifestPartition {
-            index: partition.index,
-            filesystem: "partition_fs",
+            index: partition_index,
+            filesystem: inventory.filesystem,
             directories: partition_directories,
             files: partition_files,
         });
@@ -494,7 +568,7 @@ pub(crate) fn resolve_extraction(
             kind: "extracted_content_manifest",
             selection_mode,
             content_root: "content",
-            required_features: vec!["nca3_program_partition_fs"],
+            required_features: vec![inventory.required_feature],
             // A full-file candidate includes every inventory directory and
             // partition record above, including roots with no files. Publication
             // validates the planned payload paths before reporting success.
@@ -504,11 +578,11 @@ pub(crate) fn resolve_extraction(
                 ExtractionCompleteness::Incomplete
             },
             source: ExtractionManifestSource {
-                profile: "nca3_program_partition_fs",
-                role: "program",
-                nca_type: "program",
+                profile: inventory.profile,
+                role: inventory.role,
+                nca_type: inventory.nca_type_name,
                 program_id: source_program_id.to_hex(),
-                content_index: inventory.header.content_index,
+                content_index: inventory.content_index,
             },
             partitions: manifest_partitions,
         },

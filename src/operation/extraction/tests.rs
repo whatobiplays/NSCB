@@ -15,6 +15,11 @@ use crate::{CancellationHandle, Engine};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+use std::{
+    ffi::CString,
+    os::unix::{ffi::OsStrExt, fs::FileTypeExt},
+};
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn extraction_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
@@ -200,6 +205,92 @@ fn staged_manifest_hard_link_substitution_is_rejected_and_preserved() {
         OperationFailureCode::ValidationFailed,
         false,
     );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[derive(Clone, Copy)]
+enum UnexpectedStagedEntry {
+    Symlink,
+    Fifo,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn assert_unexpected_staged_entry_is_rejected(entry_kind: UnexpectedStagedEntry) {
+    use std::os::unix::fs::symlink;
+
+    let (root, source, key_file, destination) = extraction_fixture();
+    let outside_sentinel = root.path().join("outside-sentinel.txt");
+    std::fs::write(&outside_sentinel, b"preserve outside target").expect("write outside sentinel");
+    let cancellation = CancellationHandle::new();
+    let plan = extraction_plan(&source, &key_file, &destination, cancellation.clone());
+    let staging_path = plan.workspace.path.join(
+        plan.stage_directory_name
+            .as_deref()
+            .expect("extraction plans have a staging directory"),
+    );
+    let unexpected_entry = staging_path.join("bundle").join("unexpected-entry");
+    let session = OperationSession::new();
+    let mut injected = false;
+
+    let result = execute_with_producer_and_checkpoint_and_cancellation(
+        plan,
+        &session,
+        |_, _, _| Ok::<(), OperationFailureCode>(()),
+        |checkpoint| {
+            if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion && !injected {
+                match entry_kind {
+                    UnexpectedStagedEntry::Symlink => {
+                        symlink(&outside_sentinel, &unexpected_entry)
+                            .expect("inject staged symlink to outside sentinel");
+                    }
+                    UnexpectedStagedEntry::Fifo => {
+                        let path = CString::new(unexpected_entry.as_os_str().as_bytes())
+                            .expect("staged path has no NUL byte");
+                        assert_eq!(
+                            unsafe { libc::mkfifo(path.as_ptr(), 0o600) },
+                            0,
+                            "inject staged FIFO"
+                        );
+                        assert!(
+                            std::fs::symlink_metadata(&unexpected_entry)
+                                .expect("inspect staged FIFO")
+                                .file_type()
+                                .is_fifo()
+                        );
+                    }
+                }
+                injected = true;
+            }
+        },
+        &cancellation,
+    );
+
+    assert!(
+        injected,
+        "unexpected entry was injected before final validation"
+    );
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::ValidationFailed)
+    );
+    assert!(!result.milestones().contains(&OperationMilestone::Published));
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read(outside_sentinel).expect("outside target remains untouched"),
+        b"preserve outside target"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn staged_symlink_to_outside_target_is_rejected_without_following_target() {
+    assert_unexpected_staged_entry_is_rejected(UnexpectedStagedEntry::Symlink);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn staged_fifo_is_rejected_without_opening_special_file() {
+    assert_unexpected_staged_entry_is_rejected(UnexpectedStagedEntry::Fifo);
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

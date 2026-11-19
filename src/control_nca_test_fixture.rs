@@ -173,6 +173,125 @@ pub(crate) fn romfs_with_file() -> Vec<u8> {
     bytes
 }
 
+pub(crate) fn romfs_with_two_files() -> Vec<u8> {
+    romfs_with_two_files_and_second_entry(b"note", 56)
+}
+
+pub(crate) fn romfs_with_nonportable_second_file() -> Vec<u8> {
+    romfs_with_two_files_and_second_entry(b"CON", 56)
+}
+
+pub(crate) fn romfs_with_case_alias_files() -> Vec<u8> {
+    romfs_with_two_files_and_second_entry(b"DATA", 24)
+}
+
+pub(crate) fn romfs_with_zero_length_file() -> Vec<u8> {
+    let mut bytes = romfs_with_file();
+    write_u64(&mut bytes, 0x280, 0);
+    bytes
+}
+
+fn romfs_with_two_files_and_second_entry(second_name: &[u8], second_parent: u32) -> Vec<u8> {
+    assert!(!second_name.is_empty() && second_name.len() <= 4);
+    assert!(matches!(second_parent, 24 | 56));
+    let mut bytes = vec![0; 0x2d4];
+    let directory_hash_offset = 0x220;
+    let directory_meta_offset = 0x22c;
+    let file_hash_offset = 0x280;
+    let file_meta_offset = 0x28c;
+    write_u64(&mut bytes, 0, 0x50);
+    write_u64(&mut bytes, 8, directory_hash_offset as u64);
+    write_u64(&mut bytes, 16, 12);
+    write_u64(&mut bytes, 24, directory_meta_offset as u64);
+    write_u64(&mut bytes, 32, 0x54);
+    write_u64(&mut bytes, 40, file_hash_offset as u64);
+    write_u64(&mut bytes, 48, 12);
+    write_u64(&mut bytes, 56, file_meta_offset as u64);
+    write_u64(&mut bytes, 64, 0x48);
+    write_u64(&mut bytes, 72, 0x200);
+    bytes[0x200..0x204].copy_from_slice(b"data");
+    bytes[0x210..0x215].copy_from_slice(b"note!");
+
+    let mut directory_heads = [u32::MAX; 3];
+    for (record_offset, parent, name) in [
+        (0_u32, 0_u32, &b""[..]),
+        (24, 0, &b"assets"[..]),
+        (56, 0, &b"info"[..]),
+    ] {
+        let bucket = bucket_hash(parent, name) % directory_heads.len();
+        let hash_next_offset = directory_meta_offset + record_offset as usize + 16;
+        write_u32(&mut bytes, hash_next_offset, directory_heads[bucket]);
+        directory_heads[bucket] = record_offset;
+    }
+    for (bucket, head) in directory_heads.into_iter().enumerate() {
+        write_u32(&mut bytes, directory_hash_offset + bucket * 4, head);
+    }
+
+    write_u32(&mut bytes, directory_meta_offset, 0);
+    write_u32(&mut bytes, directory_meta_offset + 4, u32::MAX);
+    write_u32(&mut bytes, directory_meta_offset + 8, 24);
+    write_u32(&mut bytes, directory_meta_offset + 12, u32::MAX);
+    write_u32(&mut bytes, directory_meta_offset + 20, 0);
+
+    let assets = directory_meta_offset + 24;
+    write_u32(&mut bytes, assets, 0);
+    write_u32(&mut bytes, assets + 4, 56);
+    write_u32(&mut bytes, assets + 8, u32::MAX);
+    write_u32(&mut bytes, assets + 12, 0);
+    write_u32(&mut bytes, assets + 20, 6);
+    bytes[assets + 24..assets + 30].copy_from_slice(b"assets");
+
+    let info = directory_meta_offset + 56;
+    write_u32(&mut bytes, info, 0);
+    write_u32(&mut bytes, info + 4, u32::MAX);
+    write_u32(&mut bytes, info + 8, u32::MAX);
+    write_u32(
+        &mut bytes,
+        info + 12,
+        if second_parent == 56 { 36 } else { u32::MAX },
+    );
+    write_u32(&mut bytes, info + 20, 4);
+    bytes[info + 24..info + 28].copy_from_slice(b"info");
+
+    let mut file_heads = [u32::MAX; 3];
+    for (record_offset, parent, name) in [
+        (0_u32, 24_u32, &b"data"[..]),
+        (36, second_parent, second_name),
+    ] {
+        let bucket = bucket_hash(parent, name) % file_heads.len();
+        write_u32(
+            &mut bytes,
+            file_meta_offset + record_offset as usize + 24,
+            file_heads[bucket],
+        );
+        file_heads[bucket] = record_offset;
+    }
+    for (bucket, head) in file_heads.into_iter().enumerate() {
+        write_u32(&mut bytes, file_hash_offset + bucket * 4, head);
+    }
+
+    let data = file_meta_offset;
+    write_u32(&mut bytes, data, 24);
+    write_u32(
+        &mut bytes,
+        data + 4,
+        if second_parent == 24 { 36 } else { u32::MAX },
+    );
+    write_u64(&mut bytes, data + 8, 0);
+    write_u64(&mut bytes, data + 16, 4);
+    write_u32(&mut bytes, data + 28, 4);
+    bytes[data + 32..data + 36].copy_from_slice(b"data");
+
+    let note = file_meta_offset + 36;
+    write_u32(&mut bytes, note, second_parent);
+    write_u32(&mut bytes, note + 4, u32::MAX);
+    write_u64(&mut bytes, note + 8, 16);
+    write_u64(&mut bytes, note + 16, 5);
+    write_u32(&mut bytes, note + 28, second_name.len() as u32);
+    bytes[note + 32..note + 32 + second_name.len()].copy_from_slice(second_name);
+    bytes
+}
+
 pub(crate) fn oversized_metadata_romfs() -> Vec<u8> {
     let directory_hash_size = 1_048_472_usize;
     let directory_hash_offset = 0x200_usize;

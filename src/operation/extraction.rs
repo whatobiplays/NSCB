@@ -14,14 +14,54 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(target_os = "macos")]
+use zeroize::Zeroizing;
 
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug)]
 struct SelectedExtractionSpan {
     relative_path: String,
-    offset: u64,
+    source: SelectedExtractionSource,
     size: u64,
     sha256: Sha256Digest,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+enum SelectedExtractionSource {
+    Program { offset: u64 },
+    Control { section_offset: u64 },
+}
+
+#[cfg(target_os = "macos")]
+struct ControlExtractionRuntime {
+    metadata: crate::control_nca_qualification::ControlNcaExtractionMetadata,
+    section_key: Zeroizing<[u8; 16]>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug)]
+enum ExtractionProfile {
+    Program,
+    Control(crate::control_nca_qualification::ControlNcaExtractionMetadata),
+}
+
+#[cfg(target_os = "macos")]
+enum PlannedExtractionSource {
+    Program,
+    Control {
+        metadata: crate::control_nca_qualification::ControlNcaExtractionMetadata,
+        section_key: Zeroizing<[u8; 16]>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+enum PreparedExtractionRuntime {
+    Program,
+    Control {
+        runtime: ControlExtractionRuntime,
+        key_file: File,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -108,6 +148,7 @@ pub(super) struct ExtractionOperationPlan {
     selected_files: Vec<SelectedExtractionSpan>,
     directories: Vec<String>,
     manifest: crate::extraction::ExtractionManifest,
+    profile: ExtractionProfile,
     total_bytes: u64,
 }
 
@@ -243,20 +284,69 @@ pub(super) fn plan(
         header_key.as_bytes(),
     )
     .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
-    let inventory = crate::inspection::validate_native_inventory(&mut source_file, &header)
-        .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
-    let resolved = resolve_extraction(request.selection(), &inventory).map_err(|error| {
-        use crate::extraction::ExtractionValidationError as Validation;
-        super::OperationError::new(match error {
-            Validation::EmptySelectors | Validation::EmptySelection | Validation::SelectorMiss => {
-                OperationFailureCode::EmptySelection
+    drop(header_key);
+    let (resolved, planned_source) = match header.content_type {
+        crate::nca::ContentType::Program => {
+            let inventory = crate::inspection::validate_native_inventory(&mut source_file, &header)
+                .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+            let resolved =
+                resolve_extraction(request.selection(), &inventory).map_err(|error| {
+                    super::OperationError::new(map_extraction_validation_error(error))
+                })?;
+            (resolved, PlannedExtractionSource::Program)
+        }
+        crate::nca::ContentType::Control => {
+            key_handle.seek(SeekFrom::Start(0)).map_err(|_| {
+                super::OperationError::new(OperationFailureCode::KeyFileUnavailable)
+            })?;
+            let keys = crate::key_file::read_nsp_qualification_keys(&mut key_handle, key_size)
+                .map_err(|error| super::OperationError::new(map_nsp_key_file_error(error)))?;
+            super::verify_file_evidence(&mut key_handle, &key_baseline)
+                .map_err(|_| super::OperationError::new(OperationFailureCode::KeyFileChanged))?;
+            if cancellation.is_cancelled() {
+                return Err(super::OperationError::new(OperationFailureCode::Cancelled));
             }
-            Validation::UnsupportedPath | Validation::PathCollision => {
-                OperationFailureCode::UnsafePath
-            }
-            Validation::ResourceLimitExceeded => OperationFailureCode::ResourceLimitExceeded,
-        })
-    })?;
+            let inventory = crate::control_nca_qualification::qualify_for_extraction_opened(
+                &mut source_file,
+                source_baseline.snapshot.len,
+                &keys,
+                &cancellation,
+            )
+            .map_err(|error| {
+                super::OperationError::new(map_control_qualification_error(error.code()))
+            })?
+            .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+            let metadata = inventory.metadata;
+            let resolved =
+                crate::extraction::resolve_control_extraction(request.selection(), &inventory)
+                    .map_err(|error| {
+                        super::OperationError::new(map_extraction_validation_error(error))
+                    })?;
+            let section_key = crate::control_nca_qualification::derive_control_extraction_key(
+                &mut source_file,
+                source_baseline.snapshot.len,
+                &keys,
+                &metadata,
+            )
+            .map_err(|error| {
+                super::OperationError::new(map_control_qualification_error(error.code()))
+            })?;
+            super::verify_file_evidence(&mut key_handle, &key_baseline)
+                .map_err(|_| super::OperationError::new(OperationFailureCode::KeyFileChanged))?;
+            (
+                resolved,
+                PlannedExtractionSource::Control {
+                    metadata,
+                    section_key,
+                },
+            )
+        }
+        _ => {
+            return Err(super::OperationError::new(
+                OperationFailureCode::ValidationFailed,
+            ));
+        }
+    };
 
     let mut selected_files = Vec::new();
     selected_files
@@ -267,15 +357,51 @@ pub(super) fn plan(
         if cancellation.is_cancelled() {
             return Err(super::OperationError::new(OperationFailureCode::Cancelled));
         }
-        let relative_path = format!("{}/{}", span.partition_index, span.path);
-        let digest = digest_source_span(&mut source_file, span.offset, span.size, &cancellation)
-            .map_err(super::OperationError::new)?;
+        let relative_path = extraction_relative_path(span).map_err(super::OperationError::new)?;
+        let (source, digest) = match &planned_source {
+            PlannedExtractionSource::Program => (
+                SelectedExtractionSource::Program {
+                    offset: span.offset,
+                },
+                digest_source_span(&mut source_file, span.offset, span.size, &cancellation)
+                    .map_err(super::OperationError::new)?,
+            ),
+            PlannedExtractionSource::Control {
+                metadata,
+                section_key,
+            } => {
+                let section_offset = span
+                    .offset
+                    .checked_sub(metadata.partition_offset)
+                    .ok_or_else(|| {
+                        super::OperationError::new(OperationFailureCode::ValidationFailed)
+                    })?;
+                if section_offset
+                    .checked_add(span.size)
+                    .is_none_or(|end| end > metadata.partition_size)
+                {
+                    return Err(super::OperationError::new(
+                        OperationFailureCode::ValidationFailed,
+                    ));
+                }
+                let digest = digest_control_span(
+                    &mut source_file,
+                    *metadata,
+                    section_key,
+                    section_offset,
+                    span.size,
+                    &cancellation,
+                )
+                .map_err(super::OperationError::new)?;
+                (SelectedExtractionSource::Control { section_offset }, digest)
+            }
+        };
         total_bytes = total_bytes.checked_add(span.size).ok_or_else(|| {
             super::OperationError::new(OperationFailureCode::ResourceLimitExceeded)
         })?;
         selected_files.push(SelectedExtractionSpan {
             relative_path,
-            offset: span.offset,
+            source,
             size: span.size,
             sha256: digest,
         });
@@ -285,6 +411,10 @@ pub(super) fn plan(
             .as_bytes()
             .cmp(right.relative_path.as_bytes())
     });
+    let profile = match planned_source {
+        PlannedExtractionSource::Program => ExtractionProfile::Program,
+        PlannedExtractionSource::Control { metadata, .. } => ExtractionProfile::Control(metadata),
+    };
     let source_after_planning = inspect_planning_file(
         &mut source_file,
         &cancellation,
@@ -484,9 +614,62 @@ pub(super) fn plan(
             selected_files,
             directories: resolved.directories,
             manifest,
+            profile,
             total_bytes,
         }),
     })
+}
+
+#[cfg(target_os = "macos")]
+fn map_extraction_validation_error(
+    error: crate::extraction::ExtractionValidationError,
+) -> OperationFailureCode {
+    use crate::extraction::ExtractionValidationError as Validation;
+    match error {
+        Validation::EmptySelectors | Validation::EmptySelection | Validation::SelectorMiss => {
+            OperationFailureCode::EmptySelection
+        }
+        Validation::UnsupportedPath | Validation::PathCollision => OperationFailureCode::UnsafePath,
+        Validation::ResourceLimitExceeded => OperationFailureCode::ResourceLimitExceeded,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_nsp_key_file_error(error: crate::key_file::NspKeyFileError) -> OperationFailureCode {
+    use crate::key_file::NspKeyFileError as KeyError;
+    match error {
+        KeyError::Unavailable => OperationFailureCode::KeyFileUnavailable,
+        KeyError::LimitExceeded | KeyError::AllocationFailed => {
+            OperationFailureCode::ResourceLimitExceeded
+        }
+        KeyError::Malformed => OperationFailureCode::KeyFileMalformed,
+        KeyError::MissingHeaderKey | KeyError::MissingApplicationKeyAreaKey => {
+            OperationFailureCode::RequiredKeyMissing
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn map_control_qualification_error(
+    error: crate::control_nca_qualification::ControlNcaQualificationErrorCode,
+) -> OperationFailureCode {
+    use crate::control_nca_qualification::ControlNcaQualificationErrorCode as ErrorCode;
+    match error {
+        ErrorCode::InputUnavailable => OperationFailureCode::SourceUnavailable,
+        ErrorCode::InputChangedDuringQualification => OperationFailureCode::SourceChanged,
+        ErrorCode::KeyFileUnavailable => OperationFailureCode::KeyFileUnavailable,
+        ErrorCode::KeyFileChangedDuringQualification => OperationFailureCode::KeyFileChanged,
+        ErrorCode::KeyFileMalformed => OperationFailureCode::KeyFileMalformed,
+        ErrorCode::MissingHeaderKey | ErrorCode::MissingApplicationKeyAreaKey => {
+            OperationFailureCode::RequiredKeyMissing
+        }
+        ErrorCode::KeyFileLimitExceeded
+        | ErrorCode::InputLimitExceeded
+        | ErrorCode::ResourceLimitExceeded
+        | ErrorCode::AllocationFailed => OperationFailureCode::ResourceLimitExceeded,
+        ErrorCode::Cancelled => OperationFailureCode::Cancelled,
+        ErrorCode::InternalIo => OperationFailureCode::ValidationFailed,
+    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -540,6 +723,143 @@ fn digest_source_span(
         remaining -= read as u64;
     }
     Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
+#[cfg(target_os = "macos")]
+fn digest_control_span(
+    source: &mut File,
+    metadata: crate::control_nca_qualification::ControlNcaExtractionMetadata,
+    section_key: &[u8; 16],
+    offset: u64,
+    size: u64,
+    cancellation: &CancellationHandle,
+) -> Result<Sha256Digest, OperationFailureCode> {
+    use sha2::{Digest as _, Sha256};
+
+    let mut reader = crate::nca_crypto::NcaCtrReader::new(
+        source,
+        metadata.partition_offset,
+        metadata.partition_size,
+        section_key,
+        metadata.section_ctr,
+    );
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    let mut digest = Sha256::new();
+    let mut remaining = size;
+    let mut buffer = Zeroizing::new(Vec::new());
+    buffer
+        .try_reserve_exact(super::IO_BUFFER_SIZE)
+        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+    buffer.resize(super::IO_BUFFER_SIZE, 0);
+    while remaining != 0 {
+        if cancellation.is_cancelled() {
+            return Err(OperationFailureCode::Cancelled);
+        }
+        let length = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+        let read = reader
+            .read(&mut buffer[..length])
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+        if read == 0 {
+            return Err(OperationFailureCode::SourceChanged);
+        }
+        digest.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn extraction_relative_path(
+    span: &crate::inspection::NativeNcaFileSpan,
+) -> Result<String, OperationFailureCode> {
+    let partition = span.partition_index.to_string();
+    let capacity = partition
+        .len()
+        .checked_add(1)
+        .and_then(|size| size.checked_add(span.path.len()))
+        .ok_or(OperationFailureCode::ResourceLimitExceeded)?;
+    let mut relative = String::new();
+    relative
+        .try_reserve_exact(capacity)
+        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+    relative.push_str(&partition);
+    relative.push('/');
+    relative.push_str(&span.path);
+    Ok(relative)
+}
+
+#[cfg(target_os = "macos")]
+fn prepare_control_runtime(
+    source: &mut File,
+    plan: &OperationPlan,
+    extraction: &ExtractionOperationPlan,
+    session: &super::OperationSession,
+) -> Result<PreparedExtractionRuntime, OperationFailureCode> {
+    let metadata = match extraction.profile {
+        ExtractionProfile::Program => return Ok(PreparedExtractionRuntime::Program),
+        ExtractionProfile::Control(metadata) => metadata,
+    };
+    super::check_cancelled(session)?;
+    let key_directory = super::open_directory(&extraction.key_file.parent)
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?;
+    super::verify_directory_identity(&key_directory, extraction.key_file.parent_identity)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    let mut key_file = super::open_file_at(&key_directory, &extraction.key_file.name)
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?;
+    super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    let key_size = key_file
+        .metadata()
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?
+        .len();
+    if key_size > crate::key_file::MAX_KEY_FILE_BYTES {
+        return Err(OperationFailureCode::ResourceLimitExceeded);
+    }
+    key_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?;
+    let keys = crate::key_file::read_nsp_qualification_keys(&mut key_file, key_size)
+        .map_err(map_nsp_key_file_error)?;
+    super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    super::check_cancelled(session)?;
+    let section_key = crate::control_nca_qualification::derive_control_extraction_key(
+        source,
+        plan.source_baseline.snapshot.len,
+        &keys,
+        &metadata,
+    )
+    .map_err(|error| map_control_qualification_error(error.code()))?;
+    super::check_cancelled(session)?;
+    super::verify_file_evidence(source, &plan.source_baseline)
+        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    Ok(PreparedExtractionRuntime::Control {
+        runtime: ControlExtractionRuntime {
+            metadata,
+            section_key,
+        },
+        key_file,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn verify_control_key_handle(
+    runtime: &mut PreparedExtractionRuntime,
+    extraction: &ExtractionOperationPlan,
+) -> Result<(), OperationFailureCode> {
+    match (&extraction.profile, runtime) {
+        (ExtractionProfile::Program, PreparedExtractionRuntime::Program) => Ok(()),
+        (ExtractionProfile::Control(_), PreparedExtractionRuntime::Control { key_file, .. }) => {
+            super::verify_file_evidence(key_file, &extraction.key_baseline)
+                .map_err(|_| OperationFailureCode::KeyFileChanged)
+        }
+        _ => Err(OperationFailureCode::StalePlan),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -613,6 +933,7 @@ pub(super) fn execute_unix(
     super::verify_file_evidence(source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
     super::verify_conversion_key_identity(plan)?;
+    let mut extraction_runtime = prepare_control_runtime(source_file, plan, extraction, session)?;
 
     let mut destination_directory = destination_anchor;
     if plan.destination.creation_parent.is_some() {
@@ -694,6 +1015,7 @@ pub(super) fn execute_unix(
     )?;
     super::verify_source_entry(plan, &source_directory)?;
     super::verify_conversion_key_identity(plan)?;
+    verify_control_key_handle(&mut extraction_runtime, extraction)?;
     ensure_destination_absent(&destination_directory, &plan.destination.name)?;
 
     let manifest_bytes = extraction
@@ -739,6 +1061,7 @@ pub(super) fn execute_unix(
         source_file,
         &bundle_directory,
         extraction,
+        &extraction_runtime,
         &manifest_bytes,
         session,
     )?;
@@ -749,6 +1072,7 @@ pub(super) fn execute_unix(
     )?;
     verify_source_for_promotion(plan, &source_directory, source_file, session, checkpoint)?;
     super::verify_conversion_key_identity(plan)?;
+    verify_control_key_handle(&mut extraction_runtime, extraction)?;
     super::validate_plan_routes(
         plan,
         Some(workspace_identity),
@@ -774,6 +1098,7 @@ pub(super) fn execute_unix(
     )?;
     verify_source_for_promotion(plan, &source_directory, source_file, session, checkpoint)?;
     super::verify_conversion_key_identity(plan)?;
+    verify_control_key_handle(&mut extraction_runtime, extraction)?;
     ensure_destination_absent(&destination_directory, &plan.destination.name)?;
     validate_bundle_tree(
         &bundle_directory,
@@ -1143,6 +1468,7 @@ fn write_extraction_tree(
     source: &mut File,
     bundle: &File,
     extraction: &ExtractionOperationPlan,
+    runtime: &PreparedExtractionRuntime,
     manifest_bytes: &[u8],
     session: &super::OperationSession,
 ) -> Result<(), OperationFailureCode> {
@@ -1175,7 +1501,8 @@ fn write_extraction_tree(
         let (parent_path, leaf) = split_parent_and_leaf(&selected.relative_path)?;
         let parent = open_relative_directory(&content, parent_path)?;
         let mut output = create_output_file_at(&parent, OsStr::new(leaf))?;
-        let copied = copy_selected_span(source, &mut output, selected, completed, session)?;
+        let copied =
+            copy_selected_span(source, &mut output, selected, runtime, completed, session)?;
         completed = completed
             .checked_add(copied)
             .ok_or(OperationFailureCode::ResourceLimitExceeded)?;
@@ -1211,22 +1538,60 @@ fn copy_selected_span(
     source: &mut File,
     destination: &mut File,
     selected: &SelectedExtractionSpan,
+    runtime: &PreparedExtractionRuntime,
+    completed_before: u64,
+    session: &super::OperationSession,
+) -> Result<u64, OperationFailureCode> {
+    match (selected.source, runtime) {
+        (
+            SelectedExtractionSource::Control { section_offset },
+            PreparedExtractionRuntime::Control { runtime, .. },
+        ) => copy_control_selected_span(
+            source,
+            destination,
+            selected,
+            runtime,
+            section_offset,
+            completed_before,
+            session,
+        ),
+        (SelectedExtractionSource::Program { offset }, PreparedExtractionRuntime::Program) => {
+            source
+                .seek(SeekFrom::Start(offset))
+                .map_err(|_| OperationFailureCode::SourceChanged)?;
+            let mut buffer = [0_u8; super::IO_BUFFER_SIZE];
+            copy_verified_selected_bytes(
+                source,
+                destination,
+                selected,
+                &mut buffer,
+                completed_before,
+                session,
+            )
+        }
+        _ => Err(OperationFailureCode::StalePlan),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_verified_selected_bytes<R: Read>(
+    reader: &mut R,
+    destination: &mut File,
+    selected: &SelectedExtractionSpan,
+    buffer: &mut [u8],
     completed_before: u64,
     session: &super::OperationSession,
 ) -> Result<u64, OperationFailureCode> {
     use sha2::{Digest as _, Sha256};
-    source
-        .seek(SeekFrom::Start(selected.offset))
-        .map_err(|_| OperationFailureCode::SourceChanged)?;
+
     let mut remaining = selected.size;
     let mut copied = 0_u64;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; super::IO_BUFFER_SIZE];
     while remaining != 0 {
         super::check_cancelled(session)?;
         let capacity = usize::try_from(remaining.min(buffer.len() as u64))
             .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-        let read = source
+        let read = reader
             .read(&mut buffer[..capacity])
             .map_err(|_| OperationFailureCode::SourceChanged)?;
         if read == 0 {
@@ -1246,6 +1611,47 @@ fn copy_selected_span(
         return Err(OperationFailureCode::SourceChanged);
     }
     Ok(copied)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_control_selected_span(
+    source: &mut File,
+    destination: &mut File,
+    selected: &SelectedExtractionSpan,
+    runtime: &ControlExtractionRuntime,
+    offset: u64,
+    completed_before: u64,
+    session: &super::OperationSession,
+) -> Result<u64, OperationFailureCode> {
+    if offset
+        .checked_add(selected.size)
+        .is_none_or(|end| end > runtime.metadata.partition_size)
+    {
+        return Err(OperationFailureCode::StalePlan);
+    }
+    let mut reader = crate::nca_crypto::NcaCtrReader::new(
+        source,
+        runtime.metadata.partition_offset,
+        runtime.metadata.partition_size,
+        &runtime.section_key,
+        runtime.metadata.section_ctr,
+    );
+    reader
+        .seek(SeekFrom::Start(offset))
+        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    let mut buffer = Zeroizing::new(Vec::new());
+    buffer
+        .try_reserve_exact(super::IO_BUFFER_SIZE)
+        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+    buffer.resize(super::IO_BUFFER_SIZE, 0);
+    copy_verified_selected_bytes(
+        &mut reader,
+        destination,
+        selected,
+        &mut buffer,
+        completed_before,
+        session,
+    )
 }
 
 #[cfg(target_os = "macos")]

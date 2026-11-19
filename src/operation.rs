@@ -2523,7 +2523,7 @@ pub(crate) fn plan_multi_content_split(
     }
 }
 
-/// Plans a selected native Program NCA extraction.
+/// Plans a selected standalone Program or qualified Control NCA extraction.
 pub(crate) fn plan_extraction(
     request: crate::extraction::ExtractionRequest,
     cancellation: CancellationHandle,
