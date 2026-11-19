@@ -206,7 +206,7 @@ Execution streams selected file spans with bounded buffers. It checks copied
 byte counts and staged paths against the plan before publication. The
 destination is a new bundle directory; existing destinations are not
 replaced. Publication requires an atomic no-clobber directory operation on
-writable local APFS. Runtime qualification remains pending.
+writable local APFS. See [Support and qualification](#support-and-qualification) for the tested macOS arm64/APFS scope.
 
 Cancellation is cooperative. `OperationSession::cancel()` is accepted while
 the operation is in `Executing` and refused after it enters `Promoting` or
