@@ -56,6 +56,181 @@ fn extraction_plan(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn control_extraction_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let fixture = crate::control_nca_qualification::synthetic_fixture::build_for_program_id(
+        &crate::control_nca_qualification::synthetic_fixture::romfs_with_two_files(),
+        crate::control_nca_qualification::synthetic_fixture::Mutation::None,
+        0x0102_0304_0506_0708,
+    );
+    let root = tempfile::tempdir().expect("create Control extraction fixture");
+    let source = root.path().join("control.nca");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("bundle");
+    std::fs::write(&source, fixture.bytes).expect("write synthetic Control NCA");
+    std::fs::write(
+        &key_file,
+        crate::control_nca_qualification::synthetic_fixture::key_file_bytes(),
+    )
+    .expect("write synthetic keys");
+    (root, source, key_file, destination)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn assert_postcopy_input_change_is_rejected(replace_key: bool) {
+    let (root, source, key_file, destination) = control_extraction_fixture();
+    let unowned_directory = root.path().join("unowned-data");
+    std::fs::create_dir(&unowned_directory).expect("create unowned directory");
+    let sentinel = unowned_directory.join("keep.txt");
+    std::fs::write(&sentinel, b"preserve unowned data").expect("write unowned data");
+    let original_key_bytes = std::fs::read(&key_file).expect("read original key file");
+    let retained_key = root.path().join("retained-original-keys");
+
+    let cancellation = CancellationHandle::new();
+    let plan = extraction_plan(&source, &key_file, &destination, cancellation.clone());
+    let session = OperationSession::new();
+    let mut changed_at_checkpoint = false;
+    let result = execute_with_producer_and_checkpoint_and_cancellation(
+        plan,
+        &session,
+        |_, _, _| Ok::<(), OperationFailureCode>(()),
+        |checkpoint| {
+            if checkpoint == ExecutionCheckpoint::BeforeAtomicPromotion && !changed_at_checkpoint {
+                if replace_key {
+                    std::fs::rename(&key_file, &retained_key).expect("retain original key file");
+                    std::fs::write(&key_file, &original_key_bytes)
+                        .expect("replace key file after payload copy");
+                } else {
+                    let mut changed_source =
+                        std::fs::read(&source).expect("read source after payload copy");
+                    changed_source[0] ^= 1;
+                    std::fs::write(&source, changed_source)
+                        .expect("mutate source after payload copy");
+                }
+                changed_at_checkpoint = true;
+            }
+        },
+        &cancellation,
+    );
+
+    assert!(changed_at_checkpoint, "mutation checkpoint was not reached");
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(if replace_key {
+            OperationFailureCode::KeyFileChanged
+        } else {
+            OperationFailureCode::SourceChanged
+        })
+    );
+    assert!(!result.milestones().contains(&OperationMilestone::Published));
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read(&sentinel).expect("read unowned data"),
+        b"preserve unowned data"
+    );
+    if replace_key {
+        assert_eq!(
+            std::fs::read(retained_key).expect("read retained original key file"),
+            original_key_bytes
+        );
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn source_mutation_after_payload_copy_is_rejected_before_promotion() {
+    assert_postcopy_input_change_is_rejected(false);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn key_replacement_after_payload_copy_is_rejected_before_promotion() {
+    assert_postcopy_input_change_is_rejected(true);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+struct ChangeAfterFirstRead {
+    source: std::fs::File,
+    source_path: PathBuf,
+    mutation_offset: u64,
+    replacement: [u8; 4],
+    changed: bool,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+impl std::io::Read for ChangeAfterFirstRead {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = std::io::Read::read(&mut self.source, buffer)?;
+        if read != 0 && !self.changed {
+            use std::io::{Seek as _, SeekFrom, Write as _};
+
+            let mut source = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.source_path)?;
+            source.seek(SeekFrom::Start(self.mutation_offset))?;
+            source.write_all(&self.replacement)?;
+            source.sync_all()?;
+            self.changed = true;
+        }
+        Ok(read)
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn plaintext_source_change_during_verified_copy_fails_before_publication() {
+    use sha2::Digest as _;
+
+    let root = tempfile::tempdir().expect("create verified-copy fixture");
+    let source_path = root.path().join("source.bin");
+    let original = b"0123456789abcdef";
+    std::fs::write(&source_path, original).expect("write original source");
+    let final_bundle = root.path().join("bundle");
+    let unowned_directory = root.path().join("unowned-data");
+    std::fs::create_dir(&unowned_directory).expect("create unowned directory");
+    let sentinel = unowned_directory.join("keep.txt");
+    std::fs::write(&sentinel, b"preserve unowned data").expect("write unowned data");
+    let staging_directory = root.path().join("staging");
+    std::fs::create_dir(&staging_directory).expect("create staging directory");
+    let staged_payload = staging_directory.join("payload.bin");
+    let mut destination = std::fs::File::create(&staged_payload).expect("create staged payload");
+    let mut reader = ChangeAfterFirstRead {
+        source: std::fs::File::open(&source_path).expect("open source"),
+        source_path,
+        mutation_offset: 8,
+        replacement: *b"WXYZ",
+        changed: false,
+    };
+    let selected = super::SelectedExtractionSpan {
+        relative_path: "0/romfs/payload.bin".to_owned(),
+        source: super::SelectedExtractionSource::Program { offset: 0 },
+        size: original.len() as u64,
+        sha256: crate::sha256::Sha256Digest::from_bytes(sha2::Sha256::digest(original).into()),
+    };
+    let mut buffer = [0; 4];
+    let result = super::copy_verified_selected_bytes(
+        &mut reader,
+        &mut destination,
+        &selected,
+        &mut buffer,
+        0,
+        &OperationSession::new(),
+    );
+    drop(destination);
+
+    assert!(reader.changed, "source did not change during the copy");
+    assert_eq!(result, Err(OperationFailureCode::SourceChanged));
+    assert_eq!(
+        std::fs::read(&staged_payload).expect("read staged payload"),
+        b"01234567WXYZcdef"
+    );
+    assert!(!final_bundle.exists());
+    assert_eq!(
+        std::fs::read(&sentinel).expect("read unowned data"),
+        b"preserve unowned data"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn assert_extraction_hard_link_is_rejected(
     relative_path: Option<&str>,
     inject_at: ExecutionCheckpoint,

@@ -1,15 +1,16 @@
 # Standalone Program and Control extraction
 
-Slice A extracts a standalone Nintendo Content Archive (NCA) Program with an
-encrypted NCA3 header and clear, unhashed PartitionFs partitions. Slice B adds
-one rights-free NCA3 Control profile with a single AES-CTR RomFS section and
-the qualified IVFC SHA-256 integrity checks. The supported Control profile's
-integrity checks do not establish title authenticity, signature validity,
+Program extraction supports a standalone Nintendo Content Archive (NCA)
+Program with an encrypted NCA3 header and clear, unhashed PartitionFs
+partitions. Control extraction supports one rights-free NCA3 Control profile
+with a single AES-CTR RomFS section and the qualified IVFC SHA-256 integrity
+checks. Those checks do not establish title authenticity, signature validity,
 general NCA authenticity, or device eligibility.
 
-Slice A passed Engine and CLI runtime tests on native macOS arm64 with writable
-local APFS and rights-free synthetic keyed fixtures. Slice B qualification
-results are recorded under [Support and qualification](#support-and-qualification).
+Program extraction passed Engine and CLI runtime tests on native macOS arm64
+with writable local APFS and rights-free synthetic keyed fixtures. Control
+extraction qualification results are recorded under
+[Support and qualification](#support-and-qualification).
 
 ## Request and command line
 
@@ -206,8 +207,8 @@ implemented.
 The fields retained for that future workflow are the schema version and kind,
 required features, content root, completeness, source profile and role, NCA
 type, canonical Program ID, content index, partition indices and filesystem
-types, directories, and file paths. Slice A does not add title ownership or
-Nintendo Content ID, and does not implement repacking or exact Restoration.
+types, directories, and file paths. The manifest records no title ownership
+or Nintendo Content ID and does not implement repacking or exact Restoration.
 The manifest is structural metadata, not proof of authenticity or an
 execution receipt.
 
@@ -251,13 +252,13 @@ result contract.
 ## Support and qualification
 
 The approved runtime target is native macOS arm64 on writable local APFS with
-rights-free synthetic keyed fixtures. Slice A passed 15 extraction backend
-tests, 10 Engine integration tests, and 7 CLI tests with Rust 1.98.1. Slice B
-passed `make all` and its native Control extraction tests on macOS arm64 with
-APFS. The targeted native runs passed 39 Control qualification and extraction
-tests, 17 extraction operation tests, 9 CLI tests, and 9 partition-path
-budget tests. Fixtures use generated, rights-free NCA and RomFS bytes with
-synthetic keys.
+rights-free synthetic keyed fixtures. Program extraction passed 15 extraction
+backend tests, 10 Engine integration tests, and 7 CLI tests with Rust 1.98.1.
+Control extraction passed `make all` and the native qualification
+tests on macOS arm64/APFS. Targeted runs passed 39 Control qualification and
+extraction tests, 20 extraction operation tests, 9 CLI tests, and 9
+partition-path budget tests. Fixtures use generated, rights-free NCA and
+RomFS bytes with synthetic keys.
 
 Linux GNU and Windows GNU all-target cross-compilation passed. The Windows GNU
 check reported existing target-specific warnings. The Windows MSVC build
@@ -283,10 +284,10 @@ validation. All six new inventory allocation reservations were refused
 individually in tests and returned typed resource-limit errors without
 changing the inputs or creating a destination.
 
-Neither slice claims Nintendo authenticity, Full Verification, or installation
-eligibility. Slice A does not support encrypted partitions or RomFS. Slice B
-supports only its qualified Control profile. Neither slice adds package or
-container extraction, repacking, or Restoration. See
+Neither extraction profile claims Nintendo authenticity, Full Verification,
+or installation eligibility. Program extraction does not support encrypted
+partitions or RomFS. Control extraction supports only its qualified profile.
+Neither adds package or container extraction, repacking, or Restoration. See
 [Inspection architecture](inspection.md),
 [publication architecture](publication.md), and
 [ADR-0024: versioned extracted-content manifests](../adr/0024-versioned-extracted-content-manifests.md)
