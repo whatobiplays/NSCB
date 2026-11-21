@@ -41,11 +41,10 @@ struct ControlExtractionRuntime {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug)]
 enum ExtractionProfile {
     Program,
     Control(crate::control_nca_qualification::ControlNcaExtractionMetadata),
-    NspProgram,
+    NspProgram(crate::nsp_semantic_qualification::NspProgramExtractionEvidence),
 }
 
 #[cfg(target_os = "macos")]
@@ -161,7 +160,6 @@ pub(super) struct ExtractionOperationPlan {
     manifest: crate::extraction::ExtractionManifest,
     manifest_container: Option<crate::extraction::ExtractionManifestContainer>,
     profile: ExtractionProfile,
-    nsp_evidence: Option<crate::nsp_semantic_qualification::NspProgramExtractionEvidence>,
     total_bytes: u64,
 }
 
@@ -611,15 +609,13 @@ pub(super) fn plan(
             .as_bytes()
             .cmp(right.relative_path.as_bytes())
     });
-    let (profile, nsp_evidence) = match planned_source {
-        PlannedExtractionSource::Program => (ExtractionProfile::Program, None),
-        PlannedExtractionSource::Control { metadata, .. } => {
-            (ExtractionProfile::Control(metadata), None)
-        }
+    let profile = match planned_source {
+        PlannedExtractionSource::Program => ExtractionProfile::Program,
+        PlannedExtractionSource::Control { metadata, .. } => ExtractionProfile::Control(metadata),
         PlannedExtractionSource::NspProgram {
             evidence,
             section_key: _,
-        } => (ExtractionProfile::NspProgram, Some(evidence)),
+        } => ExtractionProfile::NspProgram(evidence),
     };
     let source_after_planning = inspect_planning_file(
         &mut source_file,
@@ -720,7 +716,7 @@ pub(super) fn plan(
         conflict_policy: ConflictPolicy::Fail,
         destination_baseline: destination_state,
         required_providers: Vec::new(),
-        required_keys: if nsp_evidence.is_some() {
+        required_keys: if matches!(&profile, ExtractionProfile::NspProgram(_)) {
             vec![
                 "nca_header_key".to_owned(),
                 "key_area_key_application_00".to_owned(),
@@ -831,7 +827,6 @@ pub(super) fn plan(
             manifest,
             manifest_container,
             profile,
-            nsp_evidence,
             total_bytes,
         }),
     })
@@ -1088,10 +1083,10 @@ fn prepare_extraction_runtime(
     extraction: &ExtractionOperationPlan,
     session: &super::OperationSession,
 ) -> Result<PreparedExtractionRuntime, OperationFailureCode> {
-    let metadata = match extraction.profile {
+    let metadata = match &extraction.profile {
         ExtractionProfile::Program => return Ok(PreparedExtractionRuntime::Program),
-        ExtractionProfile::Control(metadata) => metadata,
-        ExtractionProfile::NspProgram => {
+        ExtractionProfile::Control(metadata) => *metadata,
+        ExtractionProfile::NspProgram(_) => {
             #[cfg(target_arch = "aarch64")]
             {
                 return prepare_nsp_program_runtime(source, plan, extraction, session);
@@ -1177,10 +1172,10 @@ fn prepare_nsp_program_runtime(
         return Err(OperationFailureCode::ResourceLimitExceeded);
     }
 
-    let planned = extraction
-        .nsp_evidence
-        .as_ref()
-        .ok_or(OperationFailureCode::StalePlan)?;
+    let planned = match &extraction.profile {
+        ExtractionProfile::NspProgram(evidence) => evidence,
+        _ => return Err(OperationFailureCode::StalePlan),
+    };
     let request = crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
         plan.source.path.clone(),
         extraction.key_file.path.clone(),
@@ -1243,10 +1238,11 @@ fn verify_extraction_key_handle(
             super::verify_file_evidence(key_file, &extraction.key_baseline)
                 .map_err(|_| OperationFailureCode::KeyFileChanged)
         }
-        (ExtractionProfile::NspProgram, PreparedExtractionRuntime::NspProgram { key_file, .. }) => {
-            super::verify_file_evidence(key_file, &extraction.key_baseline)
-                .map_err(|_| OperationFailureCode::KeyFileChanged)
-        }
+        (
+            ExtractionProfile::NspProgram(_),
+            PreparedExtractionRuntime::NspProgram { key_file, .. },
+        ) => super::verify_file_evidence(key_file, &extraction.key_baseline)
+            .map_err(|_| OperationFailureCode::KeyFileChanged),
         _ => Err(OperationFailureCode::StalePlan),
     }
 }

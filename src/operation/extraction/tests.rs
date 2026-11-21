@@ -9,7 +9,7 @@ use super::super::{
 };
 use super::super::{OperationKind, OperationOutcome};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use super::{ExtractionIoFailurePoint, InjectedExtractionIoFailure};
+use super::{ExtractionIoFailurePoint, ExtractionProfile, InjectedExtractionIoFailure};
 use crate::extraction::ExtractionRequest;
 use crate::{CancellationHandle, Engine};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -895,7 +895,10 @@ fn path_and_operation_owned_inputs_produce_equivalent_qualification_facts() {
     let evidence = plan
         .extraction
         .as_ref()
-        .and_then(|extraction| extraction.nsp_evidence.as_ref())
+        .and_then(|extraction| match &extraction.profile {
+            ExtractionProfile::NspProgram(evidence) => Some(evidence),
+            _ => None,
+        })
         .expect("planning retained durable NSP evidence");
     let NspSemanticQualificationOutcome::Qualified(facts) = result.outcome else {
         panic!("path-based qualification did not qualify the synthetic package");
@@ -1040,7 +1043,10 @@ fn execution_rejects_stale_qualified_nsp_evidence() {
     let evidence = plan
         .extraction
         .as_mut()
-        .and_then(|extraction| extraction.nsp_evidence.as_mut())
+        .and_then(|extraction| match &mut extraction.profile {
+            ExtractionProfile::NspProgram(evidence) => Some(evidence),
+            _ => None,
+        })
         .expect("NSP extraction evidence");
     evidence.title_id ^= 1;
 
