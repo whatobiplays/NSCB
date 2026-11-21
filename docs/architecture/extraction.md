@@ -1,12 +1,16 @@
-# Standalone Program extraction
+# Standalone Program and Control extraction
 
-Slice A covers extraction from one standalone Nintendo Content Archive (NCA)
+Program extraction supports a standalone Nintendo Content Archive (NCA)
 Program with an encrypted NCA3 header and clear, unhashed PartitionFs
-partitions. It does not establish title authenticity, signature validity,
-payload integrity, or device eligibility.
+partitions. Control extraction supports one rights-free NCA3 Control profile
+with a single AES-CTR RomFS section and the qualified IVFC SHA-256 integrity
+checks. Those checks do not establish title authenticity, signature validity,
+general NCA authenticity, or device eligibility.
 
-The Engine and CLI passed runtime tests on native macOS arm64 with writable
-local APFS and rights-free synthetic keyed fixtures.
+Program extraction passed Engine and CLI runtime tests on native macOS arm64
+with writable local APFS and rights-free synthetic keyed fixtures. Control
+extraction qualification results are recorded under
+[Support and qualification](#support-and-qualification).
 
 ## Request and command line
 
@@ -47,7 +51,7 @@ The standalone command accepts the same selection dimensions:
 
 ```text
 nscb extract --source <NCA> [--keys <FILE>] [--output-directory <NEW-DIR>] \
-    (--all | [--program-id <16-HEX>] [--nca-type program | --role program] \
+    (--all | [--program-id <16-HEX>] [--nca-type <program|control> | --role <program|control>] \
     [--partition 0..3]... [--path <PARTITION-RELATIVE-PATH>]...) \
     [--json | --jsonl]
 ```
@@ -57,9 +61,9 @@ selectors. The CLI accepts at most one `--program-id` and at most one of
 `--nca-type` or `--role`. Repeated partition and path values are ORed within
 their dimension; populated dimensions are combined with AND.
 Program IDs must contain exactly 16 ASCII hexadecimal digits. Either letter
-case is accepted, and manifests use lowercase. The only supported type and
-role value is `program`. Repeated singleton options and malformed values are
-usage errors.
+case is accepted, and manifests use lowercase. The accepted type and role
+values are `program` and `control`; each still requires its matching qualified
+profile. Repeated singleton options and malformed values are usage errors.
 
 Paths are exact, case-sensitive names relative to a partition root. A path
 present in more than one selected partition matches in each such partition.
@@ -82,12 +86,16 @@ configuration.
 
 ## Validation boundary and path policy
 
-Extraction reuses native parsing for the encrypted NCA header, supported NCA
-profile, partition bounds, PFS0 tables, normalized relative paths, hierarchy
-checks, and checked file spans. Native inspection facts include each file's
-partition index, normalized path, absolute offset, and length. Payload reads
-use the selected spans, and extraction checks their byte correspondence with
-the staged files and the immutable plan.
+Program extraction reuses native parsing for the encrypted NCA header,
+supported profile, partition bounds, PartitionFs tables, normalized relative
+paths, hierarchy checks, and checked file spans. Control extraction uses the
+existing private qualifier to verify the complete IVFC tree and RomFS graph.
+It builds its private directory and file-span inventory from the RomFS records
+that passed those checks; public Inspection output is unchanged. Planning
+decrypts each selected span with the existing bounded AES-CTR reader and
+records its digest. Execution derives the section key again from verified
+source and key handles, streams the selected bytes, and checks each staged
+file against the planned digest before publication.
 
 Inspection's NSTool launch and provider-tree corroboration are not part of
 extraction. A separate NSTool comparison may provide diagnostic evidence, but
@@ -112,15 +120,17 @@ The public `is_portable_bundle_leaf` helper lets adapters apply the same leaf
 rule when choosing a fallback name. Extraction validates the requested bundle
 leaf with this policy as well.
 
-The existing PartitionFs parser bounds the source to 65,536 file entries,
+The Program PartitionFs parser bounds the source to 65,536 file entries,
 16 MiB of total name bytes, 16 MiB of total normalized path bytes, and 62 path
 segments. Selector count and selector path bytes use the corresponding
-existing budgets.
+existing budgets. The Control metadata, record, input, and IVFC hash-operation
+limits are listed in [Control NCA qualification](../testing/control-nca-qualification.md).
 
-Unselected names that fail only the portable publishing rule do not block a
-safe selective extraction. They still pass native structural checks, and an
-unselected name that aliases or makes a selected path ambiguous is an error.
-A full-tree extraction validates the portable rule for every published name.
+Unselected valid UTF-8 names that fail only the portable publishing rule do
+not block a safe selective extraction. They still pass native structural
+checks, and an unselected name that aliases or makes a selected path ambiguous
+is an error. A full-tree extraction validates the portable rule for every
+published name.
 
 The bundle contains regular files and directories. Staged and published
 validation opens payloads and the manifest without following symlinks, requires
@@ -179,6 +189,13 @@ and directory, including empty partition roots. If any source file is omitted,
 the manifest is incomplete and lists only represented partitions and the
 directories needed by their selected files.
 
+Control manifests use `nca3_control_romfs_ivfc_sha256_aes_ctr` for both
+`source.profile` and the sole `required_features` entry. They record `control`
+for `source.role` and `source.nca_type`, and `romfs` for the partition
+filesystem. `--all` can produce a complete Control manifest for a validated
+directory-only tree. Explicit selectors must match at least one file. Program
+manifest values and serialized bytes remain unchanged.
+
 The writer orders partitions by index, directories by bytewise path order, and
 files by partition index then bytewise path order. It emits deterministic
 UTF-8 JSON with a final newline. The manifest records no payload hashes,
@@ -190,8 +207,8 @@ implemented.
 The fields retained for that future workflow are the schema version and kind,
 required features, content root, completeness, source profile and role, NCA
 type, canonical Program ID, content index, partition indices and filesystem
-types, directories, and file paths. Slice A does not add title ownership or
-Nintendo Content ID, and does not implement repacking or exact Restoration.
+types, directories, and file paths. The manifest records no title ownership
+or Nintendo Content ID and does not implement repacking or exact Restoration.
 The manifest is structural metadata, not proof of authenticity or an
 execution receipt.
 
@@ -235,15 +252,42 @@ result contract.
 ## Support and qualification
 
 The approved runtime target is native macOS arm64 on writable local APFS with
-rights-free synthetic keyed fixtures. The qualification run passed 15
-extraction backend tests, 10 Engine integration tests, and 7 CLI tests with
-Rust 1.98.1. These results cover the exercised extraction path on this host and
-filesystem. Other operating systems and filesystem types remain unqualified
-until separately tested.
+rights-free synthetic keyed fixtures. Program extraction passed 15 extraction
+backend tests, 10 Engine integration tests, and 7 CLI tests with Rust 1.98.1.
+Control extraction passed `make all` and the native qualification
+tests on macOS arm64/APFS. Targeted runs passed 39 Control qualification and
+extraction tests, 20 extraction operation tests, 9 CLI tests, and 9
+partition-path budget tests. Fixtures use generated, rights-free NCA and
+RomFS bytes with synthetic keys.
 
-Slice A does not claim Nintendo authenticity, Full Verification, installation
-eligibility, encrypted partition support, RomFs support, additional NCA
-roles, package/container extraction, repacking, or Restoration. See
+Linux GNU and Windows GNU all-target cross-compilation passed. The Windows GNU
+check reported existing target-specific warnings. The Windows MSVC build
+stopped in `ring` because this host lacks the Windows SDK header `assert.h`;
+that target remains unqualified. Cross-compilation does not establish runtime
+filesystem support, so other operating systems and filesystem types remain
+unqualified until separately tested.
+
+Focused LLVM line coverage in the latest compatible merged profile reached
+100% in `resolve_control_extraction`, 95.38% in
+`resolve_extraction_from_inventory`, and 93.27% in the CLI
+`parse_extraction`. It also measured 94.29% in the shared verified byte-copy
+loop, 98.08% in `prepare_control_runtime`, 97.22% in
+`copy_control_selected_span`, and 97.96% in `validate_bundle_tree`. The RomFS
+inventory normalizer reached 82.66%, and execution-time key derivation reached
+75.61%; both were below the 90% target. A later direct stale-evidence test
+passed and covers changed program identity, section-counter, and NCA-header
+rejection. Its raw profile uses format version 11, which the available LLVM
+profile tools reject because they expect version 10, so the listed profile
+percentages exclude that test. The normalizer's measured misses are defensive
+overflow, path-budget, and malformed-record branches behind bounded
+validation. All six new inventory allocation reservations were refused
+individually in tests and returned typed resource-limit errors without
+changing the inputs or creating a destination.
+
+Neither extraction profile claims Nintendo authenticity, Full Verification,
+or installation eligibility. Program extraction does not support encrypted
+partitions or RomFS. Control extraction supports only its qualified profile.
+Neither adds package or container extraction, repacking, or Restoration. See
 [Inspection architecture](inspection.md),
 [publication architecture](publication.md), and
 [ADR-0024: versioned extracted-content manifests](../adr/0024-versioned-extracted-content-manifests.md)

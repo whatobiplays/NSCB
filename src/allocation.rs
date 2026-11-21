@@ -25,6 +25,12 @@ pub(crate) enum AllocationSite {
     ControlRomfsTraversal,
     ControlRomfsNames,
     ControlRomfsExtents,
+    ControlRomfsExtractionDirectoryPaths,
+    ControlRomfsExtractionTraversal,
+    ControlRomfsExtractionTraversalPathBytes,
+    ControlRomfsExtractionDirectoryPathBytes,
+    ControlRomfsExtractionFiles,
+    ControlRomfsExtractionFilePathBytes,
 }
 
 /// Reserves additional vector capacity and retains the reservation's test site.

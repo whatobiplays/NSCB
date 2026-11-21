@@ -79,6 +79,24 @@ pub(crate) struct ControlNcaQualificationFacts {
     pub(crate) hash_operations: u64,
 }
 
+/// Validated RomFS names and byte spans used only by standalone extraction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ControlNcaExtractionInventory {
+    pub(crate) metadata: ControlNcaExtractionMetadata,
+    pub(crate) directories: Vec<String>,
+    pub(crate) files: Vec<crate::inspection::NativeNcaFileSpan>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ControlNcaExtractionMetadata {
+    pub(crate) program_id: u64,
+    pub(crate) content_index: u32,
+    pub(crate) partition_index: u8,
+    pub(crate) partition_offset: u64,
+    pub(crate) partition_size: u64,
+    pub(crate) section_ctr: [u8; 8],
+}
+
 /// A path-backed request for bounded Control NCA integrity qualification.
 #[derive(Clone)]
 pub(crate) struct ControlNcaQualificationRequest {
@@ -86,6 +104,27 @@ pub(crate) struct ControlNcaQualificationRequest {
     key_file: PathBuf,
     cancellation: Option<crate::CancellationHandle>,
     expected_key_snapshot: Option<FileSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+struct QualificationControl<'a> {
+    cancellation: Option<&'a crate::CancellationHandle>,
+}
+
+#[derive(Clone, Copy)]
+enum ControlQualificationOutput {
+    Facts,
+    ExtractionInventory,
+}
+
+enum QualifiedProfileOutcome {
+    Qualified {
+        facts: ControlNcaQualificationFacts,
+    },
+    QualifiedForExtraction {
+        inventory: ControlNcaExtractionInventory,
+    },
+    NotQualified(ControlNcaQualificationReason),
 }
 
 impl ControlNcaQualificationRequest {
@@ -293,13 +332,11 @@ fn open_file(
     })
 }
 
-fn check_cancelled(
-    request: &ControlNcaQualificationRequest,
-) -> Result<(), ControlNcaQualificationError> {
-    if request
+fn check_cancelled(control: &QualificationControl<'_>) -> Result<(), ControlNcaQualificationError> {
+    if control
         .cancellation
         .as_ref()
-        .is_some_and(crate::CancellationHandle::is_cancelled)
+        .is_some_and(|cancellation| cancellation.is_cancelled())
     {
         return Err(ControlNcaQualificationError::new(
             ControlNcaQualificationErrorCode::Cancelled,
@@ -402,14 +439,17 @@ fn qualify_inner<F>(
 where
     F: FnMut(Checkpoint),
 {
-    check_cancelled(&request)?;
+    let control = QualificationControl {
+        cancellation: request.cancellation.as_ref(),
+    };
+    check_cancelled(&control)?;
     let mut input = open_file(
         &request.input,
         ControlNcaQualificationErrorCode::InputUnavailable,
         ControlNcaQualificationErrorCode::InputChangedDuringQualification,
     )?;
     checkpoint(Checkpoint::InputOpened);
-    check_cancelled(&request)?;
+    check_cancelled(&control)?;
     let qualification_size = input_span
         .as_ref()
         .map_or(input.size, |(_, length, _)| *length);
@@ -450,7 +490,7 @@ where
         ControlNcaQualificationErrorCode::KeyFileUnavailable,
     )?;
     checkpoint(Checkpoint::KeysRead);
-    check_cancelled(&request)?;
+    check_cancelled(&control)?;
 
     let result = match input_span {
         Some((offset, length, _)) => {
@@ -465,13 +505,13 @@ where
                     ControlNcaQualificationErrorCode::InputChangedDuringQualification,
                 )
             })?;
-            qualify_opened(&mut bounded, length, &keys, &request, checkpoint)
+            qualify_opened(&mut bounded, length, &keys, &control, checkpoint)
         }
-        None => qualify_opened(&mut input.file, input.size, &keys, &request, checkpoint),
+        None => qualify_opened(&mut input.file, input.size, &keys, &control, checkpoint),
     };
     if result.is_ok() {
         checkpoint(Checkpoint::BeforeFinalRevalidation);
-        check_cancelled(&request)?;
+        check_cancelled(&control)?;
         input.revalidate(
             ControlNcaQualificationErrorCode::InputChangedDuringQualification,
             ControlNcaQualificationErrorCode::InputUnavailable,
@@ -480,7 +520,7 @@ where
             ControlNcaQualificationErrorCode::KeyFileChangedDuringQualification,
             ControlNcaQualificationErrorCode::KeyFileUnavailable,
         )?;
-        check_cancelled(&request)?;
+        check_cancelled(&control)?;
     }
     result
 }
@@ -489,13 +529,141 @@ fn qualify_opened<R, F>(
     input: &mut R,
     input_size: u64,
     keys: &NspQualificationKeys,
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
     checkpoint: &mut F,
 ) -> Result<ControlNcaQualificationOutcome, ControlNcaQualificationError>
 where
     R: Read + Seek,
     F: FnMut(Checkpoint),
 {
+    match qualify_opened_profile(
+        input,
+        input_size,
+        keys,
+        control,
+        ControlQualificationOutput::Facts,
+        checkpoint,
+    )? {
+        QualifiedProfileOutcome::Qualified { facts, .. } => {
+            Ok(ControlNcaQualificationOutcome::Qualified(facts))
+        }
+        QualifiedProfileOutcome::QualifiedForExtraction { .. } => Err(
+            ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo),
+        ),
+        QualifiedProfileOutcome::NotQualified(reason) => {
+            Ok(ControlNcaQualificationOutcome::NotQualified(reason))
+        }
+    }
+}
+
+/// Qualifies one open source handle and returns its private extraction inventory.
+pub(crate) fn qualify_for_extraction_opened<R>(
+    input: &mut R,
+    input_size: u64,
+    keys: &NspQualificationKeys,
+    cancellation: &crate::CancellationHandle,
+) -> Result<
+    Result<ControlNcaExtractionInventory, ControlNcaQualificationReason>,
+    ControlNcaQualificationError,
+>
+where
+    R: Read + Seek,
+{
+    let control = QualificationControl {
+        cancellation: Some(cancellation),
+    };
+    let mut checkpoint = |_| {};
+    match qualify_opened_profile(
+        input,
+        input_size,
+        keys,
+        &control,
+        ControlQualificationOutput::ExtractionInventory,
+        &mut checkpoint,
+    )? {
+        QualifiedProfileOutcome::QualifiedForExtraction { inventory, .. } => Ok(Ok(inventory)),
+        QualifiedProfileOutcome::Qualified { .. } => Err(ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InternalIo,
+        )),
+        QualifiedProfileOutcome::NotQualified(reason) => Ok(Err(reason)),
+    }
+}
+
+pub(crate) fn derive_control_extraction_key<R: Read + Seek>(
+    input: &mut R,
+    input_size: u64,
+    keys: &NspQualificationKeys,
+    expected: &ControlNcaExtractionMetadata,
+) -> Result<Zeroizing<[u8; 16]>, ControlNcaQualificationError> {
+    check_input_size(input_size)?;
+    let block =
+        nca::read_header_block(input, input_size, keys.header_key.as_bytes()).map_err(|error| {
+            ControlNcaQualificationError::new(match error {
+                HeaderError::AllocationFailed => ControlNcaQualificationErrorCode::AllocationFailed,
+                HeaderError::InputUnavailable => ControlNcaQualificationErrorCode::InputUnavailable,
+                _ => ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+            })
+        })?;
+    let block = Zeroizing::new(block);
+    let header = nca::parse_header_block(&block, input_size).map_err(|error| {
+        ControlNcaQualificationError::new(match error {
+            HeaderError::AllocationFailed => ControlNcaQualificationErrorCode::AllocationFailed,
+            HeaderError::InputUnavailable => ControlNcaQualificationErrorCode::InputUnavailable,
+            _ => ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+        })
+    })?;
+    let partition = supported_partition(&block, &header).map_err(|_| {
+        ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+        )
+    })?;
+    let fs = &block[0x400..0x600];
+    let _layout = parse_ivfc_layout(
+        &fs[IVFC_HEADER_IN_FS..IVFC_HEADER_IN_FS + IVFC_HEADER_SIZE],
+        partition.size,
+    )
+    .map_err(|_| {
+        ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+        )
+    })?;
+    if block[0x230..0x240].iter().any(|byte| *byte != 0)
+        || !crate::verification::fs_header_hash_matches(&block, usize::from(partition.index))
+        || header.program_id != expected.program_id
+        || header.content_index != expected.content_index
+        || partition.index != expected.partition_index
+        || partition.offset != expected.partition_offset
+        || partition.size != expected.partition_size
+    {
+        return Err(ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+        ));
+    }
+    let mut section_ctr = [0_u8; 8];
+    section_ctr.copy_from_slice(&fs[0x140..0x148]);
+    if section_ctr != expected.section_ctr {
+        return Err(ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InputChangedDuringQualification,
+        ));
+    }
+    decrypt_key_area_slot2(&block[0x300..0x340], keys.application_kaek.as_bytes()).ok_or_else(
+        || ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo),
+    )
+}
+
+fn qualify_opened_profile<R, F>(
+    input: &mut R,
+    input_size: u64,
+    keys: &NspQualificationKeys,
+    control: &QualificationControl<'_>,
+    output: ControlQualificationOutput,
+    checkpoint: &mut F,
+) -> Result<QualifiedProfileOutcome, ControlNcaQualificationError>
+where
+    R: Read + Seek,
+    F: FnMut(Checkpoint),
+{
+    check_input_size(input_size)?;
     let block = match nca::read_header_block(input, input_size, keys.header_key.as_bytes()) {
         Ok(block) => block,
         Err(
@@ -503,7 +671,7 @@ where
             | HeaderError::TruncatedInput
             | HeaderError::MalformedInput,
         ) => {
-            return Ok(ControlNcaQualificationOutcome::NotQualified(
+            return Ok(QualifiedProfileOutcome::NotQualified(
                 ControlNcaQualificationReason::InvalidNcaHeader,
             ));
         }
@@ -520,7 +688,7 @@ where
     };
     let block = Zeroizing::new(block);
     checkpoint(Checkpoint::HeaderRead);
-    check_cancelled(request)?;
+    check_cancelled(control)?;
     let header = match nca::parse_header_block(&block, input_size) {
         Ok(header) => header,
         Err(HeaderError::InputUnavailable) => {
@@ -534,28 +702,28 @@ where
             ));
         }
         Err(_) => {
-            return Ok(ControlNcaQualificationOutcome::NotQualified(
+            return Ok(QualifiedProfileOutcome::NotQualified(
                 ControlNcaQualificationReason::InvalidNcaHeader,
             ));
         }
     };
     if block[0x230..0x240].iter().any(|byte| *byte != 0) {
-        return Ok(ControlNcaQualificationOutcome::NotQualified(
+        return Ok(QualifiedProfileOutcome::NotQualified(
             ControlNcaQualificationReason::RightsBearingContent,
         ));
     }
     let partition = match supported_partition(&block, &header) {
         Ok(partition) => partition,
-        Err(reason) => return Ok(ControlNcaQualificationOutcome::NotQualified(reason)),
+        Err(reason) => return Ok(QualifiedProfileOutcome::NotQualified(reason)),
     };
     let fs = &block[0x400..0x600];
     let ivfc_bytes = &fs[IVFC_HEADER_IN_FS..IVFC_HEADER_IN_FS + IVFC_HEADER_SIZE];
     let layout = match parse_ivfc_layout(ivfc_bytes, partition.size) {
         Ok(layout) => layout,
-        Err(reason) => return Ok(ControlNcaQualificationOutcome::NotQualified(reason)),
+        Err(reason) => return Ok(QualifiedProfileOutcome::NotQualified(reason)),
     };
     if !crate::verification::fs_header_hash_matches(&block, usize::from(partition.index)) {
-        return Ok(ControlNcaQualificationOutcome::NotQualified(
+        return Ok(QualifiedProfileOutcome::NotQualified(
             ControlNcaQualificationReason::InvalidNcaHeader,
         ));
     }
@@ -576,27 +744,62 @@ where
         &mut section,
         &layout,
         &ivfc_bytes[0xc0..0xe0],
-        request,
+        control,
         checkpoint,
     )? {
         Ok(count) => count,
-        Err(reason) => return Ok(ControlNcaQualificationOutcome::NotQualified(reason)),
+        Err(reason) => return Ok(QualifiedProfileOutcome::NotQualified(reason)),
     };
-    let romfs = match validate_romfs(&mut section, layout.levels[5], request, checkpoint)? {
+    let romfs = match validate_romfs(
+        &mut section,
+        layout.levels[5],
+        partition.offset,
+        partition.size,
+        output,
+        control,
+        checkpoint,
+    )? {
         Ok(stats) => stats,
-        Err(reason) => return Ok(ControlNcaQualificationOutcome::NotQualified(reason)),
+        Err(reason) => return Ok(QualifiedProfileOutcome::NotQualified(reason)),
     };
-    Ok(ControlNcaQualificationOutcome::Qualified(
-        ControlNcaQualificationFacts {
-            profile: ControlNcaQualificationProfile::RightsFreeControlRomFsV1,
-            program_id: header.program_id,
-            section_size: partition.size,
-            romfs_size: layout.levels[5].size,
-            directory_count: romfs.directory_count,
-            file_count: romfs.file_count,
-            hash_operations,
-        },
-    ))
+    match (output, romfs) {
+        (
+            ControlQualificationOutput::Facts,
+            RomFsStats::Facts {
+                directory_count,
+                file_count,
+            },
+        ) => Ok(QualifiedProfileOutcome::Qualified {
+            facts: ControlNcaQualificationFacts {
+                profile: ControlNcaQualificationProfile::RightsFreeControlRomFsV1,
+                program_id: header.program_id,
+                section_size: partition.size,
+                romfs_size: layout.levels[5].size,
+                directory_count,
+                file_count,
+                hash_operations,
+            },
+        }),
+        (ControlQualificationOutput::ExtractionInventory, RomFsStats::Extraction { tree }) => {
+            Ok(QualifiedProfileOutcome::QualifiedForExtraction {
+                inventory: ControlNcaExtractionInventory {
+                    metadata: ControlNcaExtractionMetadata {
+                        program_id: header.program_id,
+                        content_index: header.content_index,
+                        partition_index: partition.index,
+                        partition_offset: partition.offset,
+                        partition_size: partition.size,
+                        section_ctr,
+                    },
+                    directories: tree.directories,
+                    files: tree.files,
+                },
+            })
+        }
+        _ => Err(ControlNcaQualificationError::new(
+            ControlNcaQualificationErrorCode::InternalIo,
+        )),
+    }
 }
 
 fn supported_partition<'a>(
@@ -743,7 +946,7 @@ fn verify_ivfc<S, F>(
     section: &mut S,
     layout: &IvfcLayout,
     master_hash: &[u8],
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
     checkpoint: &mut F,
 ) -> Result<Result<u64, ControlNcaQualificationReason>, ControlNcaQualificationError>
 where
@@ -795,7 +998,7 @@ where
         root_padding_offset,
         root_padding_size,
         &mut hash_buffer,
-        request,
+        control,
     )? {
         Ok(()) => {}
         Err(reason) => return Ok(Err(reason)),
@@ -826,7 +1029,7 @@ where
             parent_padding_offset,
             parent_padding_size,
             &mut hash_buffer,
-            request,
+            control,
         )? {
             Ok(()) => {}
             Err(reason) => return Ok(Err(reason)),
@@ -837,7 +1040,7 @@ where
         let hashes_per_chunk = (hash_buffer.len() / 32) as u64;
         let mut first_block = 0_u64;
         while first_block < block_count {
-            check_cancelled(request)?;
+            check_cancelled(control)?;
             let count = (block_count - first_block).min(hashes_per_chunk);
             let hash_bytes = usize::try_from(count.checked_mul(32).ok_or_else(|| {
                 ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
@@ -856,7 +1059,7 @@ where
             read_exact_at(section, table_offset, &mut hash_buffer[..hash_bytes])?;
 
             for local_index in 0..count {
-                check_cancelled(request)?;
+                check_cancelled(control)?;
                 let block_index = first_block.checked_add(local_index).ok_or_else(|| {
                     ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
                 })?;
@@ -915,7 +1118,7 @@ where
         trailing_offset,
         layout.trailing_padding,
         &mut hash_buffer,
-        request,
+        control,
     )? {
         Ok(()) => Ok(Ok(operations)),
         Err(reason) => Ok(Err(reason)),
@@ -927,11 +1130,11 @@ fn verify_zero_range<S: Read + Seek>(
     offset: u64,
     length: u64,
     buffer: &mut [u8],
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<Result<(), ControlNcaQualificationReason>, ControlNcaQualificationError> {
     let mut consumed = 0_u64;
     while consumed < length {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let count =
             usize::try_from((length - consumed).min(buffer.len() as u64)).map_err(|_| {
                 ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
@@ -963,10 +1166,19 @@ fn read_exact_at<S: Read + Seek>(
         })
 }
 
-#[derive(Clone, Copy)]
-struct RomFsStats {
-    directory_count: usize,
-    file_count: usize,
+struct RomFsExtractionTree {
+    directories: Vec<String>,
+    files: Vec<crate::inspection::NativeNcaFileSpan>,
+}
+
+enum RomFsStats {
+    Facts {
+        directory_count: usize,
+        file_count: usize,
+    },
+    Extraction {
+        tree: RomFsExtractionTree,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -1023,6 +1235,17 @@ struct FileRecord {
     size: u64,
 }
 
+/// Validated RomFS records and offsets needed to produce file spans.
+struct RomFsExtractionInput<'a> {
+    metadata: &'a [u8],
+    directories: &'a [DirectoryRecord],
+    files: &'a [FileRecord],
+    data_offset: u64,
+    level_offset: u64,
+    partition_offset: u64,
+    partition_size: u64,
+}
+
 trait HashedRecord {
     fn name_hash_record(&self) -> &NameHashRecord;
 }
@@ -1048,14 +1271,17 @@ impl HashedRecord for FileRecord {
 fn validate_romfs<S, F>(
     section: &mut S,
     romfs: IvfcLevel,
-    request: &ControlNcaQualificationRequest,
+    partition_offset: u64,
+    partition_size: u64,
+    output: ControlQualificationOutput,
+    control: &QualificationControl<'_>,
     checkpoint: &mut F,
 ) -> Result<Result<RomFsStats, ControlNcaQualificationReason>, ControlNcaQualificationError>
 where
     S: Read + Seek,
     F: FnMut(Checkpoint),
 {
-    check_cancelled(request)?;
+    check_cancelled(control)?;
     let mut header_bytes = Zeroizing::new([0_u8; ROMFS_HEADER_SIZE]);
     read_exact_at(section, romfs.offset, &mut header_bytes[..])?;
     let header_size = read_u64(&header_bytes[..], 0);
@@ -1175,14 +1401,14 @@ where
         (header.file_hash_offset, file_hash_range.clone()),
         (header.file_meta_offset, file_meta_range.clone()),
     ] {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let absolute = romfs.offset.checked_add(source_offset).ok_or_else(|| {
             ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
         })?;
         read_exact_at(section, absolute, &mut tables[destination])?;
     }
     checkpoint(Checkpoint::RomFsMetadata);
-    check_cancelled(request)?;
+    check_cancelled(control)?;
 
     let directory_meta = &tables[directory_meta_range.clone()];
     let file_meta = &tables[file_meta_range.clone()];
@@ -1191,13 +1417,13 @@ where
         ROMFS_DIRECTORY_RECORD_SIZE,
         20,
         true,
-        request,
+        control,
     )?
     else {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
     };
     let Some(file_count) =
-        scan_record_count(file_meta, ROMFS_FILE_RECORD_SIZE, 28, false, request)?
+        scan_record_count(file_meta, ROMFS_FILE_RECORD_SIZE, 28, false, control)?
     else {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
     };
@@ -1213,12 +1439,12 @@ where
         directory_meta,
         directory_meta_range.start,
         directory_count,
-        request,
+        control,
     )? {
         Some(records) => records,
         None => return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph)),
     };
-    let files = match parse_file_records(file_meta, file_meta_range.start, file_count, request)? {
+    let files = match parse_file_records(file_meta, file_meta_range.start, file_count, control)? {
         Some(records) => records,
         None => return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph)),
     };
@@ -1232,7 +1458,7 @@ where
         &directories,
         &tables,
         &mut visited[..directory_count],
-        request,
+        control,
     )? {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
     }
@@ -1243,15 +1469,15 @@ where
         &files,
         &tables,
         &mut visited[..file_count],
-        request,
+        control,
     )? {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
     }
     visited.fill(0);
-    if !validate_graph(&directories, &files, &mut visited, request)? {
+    if !validate_graph(&directories, &files, &mut visited, control)? {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
     }
-    if !validate_unique_names(&directories, &files, &tables, combined_count, request)? {
+    if !validate_unique_names(&directories, &files, &tables, combined_count, control)? {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
     }
     // File data ends at the directory hash table, which follows the file partition.
@@ -1259,14 +1485,31 @@ where
         &files,
         header.data_offset,
         header.directory_hash_offset,
-        request,
+        control,
     )? {
         return Ok(Err(ControlNcaQualificationReason::InvalidRomFsExtent));
     }
-    Ok(Ok(RomFsStats {
-        directory_count,
-        file_count,
-    }))
+    match output {
+        ControlQualificationOutput::Facts => Ok(Ok(RomFsStats::Facts {
+            directory_count,
+            file_count,
+        })),
+        ControlQualificationOutput::ExtractionInventory => match normalize_romfs_tree(
+            RomFsExtractionInput {
+                metadata: &tables,
+                directories: &directories,
+                files: &files,
+                data_offset: header.data_offset,
+                level_offset: romfs.offset,
+                partition_offset,
+                partition_size,
+            },
+            control,
+        )? {
+            Ok(tree) => Ok(Ok(RomFsStats::Extraction { tree })),
+            Err(reason) => Ok(Err(reason)),
+        },
+    }
 }
 
 fn scan_record_count(
@@ -1274,12 +1517,12 @@ fn scan_record_count(
     fixed_size: usize,
     name_size_offset: usize,
     directory_table: bool,
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<Option<usize>, ControlNcaQualificationError> {
     let mut position = 0_usize;
     let mut count = 0_usize;
     while position < bytes.len() {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let Some(remaining) = bytes.len().checked_sub(position) else {
             return Ok(None);
         };
@@ -1348,7 +1591,7 @@ fn parse_directory_records(
     bytes: &[u8],
     table_start: usize,
     record_count: usize,
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<Option<Vec<DirectoryRecord>>, ControlNcaQualificationError> {
     let mut records = Vec::new();
     reserve_exact(
@@ -1361,7 +1604,7 @@ fn parse_directory_records(
     })?;
     let mut position = 0_usize;
     while position < bytes.len() {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let record_size = usize::try_from(read_u32(bytes, position + 20)).map_err(|_| {
             ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
         })?;
@@ -1402,7 +1645,7 @@ fn parse_file_records(
     bytes: &[u8],
     table_start: usize,
     record_count: usize,
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<Option<Vec<FileRecord>>, ControlNcaQualificationError> {
     let mut records = Vec::new();
     reserve_exact(
@@ -1415,7 +1658,7 @@ fn parse_file_records(
     })?;
     let mut position = 0_usize;
     while position < bytes.len() {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let name_size = usize::try_from(read_u32(bytes, position + 28)).map_err(|_| {
             ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
         })?;
@@ -1457,7 +1700,7 @@ fn validate_hash_chains<T: HashedRecord>(
     records: &[T],
     metadata: &[u8],
     visited: &mut [u8],
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<bool, ControlNcaQualificationError> {
     if table.len() < 4 || !table.len().is_multiple_of(4) || visited.len() < records.len() {
         return Ok(false);
@@ -1465,11 +1708,11 @@ fn validate_hash_chains<T: HashedRecord>(
     visited[..records.len()].fill(0);
     let bucket_count = table.len() / 4;
     for bucket in 0..bucket_count {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let mut current = read_u32(table, bucket * 4);
         let mut traversed = 0_usize;
         while current != ROMFS_EMPTY {
-            check_cancelled(request)?;
+            check_cancelled(control)?;
             let Ok(index) =
                 records.binary_search_by_key(&current, |record| record.name_hash_record().offset)
             else {
@@ -1508,7 +1751,7 @@ fn validate_graph(
     directories: &[DirectoryRecord],
     files: &[FileRecord],
     visited: &mut [u8],
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<bool, ControlNcaQualificationError> {
     let Some(root) = directories.first() else {
         return Ok(false);
@@ -1534,12 +1777,12 @@ fn validate_graph(
     })?;
     stack.push(0_usize);
     while let Some(parent_index) = stack.pop() {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         let parent = &directories[parent_index];
         let mut current = parent.child_directory;
         let mut steps = 0_usize;
         while current != ROMFS_EMPTY {
-            check_cancelled(request)?;
+            check_cancelled(control)?;
             let Ok(index) = directories.binary_search_by_key(&current, |record| record.name.offset)
             else {
                 return Ok(false);
@@ -1560,7 +1803,7 @@ fn validate_graph(
         current = parent.child_file;
         steps = 0;
         while current != ROMFS_EMPTY {
-            check_cancelled(request)?;
+            check_cancelled(control)?;
             let Ok(index) = files.binary_search_by_key(&current, |record| record.name.offset)
             else {
                 return Ok(false);
@@ -1593,7 +1836,7 @@ fn validate_unique_names(
     files: &[FileRecord],
     metadata: &[u8],
     record_count: usize,
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<bool, ControlNcaQualificationError> {
     let mut names = Vec::new();
     reserve_exact(
@@ -1605,7 +1848,7 @@ fn validate_unique_names(
         ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
     })?;
     for (index, record) in directories.iter().enumerate().skip(1) {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         names.push(NameReference {
             is_directory: true,
             index,
@@ -1613,14 +1856,14 @@ fn validate_unique_names(
         });
     }
     for (index, record) in files.iter().enumerate() {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         names.push(NameReference {
             is_directory: false,
             index,
             parent: record.name.parent,
         });
     }
-    check_cancelled(request)?;
+    check_cancelled(control)?;
     names.sort_unstable_by(|left, right| {
         left.parent.cmp(&right.parent).then_with(|| {
             name_for_reference(*left, directories, files, metadata).cmp(name_for_reference(
@@ -1632,7 +1875,7 @@ fn validate_unique_names(
         })
     });
     for pair in names.windows(2) {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         if pair[0].parent == pair[1].parent
             && name_for_reference(pair[0], directories, files, metadata)
                 == name_for_reference(pair[1], directories, files, metadata)
@@ -1667,7 +1910,7 @@ fn validate_file_extents(
     files: &[FileRecord],
     data_offset: u64,
     file_data_end: u64,
-    request: &ControlNcaQualificationRequest,
+    control: &QualificationControl<'_>,
 ) -> Result<bool, ControlNcaQualificationError> {
     if file_data_end < data_offset {
         return Ok(false);
@@ -1683,7 +1926,7 @@ fn validate_file_extents(
         ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
     })?;
     for file in files {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         if file.data_offset % 16 != 0
             || file.data_offset > available
             || file.size > available - file.data_offset
@@ -1700,17 +1943,252 @@ fn validate_file_extents(
             extents.push(FileExtent { start, end });
         }
     }
-    check_cancelled(request)?;
+    check_cancelled(control)?;
     extents.sort_unstable_by_key(|extent| (extent.start, extent.end));
     let mut previous_end = data_offset;
     for extent in extents {
-        check_cancelled(request)?;
+        check_cancelled(control)?;
         if extent.start < previous_end {
             return Ok(false);
         }
         previous_end = extent.end;
     }
     Ok(true)
+}
+
+fn normalize_romfs_tree(
+    input: RomFsExtractionInput<'_>,
+    control: &QualificationControl<'_>,
+) -> Result<Result<RomFsExtractionTree, ControlNcaQualificationReason>, ControlNcaQualificationError>
+{
+    let RomFsExtractionInput {
+        metadata,
+        directories,
+        files,
+        data_offset,
+        level_offset,
+        partition_offset,
+        partition_size,
+    } = input;
+
+    let mut paths = Vec::new();
+    reserve_exact(
+        &mut paths,
+        directories.len(),
+        AllocationSite::ControlRomfsExtractionDirectoryPaths,
+    )
+    .map_err(|_| {
+        ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
+    })?;
+    paths.resize_with(directories.len(), String::new);
+    let Some(root_path) = paths.first_mut() else {
+        return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+    };
+    crate::allocation::reserve_string_exact(
+        root_path,
+        1,
+        AllocationSite::ControlRomfsExtractionDirectoryPathBytes,
+    )
+    .map_err(|_| {
+        ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
+    })?;
+    root_path.push('0');
+
+    let mut stack = Vec::new();
+    reserve_exact(
+        &mut stack,
+        directories.len(),
+        AllocationSite::ControlRomfsExtractionTraversal,
+    )
+    .map_err(|_| {
+        ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
+    })?;
+    stack.push(0_usize);
+    let mut traversal_path_bytes = 1_usize;
+    let mut visited_directories = 1_usize;
+    while let Some(parent_index) = stack.pop() {
+        check_cancelled(control)?;
+        let parent = directories[parent_index];
+        let mut current = parent.child_directory;
+        let mut steps = 0_usize;
+        while current != ROMFS_EMPTY {
+            check_cancelled(control)?;
+            let Ok(index) = directories.binary_search_by_key(&current, |record| record.name.offset)
+            else {
+                return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+            };
+            if index == 0 || !paths[index].is_empty() || steps >= directories.len() {
+                return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+            }
+            let record = directories[index];
+            let name_end = record.name.name_start.checked_add(record.name.name_size);
+            let Some(name_bytes) =
+                name_end.and_then(|end| metadata.get(record.name.name_start..end))
+            else {
+                return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+            };
+            let Ok(name) = std::str::from_utf8(name_bytes) else {
+                return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+            };
+            let child_path = {
+                let Some(parent_path) = paths
+                    .get(parent_index)
+                    .filter(|path| !path.is_empty())
+                    .map(String::as_str)
+                else {
+                    return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+                };
+                join_romfs_path(
+                    parent_path,
+                    name,
+                    AllocationSite::ControlRomfsExtractionTraversalPathBytes,
+                )?
+            };
+            traversal_path_bytes = traversal_path_bytes
+                .checked_add(child_path.len())
+                .ok_or_else(|| {
+                    ControlNcaQualificationError::new(
+                        ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+                    )
+                })?;
+            if traversal_path_bytes > crate::partition_fs::MAX_TOTAL_PATH_BYTES {
+                return Err(ControlNcaQualificationError::new(
+                    ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+                ));
+            }
+            paths[index] = child_path;
+            visited_directories = visited_directories.checked_add(1).ok_or_else(|| {
+                ControlNcaQualificationError::new(
+                    ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+                )
+            })?;
+            stack.push(index);
+            current = record.sibling;
+            steps += 1;
+        }
+    }
+    if visited_directories != directories.len() {
+        return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+    }
+
+    let mut normalized_path_bytes = traversal_path_bytes;
+    let mut normalized_files = Vec::new();
+    reserve_exact(
+        &mut normalized_files,
+        files.len(),
+        AllocationSite::ControlRomfsExtractionFiles,
+    )
+    .map_err(|_| {
+        ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
+    })?;
+    let partition_end = partition_offset
+        .checked_add(partition_size)
+        .ok_or_else(|| {
+            ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
+        })?;
+    for file in files {
+        check_cancelled(control)?;
+        let Ok(parent_index) =
+            directories.binary_search_by_key(&file.name.parent, |record| record.name.offset)
+        else {
+            return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+        };
+        let name_end = file.name.name_start.checked_add(file.name.name_size);
+        let Some(name_bytes) = name_end.and_then(|end| metadata.get(file.name.name_start..end))
+        else {
+            return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+        };
+        let Ok(name) = std::str::from_utf8(name_bytes) else {
+            return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+        };
+        let Some(parent_path) = paths
+            .get(parent_index)
+            .and_then(|path| relative_romfs_directory_path(path))
+        else {
+            return Ok(Err(ControlNcaQualificationReason::InvalidRomFsGraph));
+        };
+        let file_path = join_romfs_path(
+            parent_path,
+            name,
+            AllocationSite::ControlRomfsExtractionFilePathBytes,
+        )?;
+        let manifest_path_size = file_path.len().checked_add(2).ok_or_else(|| {
+            ControlNcaQualificationError::new(
+                ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+            )
+        })?;
+        normalized_path_bytes = normalized_path_bytes
+            .checked_add(manifest_path_size)
+            .ok_or_else(|| {
+                ControlNcaQualificationError::new(
+                    ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+                )
+            })?;
+        if normalized_path_bytes > crate::partition_fs::MAX_TOTAL_PATH_BYTES {
+            return Err(ControlNcaQualificationError::new(
+                ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+            ));
+        }
+        let section_offset = level_offset
+            .checked_add(data_offset)
+            .and_then(|offset| offset.checked_add(file.data_offset))
+            .ok_or_else(|| {
+                ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
+            })?;
+        let absolute_offset = partition_offset
+            .checked_add(section_offset)
+            .ok_or_else(|| {
+                ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
+            })?;
+        let absolute_end = absolute_offset.checked_add(file.size).ok_or_else(|| {
+            ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::InternalIo)
+        })?;
+        if absolute_offset < partition_offset || absolute_end > partition_end {
+            return Ok(Err(ControlNcaQualificationReason::InvalidRomFsExtent));
+        }
+        normalized_files.push(crate::inspection::NativeNcaFileSpan {
+            partition_index: 0,
+            path: file_path,
+            offset: absolute_offset,
+            size: file.size,
+        });
+    }
+    Ok(Ok(RomFsExtractionTree {
+        directories: paths,
+        files: normalized_files,
+    }))
+}
+
+fn join_romfs_path(
+    parent: &str,
+    name: &str,
+    site: AllocationSite,
+) -> Result<String, ControlNcaQualificationError> {
+    let separator_size = usize::from(!parent.is_empty());
+    let capacity = parent
+        .len()
+        .checked_add(separator_size)
+        .and_then(|size| size.checked_add(name.len()))
+        .ok_or_else(|| {
+            ControlNcaQualificationError::new(
+                ControlNcaQualificationErrorCode::ResourceLimitExceeded,
+            )
+        })?;
+    let mut path = String::new();
+    crate::allocation::reserve_string_exact(&mut path, capacity, site).map_err(|_| {
+        ControlNcaQualificationError::new(ControlNcaQualificationErrorCode::AllocationFailed)
+    })?;
+    path.push_str(parent);
+    if separator_size != 0 {
+        path.push('/');
+    }
+    path.push_str(name);
+    Ok(path)
+}
+
+fn relative_romfs_directory_path(path: &str) -> Option<&str> {
+    path.strip_prefix("0/")
+        .or_else(|| (path == "0").then_some(""))
 }
 
 fn allocate_zeroed_bytes(

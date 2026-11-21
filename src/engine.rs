@@ -81,11 +81,12 @@ impl Engine {
         crate::operation::plan_multi_content_split(request)
     }
 
-    /// Resolves a native Program NCA into an immutable content extraction plan.
+    /// Resolves a supported standalone Program or Control NCA into an immutable extraction plan.
     ///
-    /// Planning validates the supported NCA and PartitionFs profile, resolves
-    /// the requested selection, and records source and key-file evidence. The
-    /// plan is executable only on native macOS arm64 with local writable APFS.
+    /// Planning validates the qualified Program/PartitionFs or rights-free
+    /// Control/IVFC/RomFS profile, resolves the requested selection, and
+    /// records source and key-file evidence. Execution is supported only on
+    /// native macOS arm64 with local writable APFS.
     pub fn plan_extraction(
         &self,
         request: ExtractionRequest,

@@ -2,12 +2,14 @@
 
 ## Scope
 
-`control_nca_qualification` checks one crate-private, read-only Control NCA
-profile. A qualified result reports the NCA program ID, section and RomFS
-sizes, directory and file counts, and the number of IVFC hash operations. It
-does not establish signatures, Nintendo authenticity, installability, full
-Verification, or readiness for conversion. Issue #16 Slice B owns conversion,
-CNMT and member relationships, planning, and publication.
+`control_nca_qualification` checks one crate-private Control NCA profile. Its
+qualification result reports the NCA program ID, section and RomFS sizes,
+directory and file counts, and the number of IVFC hash operations. The
+standalone extraction path can also request a private tree and file-span
+inventory from that qualification pass. Neither result establishes
+signatures, Nintendo authenticity, installability, full Verification, or
+readiness for conversion. Issue #16 Slice B owns conversion, CNMT and member
+relationships, planning, and publication.
 
 The production code uses NSCB's NCA header parser and key-file reader. The
 private `nca_crypto` module supplies only the shared key-area slot-two decryptor
@@ -118,6 +120,29 @@ Tests rebuild the IVFC tree after changing RomFS bytes. Graph and extent
 failures therefore reach the RomFS validator instead of failing at an earlier
 hash level.
 
+## Extraction inventory
+
+The extraction-only qualifier entry point uses the same header, IVFC, and
+RomFS checks. It creates directory paths and file spans from the records that
+passed those checks. A file span is bounded by the accepted partition and
+section, and its CTR offset is relative to the start of the Control section.
+This path does not add a second RomFS parser or relax the qualification rules.
+
+Planning reads selected file spans as plaintext through the existing bounded
+AES-CTR reader and records a digest for each file. The private operation plan
+keeps span offsets, digests, and non-secret section metadata; it does not keep
+the section key. Execution derives the key again from the verified source and
+key files, streams each span through AES-CTR, and checks the staged file digest
+against the planning digest. Source and key evidence is checked again before
+publication. The extraction inventory is not exposed through Inspection or
+Verification.
+
+Control `All` selection includes every validated directory and can publish a
+complete bundle when the tree has no files. Explicit selector requests must
+match at least one file. The shared portable-path checks apply to selected
+names, while valid UTF-8 names that are not portable may remain unselected if
+they do not make a selected path ambiguous.
+
 ## Source, key, and failure handling
 
 Input and key files are opened read-only and must be regular files. The
@@ -157,7 +182,7 @@ span. The verifier treats and checks that stored padding separately.
 | PAC-2: complete IVFC verification | Master hash and all six descriptor levels have corruption cases. Malformed IDs, counts, exponents, offsets, alignment, overlap, overflow, out-of-bounds spans, padding, and filesystem-header digest are rejected. |
 | PAC-3: RomFS graph and extents | Rebuilt trees cover malformed tables and records, bucket-chain and sibling cycles, dangling links, duplicate names, invalid parents, unreachable records, and invalid file extents. |
 | PAC-4: bounded read-only behavior | Tests cover cancellation checkpoints, missing and mutated input/key files, expected key snapshots, unchanged file bytes and snapshots, resource ceilings, allocation refusal at each tagged site, typed failures, and key/path redaction. |
-| PAC-5: compatibility | Crypto-helper tests cover arbitrary CTR read offsets, counter boundaries, and key-area behavior. The existing NSP semantic qualifier suite and repository regression suites exercise preserved behavior. No public API, CLI, JSON/JSONL, Verification, or conversion path is added. |
+| PAC-5: compatibility | Crypto-helper tests cover arbitrary CTR read offsets, counter boundaries, and key-area behavior. The existing NSP semantic qualifier suite and repository regression suites exercise preserved behavior. The qualifier remains private and does not change public Inspection or Verification results; Control extraction's additive selectors and manifest values are covered below. |
 | TAC-1: documented parser and resource limits | Accepted profile, parser constraints, padding rules, checked budgets, and the operation ceiling are documented above. |
 | TAC-2: independent synthetic fixtures | Test fixtures are generated at runtime from fixed synthetic keys and byte arrays; they contain no retail content or proprietary keys. |
 | TAC-3: candidate-bound qualification | The Issue #79 run record documents the exact source candidate, toolchain, commands, exit statuses, coverage, and platform results. |
@@ -165,3 +190,20 @@ span. The verifier treats and checks that stored padding separately.
 
 Issue #79 lists four TAC bullets without numeric identifiers. TAC-1 through
 TAC-4 above follow the order of those bullets in the issue.
+
+## Control extraction acceptance
+
+The qualification criteria above establish the Control profile. The following
+criteria cover its use by standalone extraction.
+
+| Criterion | Evidence |
+| --- | --- |
+| PAC-B1: profile and selector behavior | Engine tests cover complete and selective byte-exact extraction, directory-only trees, zero-length files, selector misses, case mismatches, type mismatches, path aliases, and unselected nonportable names. CLI tests cover `--role control` and `--nca-type control`. |
+| PAC-B2: deterministic manifests | Engine tests compare complete and incomplete Control manifest bytes across separate output bundles and check the completeness value. Existing Program extraction tests continue to cover manifest ordering and serialization. |
+| PAC-B3: integrity and file correspondence | Qualification tests corrupt the master hash and each IVFC level. Engine tests reject a corrupt IVFC tree before planning and compare extracted file bytes to independently built synthetic RomFS content. |
+| PAC-B4: traversal and publication safety | RomFS tests reject malformed tables, links, duplicate names, invalid parents, unreachable records, and out-of-range file extents. Extraction publication tests cover staged symlinks, FIFOs, hard links, destination races, uncertainty retention, and cleanup. |
+| PAC-B5: bounds, mutation, and cancellation | Tests cover input, metadata, record, allocation, selector, and hash-operation limits; each of the six extraction-inventory reservations is refused at its tagged site and maps to a resource-limit error; source mutation and key replacement after payload copying at `BeforeAtomicPromotion`; source and key mutation or replacement after planning; a source change between reads rejected by the shared verified-copy digest check; cancellation; destination conflicts; and unchanged input bytes after allocation refusal. |
+| TAC-B1: synthetic inputs | Fixtures use fixed synthetic keys and generated NCA/RomFS bytes; they contain no retail content or proprietary keys. |
+| TAC-B2: native qualification | Native macOS arm64/APFS runs passed 39 Control qualification and extraction tests, 20 extraction operation tests, 7 extraction CLI tests, and 9 partition-path budget tests using rights-free synthetic fixtures. The Control group includes a direct execution-time stale-evidence test. |
+| TAC-B3: build and coverage | `make all` passed. All-target Linux GNU and Windows GNU checks passed; Windows MSVC stops in `ring` because this host lacks Windows SDK `assert.h`, so that target remains unqualified. An earlier merged LLVM profile measured line coverage of `resolve_control_extraction` 100%, `resolve_extraction_from_inventory` 95.38%, CLI `parse_extraction` 93.27%, `normalize_romfs_tree` 82.66%, `join_romfs_path` 95.45%, `prepare_control_runtime` 98.08%, `verify_control_key_handle` 90.91%, `copy_selected_span` 96.97%, `copy_verified_selected_bytes` 94.29%, `copy_control_selected_span` 97.22%, `write_extraction_tree` 98.33%, `validate_bundle_tree` 97.96%, and `derive_control_extraction_key` 75.61%. Those measurements predate the stale-evidence test and the final directory-path storage correction, so they do not describe the final source. The refreshed native coverage run instrumented 647 library tests, 10 Engine tests, and 7 CLI tests. Xcode LLVM 21.0.0 `llvm-profdata` expects raw profile version 10, while Rust 1.98.1 emitted version 11; the merge failed and produced no updated percentages. The earlier measurements put `normalize_romfs_tree` and `derive_control_extraction_key` below the 90% target. The current tests exercise stale program identity, section-counter, and NCA-header rejection during key derivation. Each of the six inventory allocation refusal sites is also exercised directly. |
+| TAC-B4: review and CI | Independent review covers the complete Control extraction diff and its corrections. Required CI checks must pass on the final commit. The pull request records review findings and CI results. |
