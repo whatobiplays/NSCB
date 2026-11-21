@@ -915,6 +915,19 @@ fn path_and_operation_owned_inputs_produce_equivalent_qualification_facts() {
     assert_eq!(facts.cnmt_program_content_id, evidence.program_content_id);
     assert_eq!(program.size, evidence.member_size);
     assert_eq!(program.sha256, evidence.member_sha256);
+    let snapshot = serde_json::to_value(plan.snapshot())
+        .expect("serialize the qualified extraction plan snapshot");
+    let title_id = crate::inspection::ProgramId::from_u64(evidence.title_id).to_hex();
+    let content_id =
+        crate::extraction::NcaContentId::from_bytes(evidence.program_content_id).to_hex();
+    assert_eq!(
+        snapshot["extraction_container"],
+        serde_json::json!({
+            "profile": "rights_free_base_application_v1",
+            "title_id": title_id,
+            "program_content_id": content_id
+        })
+    );
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

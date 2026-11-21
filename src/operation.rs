@@ -1319,6 +1319,9 @@ pub struct OperationPlanSnapshot {
     content_groups: Vec<PlannedContentGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extraction_manifest: Option<crate::extraction::ExtractionManifest>,
+    /// Verified identity of the package containing an extracted NSP Program.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_container: Option<crate::extraction::ExtractionManifestContainer>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     output_paths: Vec<PathBuf>,
     destination: PathBuf,
@@ -4238,6 +4241,7 @@ fn plan_multi_content_build_unix(
         sources,
         content_groups: snapshot_content_groups(&source),
         extraction_manifest: None,
+        extraction_container: None,
         output_paths: vec![destination.path.clone()],
         destination: destination.path.clone(),
         workspace: environment.workspace.path.clone(),
@@ -4455,6 +4459,7 @@ fn plan_multi_content_split_unix(
         sources,
         content_groups: snapshot_content_groups(&source),
         extraction_manifest: None,
+        extraction_container: None,
         output_paths,
         destination: destination.path.clone(),
         workspace: environment.workspace.path.clone(),
@@ -4807,6 +4812,7 @@ fn plan_copy_through_unix_for_output_inner(
         sources: Vec::new(),
         content_groups: Vec::new(),
         extraction_manifest: None,
+        extraction_container: None,
         output_paths: Vec::new(),
         destination: destination.path.clone(),
         workspace: workspace.path.clone(),

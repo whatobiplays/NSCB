@@ -159,9 +159,20 @@ pub(super) struct ExtractionOperationPlan {
     selected_files: Vec<SelectedExtractionSpan>,
     directories: Vec<String>,
     manifest: crate::extraction::ExtractionManifest,
+    manifest_container: Option<crate::extraction::ExtractionManifestContainer>,
     profile: ExtractionProfile,
     nsp_evidence: Option<crate::nsp_semantic_qualification::NspProgramExtractionEvidence>,
     total_bytes: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl ExtractionOperationPlan {
+    fn manifest_json_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        match &self.manifest_container {
+            Some(container) => self.manifest.to_json_bytes_with_container(container),
+            None => self.manifest.to_json_bytes(),
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -651,6 +662,7 @@ pub(super) fn plan(
     let stage_path = workspace.path.join(&stage_directory_name);
     let destination_name = OsStr::new("bundle");
     let destination_state = DestinationBaseline::Absent;
+    let manifest_container = resolved.container;
     let manifest = resolved.manifest;
     let child_path_count = resolved
         .directories
@@ -698,6 +710,7 @@ pub(super) fn plan(
         sources: Vec::new(),
         content_groups: Vec::new(),
         extraction_manifest: Some(manifest.clone()),
+        extraction_container: manifest_container.clone(),
         output_paths,
         destination: destination.path.clone(),
         workspace: workspace.path.clone(),
@@ -816,6 +829,7 @@ pub(super) fn plan(
             selected_files,
             directories: resolved.directories,
             manifest,
+            manifest_container,
             profile,
             nsp_evidence,
             total_bytes,
@@ -1395,8 +1409,7 @@ pub(super) fn execute_unix(
     ensure_destination_absent(&destination_directory, &plan.destination.name)?;
 
     let manifest_bytes = extraction
-        .manifest
-        .to_json_bytes()
+        .manifest_json_bytes()
         .map_err(|_| OperationFailureCode::ValidationFailed)?;
     let required_space = extraction
         .total_bytes
@@ -2136,8 +2149,7 @@ pub(super) fn validate_published_bundle_tree(
     extraction: &ExtractionOperationPlan,
 ) -> Result<(), OperationFailureCode> {
     let manifest_bytes = extraction
-        .manifest
-        .to_json_bytes()
+        .manifest_json_bytes()
         .map_err(|_| OperationFailureCode::ValidationFailed)?;
     validate_bundle_tree(bundle, extraction, &manifest_bytes, None)
 }
@@ -2230,7 +2242,7 @@ fn validate_bundle_tree(
             actual_files.push(relative.clone());
             if relative == "manifest.json" {
                 validate_regular_file_at(&directory, name, |manifest_file| {
-                    validate_manifest_file(manifest_file, &extraction.manifest, manifest_bytes)
+                    validate_manifest_file(manifest_file, manifest_bytes)
                 })
             } else {
                 let payload_path = relative
@@ -2299,7 +2311,6 @@ fn single_link_file_identity(file: &File) -> Result<(u64, u64), OperationFailure
 #[cfg(target_os = "macos")]
 fn validate_manifest_file(
     file: &mut File,
-    manifest: &crate::extraction::ExtractionManifest,
     expected_bytes: &[u8],
 ) -> Result<(), OperationFailureCode> {
     let observed_length = file
@@ -2328,8 +2339,8 @@ fn validate_manifest_file(
     }
     let parsed: serde_json::Value =
         serde_json::from_slice(&observed).map_err(|_| OperationFailureCode::ValidationFailed)?;
-    let expected =
-        serde_json::to_value(manifest).map_err(|_| OperationFailureCode::ValidationFailed)?;
+    let expected: serde_json::Value = serde_json::from_slice(expected_bytes)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
     if parsed == expected {
         Ok(())
     } else {

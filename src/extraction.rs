@@ -309,6 +309,56 @@ impl ExtractionManifest {
         bytes.push(b'\n');
         Ok(bytes)
     }
+
+    /// Serializes a qualified NSP manifest with its verified package identity.
+    pub(crate) fn to_json_bytes_with_container(
+        &self,
+        container: &ExtractionManifestContainer,
+    ) -> Result<Vec<u8>, serde_json::Error> {
+        let source = &self.source;
+        let manifest = ExtractionManifestWithContainer {
+            schema_version: self.schema_version,
+            kind: self.kind,
+            selection_mode: self.selection_mode,
+            content_root: self.content_root,
+            required_features: &self.required_features,
+            completeness: self.completeness,
+            source: ExtractionManifestSourceWithContainer {
+                profile: source.profile,
+                role: source.role,
+                nca_type: source.nca_type,
+                program_id: &source.program_id,
+                content_index: source.content_index,
+                container,
+            },
+            partitions: &self.partitions,
+        };
+        let mut bytes = serde_json::to_vec(&manifest)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+}
+
+#[derive(Serialize)]
+struct ExtractionManifestWithContainer<'a> {
+    schema_version: u8,
+    kind: &'static str,
+    selection_mode: ExtractionSelectionMode,
+    content_root: &'static str,
+    required_features: &'a [&'static str],
+    completeness: ExtractionCompleteness,
+    source: ExtractionManifestSourceWithContainer<'a>,
+    partitions: &'a [ExtractionManifestPartition],
+}
+
+#[derive(Serialize)]
+struct ExtractionManifestSourceWithContainer<'a> {
+    profile: &'static str,
+    role: &'static str,
+    nca_type: &'static str,
+    program_id: &'a str,
+    content_index: u32,
+    container: &'a ExtractionManifestContainer,
 }
 
 /// NCA identity and supported extraction role recorded in the manifest.
@@ -324,14 +374,11 @@ pub struct ExtractionManifestSource {
     pub program_id: String,
     /// NCA header content index.
     pub content_index: u32,
-    /// Verified container identity when the source is a qualified package.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub container: Option<ExtractionManifestContainer>,
 }
 
 /// Verified identity of the containing application package.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub struct ExtractionManifestContainer {
+pub(crate) struct ExtractionManifestContainer {
     /// Semantic package profile.
     pub profile: &'static str,
     /// Canonical lowercase 16-digit title identity.
@@ -370,6 +417,8 @@ pub(crate) struct ResolvedExtraction {
     pub(crate) directories: Vec<String>,
     /// Manifest matching the selected files and directories.
     pub(crate) manifest: ExtractionManifest,
+    /// Verified package identity included in the published NSP manifest.
+    pub(crate) container: Option<ExtractionManifestContainer>,
 }
 
 /// Errors found while resolving selectors or validating the published tree names.
@@ -743,6 +792,7 @@ fn resolve_extraction_from_inventory(
     Ok(ResolvedExtraction {
         selected_files,
         directories,
+        container: inventory.container,
         manifest: ExtractionManifest {
             schema_version: 1,
             kind: "extracted_content_manifest",
@@ -763,7 +813,6 @@ fn resolve_extraction_from_inventory(
                 nca_type: inventory.nca_type_name,
                 program_id: source_program_id.to_hex(),
                 content_index: inventory.content_index,
-                container: inventory.container,
             },
             partitions: manifest_partitions,
         },
@@ -1358,12 +1407,21 @@ mod planning_tests {
             "nca3_program_partition_fs_hierarchical_sha256_aes_ctr"
         );
         assert_eq!(
-            resolved.manifest.source.container,
+            resolved.container,
             Some(ExtractionManifestContainer {
                 profile: "rights_free_base_application_v1",
                 title_id: "0100123456789abc".to_owned(),
                 program_content_id: "22222222222222222222222222222222".to_owned(),
             })
+        );
+        let serialized = resolved
+            .manifest
+            .to_json_bytes_with_container(resolved.container.as_ref().unwrap())
+            .unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(
+            manifest["source"]["container"]["title_id"],
+            "0100123456789abc"
         );
         assert_eq!(
             resolved.manifest.partitions[0].files[0].path,
@@ -1397,7 +1455,6 @@ mod planning_tests {
                 nca_type: "program",
                 program_id: "0102030405060708".to_owned(),
                 content_index: 0,
-                container: None,
             },
             partitions: vec![ExtractionManifestPartition {
                 index: 0,
