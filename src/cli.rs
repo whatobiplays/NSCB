@@ -15,11 +15,11 @@ use nscb::{
     CopyThroughRequest, Engine, ExtractionRequest, ExtractionSelection, ExtractionSelectors,
     InputResolutionCapabilities, InputResolutionControl, InputResolutionRequest, InputSelection,
     InputSelectionSource, InspectionErrorCode, InspectionHost, InspectionPreflightStatus,
-    InspectionRequest, InspectionResult, JobState, LocalSplitTrustStore, NcaContentType,
-    OperationEventConsumer, OperationEventKind, OperationFailureCode, OperationPlan,
-    OperationResult, OperationSession, OperationSessionSnapshot, ProgramId, SplitQualificationKind,
-    SplitRequest, SplitTrustWriter, VerificationErrorCode, VerificationProfile,
-    VerificationRequest,
+    InspectionRequest, InspectionResult, JobState, LocalSplitTrustStore, NcaContentId,
+    NcaContentType, OperationEventConsumer, OperationEventKind, OperationFailureCode,
+    OperationPlan, OperationResult, OperationSession, OperationSessionSnapshot, ProgramId,
+    SplitQualificationKind, SplitRequest, SplitTrustWriter, VerificationErrorCode,
+    VerificationProfile, VerificationRequest,
 };
 use serde::Serialize;
 use std::ffi::{OsStr, OsString};
@@ -36,8 +36,9 @@ const EXIT_CANCELLED: i32 = 6;
 const EXIT_INTERNAL: i32 = 7;
 const EXIT_COMPLETED_WITH_ISSUES: i32 = 8;
 const EXTRACTION_USAGE: &str = concat!(
-    "Usage: nscb extract --source NCA [--keys FILE] [--output-directory NEW_DIR] (--all | SELECTORS) [--json | --jsonl]\n",
-    "Selectors: [--program-id 16-HEX-DIGITS] [--nca-type program|control | --role program|control]\n",
+    "Usage: nscb extract --source NCA|NSP [--keys FILE] [--output-directory NEW_DIR] (--all | SELECTORS) [--json | --jsonl]\n",
+    "Selectors: [--program-id 16-HEX-DIGITS] [--title-id 16-HEX-DIGITS] [--nca-content-id 32-HEX-DIGITS]\n",
+    "           [--nca-type program|control | --role program|control]\n",
     "           [--partition 0..3]... [--path RELATIVE_PATH]...\n",
     "Use --all or at least one selector. Different selector dimensions combine with AND; repeated partition and path values combine with OR."
 );
@@ -83,7 +84,7 @@ mod extraction_cli_contract_tests {
 #[cfg(test)]
 mod extraction_cli_parser_tests {
     use super::parse_extraction;
-    use nscb::{ExtractionSelection, NcaContentType, ProgramId};
+    use nscb::{ExtractionSelection, NcaContentId, NcaContentType, ProgramId};
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
 
@@ -103,6 +104,10 @@ mod extraction_cli_parser_tests {
             "bundle",
             "--program-id",
             "0102030405060708",
+            "--title-id",
+            "0100123456789abc",
+            "--nca-content-id",
+            "00112233445566778899aabbccddeeff",
             "--nca-type",
             "program",
             "--partition",
@@ -128,6 +133,17 @@ mod extraction_cli_parser_tests {
         assert_eq!(
             selectors.program_id(),
             Some(ProgramId::from_u64(0x0102_0304_0506_0708))
+        );
+        assert_eq!(
+            selectors.title_id(),
+            Some(ProgramId::from_u64(0x0100_1234_5678_9abc))
+        );
+        assert_eq!(
+            selectors.nca_content_id(),
+            Some(
+                NcaContentId::from_hex("00112233445566778899aabbccddeeff")
+                    .expect("valid NCA ContentId")
+            )
         );
         assert_eq!(selectors.nca_type(), Some(NcaContentType::Program));
         assert_eq!(selectors.partitions(), &[0, 3]);
@@ -228,6 +244,48 @@ mod extraction_cli_parser_tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn rejects_malformed_or_repeated_qualified_identity_selectors() {
+        for (option, value) in [
+            ("--title-id", "0100123456789abg"),
+            ("--title-id", "0100123456789ab"),
+            ("--nca-content-id", "00112233445566778899aabbccddeefg"),
+            ("--nca-content-id", "00112233445566778899aabbccddeef"),
+        ] {
+            assert!(
+                parse_extraction(&args(&[
+                    "extract",
+                    "--source",
+                    "package.nsp",
+                    option,
+                    value
+                ]))
+                .is_err()
+            );
+        }
+        for (option, first, second) in [
+            ("--title-id", "0100123456789abc", "0100123456789abd"),
+            (
+                "--nca-content-id",
+                "00112233445566778899aabbccddeeff",
+                "10112233445566778899aabbccddeeff",
+            ),
+        ] {
+            assert!(
+                parse_extraction(&args(&[
+                    "extract",
+                    "--source",
+                    "package.nsp",
+                    option,
+                    first,
+                    option,
+                    second,
+                ]))
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -2182,6 +2240,26 @@ fn parse_extraction(args: &[OsString]) -> Result<ExtractionInvocation, ()> {
                 .ok_or(())?;
             let parsed = ProgramId::from_hex(value).map_err(|_| ())?;
             selectors = selectors.with_program_id(parsed);
+        } else if argument == OsStr::new("--title-id") {
+            if selectors.title_id().is_some() {
+                return Err(());
+            }
+            let value = arguments
+                .next()
+                .and_then(|value| value.to_str())
+                .ok_or(())?;
+            let parsed = ProgramId::from_hex(value).map_err(|_| ())?;
+            selectors = selectors.with_title_id(parsed);
+        } else if argument == OsStr::new("--nca-content-id") {
+            if selectors.nca_content_id().is_some() {
+                return Err(());
+            }
+            let value = arguments
+                .next()
+                .and_then(|value| value.to_str())
+                .ok_or(())?;
+            let parsed = NcaContentId::from_hex(value).map_err(|_| ())?;
+            selectors = selectors.with_nca_content_id(parsed);
         } else if argument == OsStr::new("--nca-type") || argument == OsStr::new("--role") {
             if selectors.nca_type().is_some() {
                 return Err(());
@@ -2233,6 +2311,8 @@ fn parse_extraction(args: &[OsString]) -> Result<ExtractionInvocation, ()> {
         return Err(());
     }
     let has_selector = selectors.program_id().is_some()
+        || selectors.title_id().is_some()
+        || selectors.nca_content_id().is_some()
         || selectors.nca_type().is_some()
         || !selectors.partitions().is_empty()
         || !selectors.paths().is_empty();

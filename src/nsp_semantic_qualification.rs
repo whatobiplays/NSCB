@@ -318,7 +318,7 @@ impl NspSemanticQualificationResult {
 }
 
 #[derive(Clone, Copy)]
-enum Checkpoint {
+pub(crate) enum Checkpoint {
     SourceHashChunk,
     SourceHashed,
     MemberStarted,
@@ -406,10 +406,79 @@ struct SourceDigests {
 struct NcaRecord {
     role: NcaRole,
     title_id: u64,
+    content_index: u32,
     member_size: u64,
     member_sha256: Sha256Digest,
     member_offset: u64,
     cnmt: Option<CnmtApplication>,
+    program_section: Option<NspProgramSectionEvidence>,
+}
+
+/// One checked PFS0 file span relative to its decrypted NCA section.
+pub(crate) struct NspProgramPfs0Entry {
+    pub(crate) name: String,
+    pub(crate) section_offset: u64,
+    pub(crate) size: u64,
+}
+
+struct NspProgramSectionEvidence {
+    partition_offset: u64,
+    partition_size: u64,
+    pfs0_offset: u64,
+    pfs0_size: u64,
+    section_ctr: [u8; 8],
+    section_key: Zeroizing<[u8; 16]>,
+    files: Vec<NspProgramPfs0Entry>,
+}
+
+/// Qualification facts required to plan encrypted Program extraction.
+///
+/// The source digest, NSP member range, NCA section parameters, and validated
+/// PFS0 spans all come from one `NspSemanticInput` qualification pass.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct NspProgramExtractionEvidence {
+    pub(crate) source_sha256: Sha256Digest,
+    pub(crate) source_size: u64,
+    pub(crate) title_id: u64,
+    pub(crate) content_index: u32,
+    pub(crate) program_content_id: [u8; 16],
+    pub(crate) member_offset: u64,
+    pub(crate) member_size: u64,
+    pub(crate) member_sha256: Sha256Digest,
+    pub(crate) partition_offset: u64,
+    pub(crate) partition_size: u64,
+    pub(crate) pfs0_offset: u64,
+    pub(crate) pfs0_size: u64,
+    pub(crate) section_ctr: [u8; 8],
+    pub(crate) section_key: Zeroizing<[u8; 16]>,
+    pub(crate) files: Vec<NspProgramPfs0Entry>,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl NspProgramExtractionEvidence {
+    /// Checks whether fresh qualification reconstructed the planned identity.
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        self.source_sha256 == other.source_sha256
+            && self.source_size == other.source_size
+            && self.title_id == other.title_id
+            && self.content_index == other.content_index
+            && self.program_content_id == other.program_content_id
+            && self.member_offset == other.member_offset
+            && self.member_size == other.member_size
+            && self.member_sha256 == other.member_sha256
+            && self.partition_offset == other.partition_offset
+            && self.partition_size == other.partition_size
+            && self.pfs0_offset == other.pfs0_offset
+            && self.pfs0_size == other.pfs0_size
+            && self.section_ctr == other.section_ctr
+            && self.section_key.as_ref() == other.section_key.as_ref()
+            && self.files.len() == other.files.len()
+            && self.files.iter().zip(&other.files).all(|(left, right)| {
+                left.name == right.name
+                    && left.section_offset == right.section_offset
+                    && left.size == right.size
+            })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -664,11 +733,68 @@ where
     I: NspSemanticInput,
     F: FnMut(Checkpoint),
 {
+    let (result, _) = qualify_input_inner_with_key_loader(
+        request,
+        input,
+        load_qualification_keys_from_path,
+        false,
+        checkpoint,
+    )?;
+    Ok(result)
+}
+
+/// Qualifies one already-open input for extraction using operation-owned keys.
+///
+/// The caller supplies the same anchored source handle used to capture its
+/// `FileEvidence`, plus a key loader bound to the operation's anchored key
+/// handle. A `None` result means the package did not meet the supported
+/// semantic profile.
+#[cfg(target_os = "macos")]
+pub(crate) fn qualify_opened_for_extraction<I, K, F>(
+    request: NspSemanticQualificationRequest,
+    input: I,
+    key_loader: K,
+    checkpoint: &mut F,
+) -> Result<Option<NspProgramExtractionEvidence>, NspSemanticQualificationError>
+where
+    I: NspSemanticInput,
+    K: FnMut(
+        &NspSemanticQualificationRequest,
+    ) -> Result<NspQualificationKeys, NspSemanticQualificationError>,
+    F: FnMut(Checkpoint),
+{
+    let (_, evidence) =
+        qualify_input_inner_with_key_loader(request, input, key_loader, true, checkpoint)?;
+    Ok(evidence)
+}
+
+fn qualify_input_inner_with_key_loader<I, K, F>(
+    request: NspSemanticQualificationRequest,
+    input: I,
+    mut key_loader: K,
+    capture_extraction_evidence: bool,
+    checkpoint: &mut F,
+) -> Result<
+    (
+        NspSemanticQualificationResult,
+        Option<NspProgramExtractionEvidence>,
+    ),
+    NspSemanticQualificationError,
+>
+where
+    I: NspSemanticInput,
+    K: FnMut(
+        &NspSemanticQualificationRequest,
+    ) -> Result<NspQualificationKeys, NspSemanticQualificationError>,
+    F: FnMut(Checkpoint),
+{
     match collect_nsp_input_evidence(
         &request,
         input,
         MemberQualificationProfile::MetaProgram,
         checkpoint,
+        capture_extraction_evidence,
+        &mut key_loader,
     )? {
         NspInputEvidence::NotQualified {
             input,
@@ -676,9 +802,9 @@ where
             reason,
         } => {
             input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
-            Ok(NspSemanticQualificationResult::not_qualified(
-                source_sha256,
-                reason,
+            Ok((
+                NspSemanticQualificationResult::not_qualified(source_sha256, reason),
+                None,
             ))
         }
         NspInputEvidence::Qualified {
@@ -687,39 +813,54 @@ where
             records,
         } => {
             let Some(meta) = records.iter().find(|record| record.role == NcaRole::Meta) else {
-                return Ok(NspSemanticQualificationResult::not_qualified(
-                    source_sha256,
-                    NspSemanticQualificationReason::UnsupportedMemberSet,
+                return Ok((
+                    NspSemanticQualificationResult::not_qualified(
+                        source_sha256,
+                        NspSemanticQualificationReason::UnsupportedMemberSet,
+                    ),
+                    None,
                 ));
             };
             let Some(program) = records
                 .iter()
                 .find(|record| record.role == NcaRole::Program)
             else {
-                return Ok(NspSemanticQualificationResult::not_qualified(
-                    source_sha256,
-                    NspSemanticQualificationReason::UnsupportedMemberSet,
+                return Ok((
+                    NspSemanticQualificationResult::not_qualified(
+                        source_sha256,
+                        NspSemanticQualificationReason::UnsupportedMemberSet,
+                    ),
+                    None,
                 ));
             };
             let Some(cnmt) = meta.cnmt else {
-                return Ok(NspSemanticQualificationResult::not_qualified(
-                    source_sha256,
-                    NspSemanticQualificationReason::UnsupportedCnmtProfile,
+                return Ok((
+                    NspSemanticQualificationResult::not_qualified(
+                        source_sha256,
+                        NspSemanticQualificationReason::UnsupportedCnmtProfile,
+                    ),
+                    None,
                 ));
             };
             let Some(program_row) = cnmt.rows[0] else {
-                return Ok(NspSemanticQualificationResult::not_qualified(
-                    source_sha256,
-                    NspSemanticQualificationReason::UnsupportedCnmtProfile,
+                return Ok((
+                    NspSemanticQualificationResult::not_qualified(
+                        source_sha256,
+                        NspSemanticQualificationReason::UnsupportedCnmtProfile,
+                    ),
+                    None,
                 ));
             };
             if records.len() != 2
                 || meta.member_offset == program.member_offset
                 || cnmt.row_count != 1
             {
-                return Ok(NspSemanticQualificationResult::not_qualified(
-                    source_sha256,
-                    NspSemanticQualificationReason::UnsupportedMemberSet,
+                return Ok((
+                    NspSemanticQualificationResult::not_qualified(
+                        source_sha256,
+                        NspSemanticQualificationReason::UnsupportedMemberSet,
+                    ),
+                    None,
                 ));
             }
             if meta.title_id != program.title_id
@@ -727,9 +868,12 @@ where
                 || program.title_id != cnmt.title_id
                 || !cnmt_row_matches_member(&program_row, program, 1)
             {
-                return Ok(NspSemanticQualificationResult::not_qualified(
-                    source_sha256,
-                    NspSemanticQualificationReason::ProgramRelationshipMismatch,
+                return Ok((
+                    NspSemanticQualificationResult::not_qualified(
+                        source_sha256,
+                        NspSemanticQualificationReason::ProgramRelationshipMismatch,
+                    ),
+                    None,
                 ));
             }
 
@@ -749,21 +893,65 @@ where
             checkpoint(Checkpoint::QualificationFinished);
             check_cancelled(&request)?;
             input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
-            Ok(NspSemanticQualificationResult {
-                source_sha256,
-                outcome: NspSemanticQualificationOutcome::Qualified(
-                    NspSemanticQualificationFacts {
-                        profile: NspSemanticQualificationProfile::RightsFreeBaseApplicationV1,
-                        title_id: cnmt.title_id,
-                        cnmt_version: cnmt.version,
-                        required_download_system_version: cnmt.required_download_system_version,
-                        required_system_version: cnmt.required_system_version,
-                        required_application_version: cnmt.required_application_version,
-                        cnmt_program_content_id: program_row.content_id,
-                        members,
-                    },
-                ),
-            })
+            let extraction_evidence = if capture_extraction_evidence {
+                let section = program.program_section.as_ref().ok_or_else(|| {
+                    NspSemanticQualificationError::new(
+                        NspSemanticQualificationErrorCode::InternalIo,
+                    )
+                })?;
+                let mut files = try_reserve_vec(section.files.len(), AllocationSite::NspMembers)?;
+                for file in &section.files {
+                    let mut name = String::new();
+                    name.try_reserve_exact(file.name.len()).map_err(|_| {
+                        NspSemanticQualificationError::new(
+                            NspSemanticQualificationErrorCode::AllocationFailed,
+                        )
+                    })?;
+                    name.push_str(&file.name);
+                    files.push(NspProgramPfs0Entry {
+                        name,
+                        section_offset: file.section_offset,
+                        size: file.size,
+                    });
+                }
+                Some(NspProgramExtractionEvidence {
+                    source_sha256,
+                    source_size: input.input_size(),
+                    title_id: cnmt.title_id,
+                    content_index: program.content_index,
+                    program_content_id: program_row.content_id,
+                    member_offset: program.member_offset,
+                    member_size: program.member_size,
+                    member_sha256: program.member_sha256,
+                    partition_offset: section.partition_offset,
+                    partition_size: section.partition_size,
+                    pfs0_offset: section.pfs0_offset,
+                    pfs0_size: section.pfs0_size,
+                    section_ctr: section.section_ctr,
+                    section_key: section.section_key.clone(),
+                    files,
+                })
+            } else {
+                None
+            };
+            Ok((
+                NspSemanticQualificationResult {
+                    source_sha256,
+                    outcome: NspSemanticQualificationOutcome::Qualified(
+                        NspSemanticQualificationFacts {
+                            profile: NspSemanticQualificationProfile::RightsFreeBaseApplicationV1,
+                            title_id: cnmt.title_id,
+                            cnmt_version: cnmt.version,
+                            required_download_system_version: cnmt.required_download_system_version,
+                            required_system_version: cnmt.required_system_version,
+                            required_application_version: cnmt.required_application_version,
+                            cnmt_program_content_id: program_row.content_id,
+                            members,
+                        },
+                    ),
+                },
+                extraction_evidence,
+            ))
         }
     }
 }
@@ -784,6 +972,8 @@ where
             input,
             MemberQualificationProfile::MetaProgramControl,
             checkpoint,
+            false,
+            &mut load_qualification_keys_from_path,
         )? {
             NspInputEvidence::NotQualified {
                 input,
@@ -969,15 +1159,49 @@ enum NspInputEvidence<I> {
     },
 }
 
-fn collect_nsp_input_evidence<I, F>(
+fn load_qualification_keys_from_path(
+    request: &NspSemanticQualificationRequest,
+) -> Result<NspQualificationKeys, NspSemanticQualificationError> {
+    let mut key_file = open_snapshot_file(
+        &request.key_file,
+        NspSemanticQualificationErrorCode::KeyFileUnavailable,
+        NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
+    )?;
+    #[cfg(target_os = "macos")]
+    if request
+        .expected_key_snapshot
+        .as_ref()
+        .is_some_and(|expected| expected != &key_file.snapshot)
+    {
+        return Err(NspSemanticQualificationError::new(
+            NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
+        ));
+    }
+    if key_file.size > crate::key_file::MAX_KEY_FILE_BYTES {
+        return Err(NspSemanticQualificationError::new(
+            NspSemanticQualificationErrorCode::KeyFileLimitExceeded,
+        ));
+    }
+    let keys = crate::key_file::read_nsp_qualification_keys(&mut key_file.file, key_file.size)
+        .map_err(map_key_file_error)?;
+    key_file.revalidate(NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification)?;
+    Ok(keys)
+}
+
+fn collect_nsp_input_evidence<I, F, K>(
     request: &NspSemanticQualificationRequest,
     mut input: I,
     profile: MemberQualificationProfile,
     checkpoint: &mut F,
+    capture_program_section: bool,
+    key_loader: &mut K,
 ) -> Result<NspInputEvidence<I>, NspSemanticQualificationError>
 where
     I: NspSemanticInput,
     F: FnMut(Checkpoint),
+    K: FnMut(
+        &NspSemanticQualificationRequest,
+    ) -> Result<NspQualificationKeys, NspSemanticQualificationError>,
 {
     check_cancelled(request)?;
     validate_input_size(input.input_size())?;
@@ -1046,29 +1270,7 @@ where
         });
     }
 
-    let mut key_file = open_snapshot_file(
-        &request.key_file,
-        NspSemanticQualificationErrorCode::KeyFileUnavailable,
-        NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
-    )?;
-    #[cfg(target_os = "macos")]
-    if request
-        .expected_key_snapshot
-        .as_ref()
-        .is_some_and(|expected| expected != &key_file.snapshot)
-    {
-        return Err(NspSemanticQualificationError::new(
-            NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification,
-        ));
-    }
-    if key_file.size > crate::key_file::MAX_KEY_FILE_BYTES {
-        return Err(NspSemanticQualificationError::new(
-            NspSemanticQualificationErrorCode::KeyFileLimitExceeded,
-        ));
-    }
-    let keys = crate::key_file::read_nsp_qualification_keys(&mut key_file.file, key_file.size)
-        .map_err(map_key_file_error)?;
-    key_file.revalidate(NspSemanticQualificationErrorCode::KeyFileChangedDuringQualification)?;
+    let keys = key_loader(request)?;
     check_cancelled(request)?;
 
     let digests = hash_source(&mut input, Some(&outer.entries), request, checkpoint)?;
@@ -1088,6 +1290,7 @@ where
             &keys,
             request,
             profile,
+            capture_program_section,
             checkpoint,
         )? {
             ReadDecision::Supported(record) => record,
@@ -1232,7 +1435,7 @@ fn allocate_zeroizing_buffer(
     Ok(buffer)
 }
 
-fn map_key_file_error(error: NspKeyFileError) -> NspSemanticQualificationError {
+pub(crate) fn map_key_file_error(error: NspKeyFileError) -> NspSemanticQualificationError {
     use NspKeyFileError as KeyError;
     let code = match error {
         KeyError::Unavailable => NspSemanticQualificationErrorCode::KeyFileUnavailable,
@@ -1377,6 +1580,7 @@ fn read_nca_member<R, F>(
     keys: &NspQualificationKeys,
     request: &NspSemanticQualificationRequest,
     profile: MemberQualificationProfile,
+    capture_program_section: bool,
     checkpoint: &mut F,
 ) -> Result<ReadDecision<NcaRecord>, NspSemanticQualificationError>
 where
@@ -1457,10 +1661,12 @@ where
         return Ok(ReadDecision::Supported(NcaRecord {
             role,
             title_id: header.program_id,
+            content_index: header.content_index,
             member_size: entry.size,
             member_sha256,
             member_offset: entry.file_offset,
             cnmt: None,
+            program_section: None,
         }));
     }
     if header.partitions.len() != 1
@@ -1588,13 +1794,66 @@ where
         }
         None
     };
+    drop(section);
+    let program_section = if role == NcaRole::Program && capture_program_section {
+        let mut files = try_reserve_vec(probe.entries.len(), AllocationSite::NspMembers)?;
+        let pfs0_end = regions
+            .pfs0_offset
+            .checked_add(regions.pfs0_size)
+            .ok_or_else(|| {
+                NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InternalIo)
+            })?;
+        for entry in &probe.entries {
+            let section_offset = regions
+                .pfs0_offset
+                .checked_add(entry.file_offset)
+                .ok_or_else(|| {
+                    NspSemanticQualificationError::new(
+                        NspSemanticQualificationErrorCode::InternalIo,
+                    )
+                })?;
+            let end = section_offset.checked_add(entry.size).ok_or_else(|| {
+                NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InternalIo)
+            })?;
+            if end > pfs0_end {
+                return Err(NspSemanticQualificationError::new(
+                    NspSemanticQualificationErrorCode::InternalIo,
+                ));
+            }
+            let mut name = String::new();
+            name.try_reserve_exact(entry.name.len()).map_err(|_| {
+                NspSemanticQualificationError::new(
+                    NspSemanticQualificationErrorCode::AllocationFailed,
+                )
+            })?;
+            name.push_str(&entry.name);
+            files.push(NspProgramPfs0Entry {
+                name,
+                section_offset,
+                size: entry.size,
+            });
+        }
+        Some(NspProgramSectionEvidence {
+            partition_offset: partition.offset,
+            partition_size: partition.size,
+            pfs0_offset: regions.pfs0_offset,
+            pfs0_size: regions.pfs0_size,
+            section_ctr,
+            section_key,
+            files,
+        })
+    } else {
+        None
+    };
     Ok(ReadDecision::Supported(NcaRecord {
         role,
         title_id: header.program_id,
+        content_index: header.content_index,
         member_size: entry.size,
         member_sha256,
         member_offset: entry.file_offset,
         cnmt,
+        program_section,
     }))
 }
 
@@ -2103,6 +2362,7 @@ mod tests {
             &keys,
             &request,
             MemberQualificationProfile::MetaProgram,
+            false,
             &mut checkpoint,
         );
         let error = match result {
