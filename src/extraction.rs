@@ -311,6 +311,7 @@ impl ExtractionManifest {
     }
 
     /// Serializes a qualified NSP manifest with its verified package identity.
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn to_json_bytes_with_container(
         &self,
         container: &ExtractionManifestContainer,
@@ -339,6 +340,7 @@ impl ExtractionManifest {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Serialize)]
 struct ExtractionManifestWithContainer<'a> {
     schema_version: u8,
@@ -351,6 +353,7 @@ struct ExtractionManifestWithContainer<'a> {
     partitions: &'a [ExtractionManifestPartition],
 }
 
+#[cfg(any(target_os = "macos", test))]
 #[derive(Serialize)]
 struct ExtractionManifestSourceWithContainer<'a> {
     profile: &'static str,
