@@ -865,6 +865,22 @@ fn operation_owned_nsp_input_checks_identity_size_and_revalidation() {
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[test]
+fn unqualified_nsp_reasons_map_to_input_or_profile_failures() {
+    use crate::nsp_semantic_qualification::NspSemanticQualificationReason as Reason;
+    use crate::operation::OperationFailureCode;
+
+    assert_eq!(
+        super::super::map_nsp_semantic_reason(Reason::InvalidContainerStructure),
+        OperationFailureCode::InvalidContentPackage,
+    );
+    assert_eq!(
+        super::super::map_nsp_semantic_reason(Reason::UnsupportedNcaProfile),
+        OperationFailureCode::UnsupportedContentProfile,
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
 fn path_and_operation_owned_inputs_produce_equivalent_qualification_facts() {
     use crate::nsp_semantic_qualification::{
         NspSemanticQualificationOutcome, NspSemanticQualificationProfile,

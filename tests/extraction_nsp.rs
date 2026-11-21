@@ -173,6 +173,11 @@ fn qualified_identity_selectors_fail_for_mismatches_and_standalone_ncas() {
         ExtractionSelection::selectors(
             ExtractionSelectors::new().with_nca_content_id(wrong_content_id),
         ),
+        ExtractionSelection::selectors(
+            ExtractionSelectors::new()
+                .with_program_id(ProgramId::from_u64(synthetic_nsp_qualification::PROGRAM_ID))
+                .with_title_id(wrong_title_id),
+        ),
     ] {
         let root = tempfile::tempdir().expect("create extraction fixture directory");
         let (source, key_file, destination) = write_fixture(&root, &fixture);

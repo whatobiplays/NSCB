@@ -755,15 +755,21 @@ where
 ///
 /// The caller supplies the same anchored source handle used to capture its
 /// `FileEvidence`, plus a key loader bound to the operation's anchored key
-/// handle. A `None` result means the package did not meet the supported
-/// semantic profile.
+/// handle. The semantic result records why an input did not match the profile;
+/// extraction evidence is present only for a qualified input.
 #[cfg(target_os = "macos")]
 pub(crate) fn qualify_opened_for_extraction<I, K, F>(
     request: NspSemanticQualificationRequest,
     input: I,
     key_loader: K,
     checkpoint: &mut F,
-) -> Result<Option<NspProgramExtractionQualification>, NspSemanticQualificationError>
+) -> Result<
+    (
+        NspSemanticQualificationResult,
+        Option<NspProgramExtractionQualification>,
+    ),
+    NspSemanticQualificationError,
+>
 where
     I: NspSemanticInput,
     K: FnMut(
@@ -771,9 +777,9 @@ where
     ) -> Result<NspQualificationKeys, NspSemanticQualificationError>,
     F: FnMut(Checkpoint),
 {
-    let (_, evidence) =
+    let (result, evidence) =
         qualify_input_inner_with_key_loader(request, input, key_loader, true, checkpoint)?;
-    Ok(evidence)
+    Ok((result, evidence))
 }
 
 fn qualify_input_inner_with_key_loader<I, K, F>(

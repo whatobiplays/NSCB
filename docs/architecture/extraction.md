@@ -271,8 +271,8 @@ through data that may already have been published. Treat that result as a
 manual reconciliation case; a retry may conflict with a bundle that is already
 present. If publication is confirmed but a temporary artifact cannot be
 removed safely, the result can report a cleanup warning and retained evidence
-without changing the confirmed publication outcome. The original NCA and key
-file remain untouched and are never deleted.
+without changing the confirmed publication outcome. The source NCA or NSP and
+key file remain untouched and are never deleted.
 
 In machine mode, `--json` emits one `job.result` for an admitted operation or
 one `error` record for a pre-admission failure. `--jsonl` emits ordered

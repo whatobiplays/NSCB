@@ -355,11 +355,11 @@ fn malformed_nsp_cli_input_fails_without_publishing() {
         "--json".into(),
     ]);
 
-    assert_eq!(output.status.code(), Some(7));
-    assert!(output.stderr.is_empty());
     let error = document(&output);
     assert_eq!(error["kind"], "error");
-    assert_eq!(error["error"]["code"], "staged_output_invalid");
+    assert_eq!(error["error"]["code"], "invalid_content_package");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
     assert!(!destination.exists());
 }
 

@@ -118,26 +118,32 @@ qualification evidence](docs/testing/inspection-qualification.md).
 
 ## Content extraction
 
-The Slice A extraction contract covers one standalone encrypted-header NCA3
-Program with clear, unhashed PartitionFs partitions. It selects by Program ID,
-Program role/NCA type, partition, and exact partition-relative path, then
-records the selected structure in a versioned manifest.
+Program extraction supports standalone encrypted-header NCA3 Programs with
+clear, unhashed PartitionFs partitions. It also supports the Program member of
+an NSP that qualifies as rights_free_base_application_v1. That NSP profile
+uses one NCA3 Program section with AES-CTR and hierarchical SHA-256 validation.
+Extraction selects by Program ID, title ID, NCA ContentId, Program role/NCA
+type, partition, and exact partition-relative path, then records the selected
+structure in a versioned manifest.
 
 ```text
-nscb extract --source <NCA> [--keys <FILE>] [--output-directory <NEW-DIR>] \
-    (--all | [--program-id <16-HEX>] [--nca-type program | --role program] \
+nscb extract --source <NCA|NSP> [--keys <FILE>] [--output-directory <NEW-DIR>] \
+    (--all | [--program-id <16-HEX>] [--title-id <16-HEX>] \
+    [--nca-content-id <32-HEX>] [--nca-type program | --role program] \
     [--partition 0..3]... [--path <PARTITION-RELATIVE-PATH>]...) \
     [--json | --jsonl]
 ```
 
 Repeated partition and path values are ORed within their dimension; populated
 dimensions are combined with AND. Every supplied value must match the final
-selection. The bundle contains `manifest.json` and `content/`. See
-[standalone Program extraction](docs/architecture/extraction.md) for the
-manifest schema, path rules, output naming, validation boundary, cancellation,
-and recovery behavior. The Engine and CLI passed extraction tests on native
-macOS arm64 with writable local APFS and rights-free synthetic keyed fixtures.
-Other operating systems and filesystem types remain unqualified.
+selection. `--program-id` matches the selected NCA's Program ID. `--title-id`
+and `--nca-content-id` require a qualified NSP and match its verified package
+identity. The bundle contains `manifest.json` and `content/`. See [Program and
+Control extraction](docs/architecture/extraction.md) for the manifest schema,
+path rules, supported profiles, cancellation, and recovery behavior. The
+Engine and CLI passed extraction tests on native macOS arm64 with writable
+local APFS and rights-free synthetic keyed fixtures. Other operating systems
+and filesystem types remain unqualified.
 
 ## Content verification
 

@@ -3146,6 +3146,38 @@ fn map_nsp_semantic_error(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn map_nsp_semantic_reason(
+    reason: crate::nsp_semantic_qualification::NspSemanticQualificationReason,
+) -> OperationFailureCode {
+    use crate::nsp_semantic_qualification::NspSemanticQualificationReason as Reason;
+    match reason {
+        Reason::InvalidContainerStructure
+        | Reason::UnaccountedPfs0Payload
+        | Reason::InvalidNcaHeader
+        | Reason::InvalidSectionStructure
+        | Reason::ProgramRelationshipMismatch => OperationFailureCode::InvalidContentPackage,
+        Reason::UnsupportedMemberSet
+        | Reason::UnsupportedNcaProfile
+        | Reason::RightsBearingContent
+        | Reason::UnsupportedCnmtProfile => OperationFailureCode::UnsupportedContentProfile,
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn map_nsp_semantic_qualification_result(
+    result: &crate::nsp_semantic_qualification::NspSemanticQualificationResult,
+) -> OperationFailureCode {
+    match &result.outcome {
+        crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::NotQualified(
+            reason,
+        ) => map_nsp_semantic_reason(*reason),
+        crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::Qualified(_) => {
+            OperationFailureCode::InvalidContentPackage
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn map_nsp_nsz_format_error(
     error: crate::nsp_nsz::NspNszFormatError,
 ) -> OperationFailureCode {

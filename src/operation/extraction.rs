@@ -393,14 +393,21 @@ pub(super) fn plan(
             Ok(keys)
         };
         let mut checkpoint = |_| {};
-        let qualified = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
-            qualification_request,
-            input,
-            &mut key_loader,
-            &mut checkpoint,
-        )
-        .map_err(|error| super::OperationError::new(super::map_nsp_semantic_error(error.code())))?
-        .ok_or_else(|| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+        let (qualification_result, qualified) =
+            crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+                qualification_request,
+                input,
+                &mut key_loader,
+                &mut checkpoint,
+            )
+            .map_err(|error| {
+                super::OperationError::new(super::map_nsp_semantic_error(error.code()))
+            })?;
+        let qualified = qualified.ok_or_else(|| {
+            super::OperationError::new(super::map_nsp_semantic_qualification_result(
+                &qualification_result,
+            ))
+        })?;
         let evidence = qualified.evidence;
         let section_key = qualified.section_key;
         if evidence.source_size != source_baseline.snapshot.len
@@ -1184,14 +1191,16 @@ fn prepare_nsp_program_runtime(
         Ok(keys)
     };
     let mut checkpoint = |_| {};
-    let qualified = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
-        request,
-        input,
-        &mut key_loader,
-        &mut checkpoint,
-    )
-    .map_err(|error| super::map_nsp_semantic_error(error.code()))?
-    .ok_or(OperationFailureCode::ValidationFailed)?;
+    let (qualification_result, qualified) =
+        crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+            request,
+            input,
+            &mut key_loader,
+            &mut checkpoint,
+        )
+        .map_err(|error| super::map_nsp_semantic_error(error.code()))?;
+    let qualified = qualified
+        .ok_or_else(|| super::map_nsp_semantic_qualification_result(&qualification_result))?;
     let crate::nsp_semantic_qualification::NspProgramExtractionQualification {
         evidence,
         section_key,
