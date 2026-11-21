@@ -2029,6 +2029,24 @@ impl OperationSession {
     }
 
     #[cfg(target_os = "macos")]
+    pub(crate) fn execution_cancellation_handle(
+        &self,
+    ) -> Result<CancellationHandle, OperationFailureCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?;
+        let handle = state
+            .execution_cancellation
+            .get_or_insert_with(CancellationHandle::new)
+            .clone();
+        if state.cancel_requested {
+            handle.cancel();
+        }
+        Ok(handle)
+    }
+
+    #[cfg(target_os = "macos")]
     pub(crate) fn record_observed_cancellation(&self) {
         if let Ok(mut state) = self.state.lock()
             && state.cancellation_flag()

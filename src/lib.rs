@@ -87,9 +87,10 @@ pub use engine::{
 };
 pub use error::{ContainerProbeError, ContainerProbeErrorCode};
 pub use extraction::{
-    ExtractionCompleteness, ExtractionManifest, ExtractionManifestFile,
-    ExtractionManifestPartition, ExtractionManifestSource, ExtractionRequest, ExtractionSelection,
-    ExtractionSelectionMode, ExtractionSelectors, is_portable_bundle_leaf,
+    ExtractionCompleteness, ExtractionManifest, ExtractionManifestContainer,
+    ExtractionManifestFile, ExtractionManifestPartition, ExtractionManifestSource,
+    ExtractionRequest, ExtractionSelection, ExtractionSelectionMode, ExtractionSelectors,
+    NcaContentId, NcaContentIdParseError, is_portable_bundle_leaf,
 };
 pub use nsp_semantic_qualification::{
     NspSemanticQualificationError, NspSemanticQualificationErrorCode,
