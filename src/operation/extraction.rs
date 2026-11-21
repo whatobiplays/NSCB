@@ -1142,8 +1142,59 @@ fn prepare_extraction_runtime(
     })
 }
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+type NspQualificationCheckpointObserver =
+    Box<dyn FnMut(crate::nsp_semantic_qualification::Checkpoint)>;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+std::thread_local! {
+    static NSP_QUALIFICATION_CHECKPOINT_OBSERVER: std::cell::RefCell<
+        Option<NspQualificationCheckpointObserver>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+struct NspQualificationCheckpointObserverGuard;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+impl Drop for NspQualificationCheckpointObserverGuard {
+    fn drop(&mut self) {
+        NSP_QUALIFICATION_CHECKPOINT_OBSERVER.with(|observer| {
+            let _ = observer.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+/// Installs an observer for deterministic extraction checkpoint tests.
+fn install_nsp_qualification_checkpoint_observer(
+    observer: impl FnMut(crate::nsp_semantic_qualification::Checkpoint) + 'static,
+) -> NspQualificationCheckpointObserverGuard {
+    NSP_QUALIFICATION_CHECKPOINT_OBSERVER.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "qualification checkpoint observer already installed"
+        );
+        *slot = Some(Box::new(observer));
+    });
+    NspQualificationCheckpointObserverGuard
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+fn notify_nsp_qualification_checkpoint_observer(
+    checkpoint: crate::nsp_semantic_qualification::Checkpoint,
+) {
+    NSP_QUALIFICATION_CHECKPOINT_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(checkpoint);
+        }
+    });
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 /// Reconstructs NSP qualification from execution handles before plaintext is read.
+/// It forwards accepted session cancellation at each bounded qualifier checkpoint.
 fn prepare_nsp_program_runtime(
     source: &mut File,
     plan: &OperationPlan,
@@ -1176,11 +1227,12 @@ fn prepare_nsp_program_runtime(
         ExtractionProfile::NspProgram(evidence) => evidence,
         _ => return Err(OperationFailureCode::StalePlan),
     };
+    let cancellation = session.execution_cancellation_handle()?;
     let request = crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
         plan.source.path.clone(),
         extraction.key_file.path.clone(),
     )
-    .with_cancellation(session.execution_cancellation_handle()?);
+    .with_cancellation(cancellation.clone());
     let input = ExtractionNspInput {
         file: source,
         route: &plan.source,
@@ -1199,15 +1251,35 @@ fn prepare_nsp_program_runtime(
             .map_err(|_| QualificationError::new(QualificationCode::KeyFileChangedDuringQualification))?;
         Ok(keys)
     };
-    let mut checkpoint = |_| {};
+    let mut checkpoint_failure = None;
+    let mut checkpoint = |_point| {
+        #[cfg(test)]
+        notify_nsp_qualification_checkpoint_observer(_point);
+
+        if checkpoint_failure.is_some() {
+            cancellation.cancel();
+            return;
+        }
+        match session.cancellation_requested() {
+            Ok(true) => cancellation.cancel(),
+            Ok(false) => {}
+            Err(error) => {
+                checkpoint_failure = Some(error);
+                cancellation.cancel();
+            }
+        }
+    };
+    let qualification = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+        request,
+        input,
+        &mut key_loader,
+        &mut checkpoint,
+    );
+    if let Some(error) = checkpoint_failure {
+        return Err(error);
+    }
     let (qualification_result, qualified) =
-        crate::nsp_semantic_qualification::qualify_opened_for_extraction(
-            request,
-            input,
-            &mut key_loader,
-            &mut checkpoint,
-        )
-        .map_err(|error| super::map_nsp_semantic_error(error.code()))?;
+        qualification.map_err(|error| super::map_nsp_semantic_error(error.code()))?;
     let qualified = qualified
         .ok_or_else(|| super::map_nsp_semantic_qualification_result(&qualification_result))?;
     let crate::nsp_semantic_qualification::NspProgramExtractionQualification {

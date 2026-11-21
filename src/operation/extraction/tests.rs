@@ -1058,3 +1058,56 @@ fn execution_rejects_stale_qualified_nsp_evidence() {
     );
     assert!(!destination.exists());
 }
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn session_cancellation_interrupts_execution_time_nsp_qualification() {
+    use crate::nsp_semantic_qualification::Checkpoint;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let (_root, source, key_file, destination, plan) = qualified_nsp_extraction_plan();
+    let source_before = std::fs::read(&source).expect("read source before execution");
+    let key_file_before = std::fs::read(&key_file).expect("read key file before execution");
+    let session = Arc::new(OperationSession::new());
+    let observer_session = Arc::clone(&session);
+    let source_hash_chunk_reached = Arc::new(AtomicBool::new(false));
+    let cancel_accepted = Arc::new(AtomicBool::new(false));
+    let qualification_finished = Arc::new(AtomicBool::new(false));
+    let observer_source_hash_chunk_reached = Arc::clone(&source_hash_chunk_reached);
+    let observer_cancel_accepted = Arc::clone(&cancel_accepted);
+    let observer_qualification_finished = Arc::clone(&qualification_finished);
+    let _observer = super::install_nsp_qualification_checkpoint_observer(move |checkpoint| {
+        if matches!(checkpoint, Checkpoint::SourceHashChunk)
+            && !observer_source_hash_chunk_reached.swap(true, Ordering::SeqCst)
+        {
+            observer_cancel_accepted.store(observer_session.cancel(), Ordering::SeqCst);
+        }
+        if matches!(checkpoint, Checkpoint::QualificationFinished) {
+            observer_qualification_finished.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let result = Engine::new().execute_operation(plan, &session);
+
+    assert!(source_hash_chunk_reached.load(Ordering::SeqCst));
+    assert!(cancel_accepted.load(Ordering::SeqCst));
+    assert!(!qualification_finished.load(Ordering::SeqCst));
+    assert_eq!(result.state(), super::super::JobState::Cancelled);
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::Cancelled)
+    );
+    assert!(!result.milestones().contains(&OperationMilestone::Published));
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read(&source).expect("read source after execution"),
+        source_before
+    );
+    assert_eq!(
+        std::fs::read(&key_file).expect("read key file after execution"),
+        key_file_before
+    );
+}
