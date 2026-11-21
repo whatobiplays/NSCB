@@ -287,14 +287,19 @@ result contract.
 Runtime qualification targets native macOS arm64 on writable local APFS. The
 fixtures use generated, rights-free NCA and NSP bytes with synthetic keys.
 
-Slice C verification used Rust 1.98.1. `make all` passed its policy checks,
-all-target build, formatting, clippy, Python suites, Rust tests, and doc tests.
-The focused instrumented run passed 650 library tests (4 ignored), 6 NSP
-extraction tests, 22 NSP semantic qualification tests, 202 CLI unit tests, and
-7 extraction CLI tests. LLVM line coverage recorded 750 of 817 added
-production executable lines as covered (91.80%). The calculation excludes
-test files and unit-test modules. LLVM emitted the LCOV data after reporting
-mismatched counts for eight functions; this metric covers lines, not branches.
+Qualified NSP Program extraction was verified with Rust 1.98.1 on native macOS
+arm64 with writable local APFS and synthetic, rights-free fixtures. On the
+corrected candidate, `make all` passed the policy checks, all-target build,
+formatting, Clippy, Python suites, Rust tests, and doc tests. Focused tests
+passed 655 library tests (4 ignored), 7 NSP extraction tests, 22 NSP semantic
+qualification tests, 202 CLI unit tests, and 10 extraction CLI tests.
+
+An earlier instrumented run measured 750 of 817 added production executable
+lines as covered (91.80%). That calculation excludes test files and unit-test
+modules. Coverage was not remeasured for the corrected candidate because the
+`cargo llvm-cov` subcommand is not installed. The earlier LLVM LCOV export
+reported mismatched counts for eight functions and measured lines only, not
+branches.
 
 Earlier standalone Program runs passed 15 extraction backend tests, 10 Engine
 integration tests, and 7 CLI tests. Earlier Control qualification runs passed

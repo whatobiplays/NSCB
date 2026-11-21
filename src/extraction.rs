@@ -1319,7 +1319,6 @@ mod planning_tests {
             pfs0_offset: 0x1000,
             pfs0_size: 0x1000,
             section_ctr: [0; 8],
-            section_key: zeroize::Zeroizing::new([0; 16]),
             files: Vec::new(),
         };
         let directories = vec!["0".to_owned(), "0/nested".to_owned()];

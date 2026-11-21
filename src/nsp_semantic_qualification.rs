@@ -450,8 +450,17 @@ pub(crate) struct NspProgramExtractionEvidence {
     pub(crate) pfs0_offset: u64,
     pub(crate) pfs0_size: u64,
     pub(crate) section_ctr: [u8; 8],
-    pub(crate) section_key: Zeroizing<[u8; 16]>,
     pub(crate) files: Vec<NspProgramPfs0Entry>,
+}
+
+/// Short-lived qualification output paired with durable, key-free evidence.
+///
+/// The section key exists only while the operation plans or executes selected
+/// Program spans. Its `Zeroizing` wrapper clears the key when that phase ends.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct NspProgramExtractionQualification {
+    pub(crate) evidence: NspProgramExtractionEvidence,
+    pub(crate) section_key: Zeroizing<[u8; 16]>,
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -471,7 +480,6 @@ impl NspProgramExtractionEvidence {
             && self.pfs0_offset == other.pfs0_offset
             && self.pfs0_size == other.pfs0_size
             && self.section_ctr == other.section_ctr
-            && self.section_key.as_ref() == other.section_key.as_ref()
             && self.files.len() == other.files.len()
             && self.files.iter().zip(&other.files).all(|(left, right)| {
                 left.name == right.name
@@ -755,7 +763,7 @@ pub(crate) fn qualify_opened_for_extraction<I, K, F>(
     input: I,
     key_loader: K,
     checkpoint: &mut F,
-) -> Result<Option<NspProgramExtractionEvidence>, NspSemanticQualificationError>
+) -> Result<Option<NspProgramExtractionQualification>, NspSemanticQualificationError>
 where
     I: NspSemanticInput,
     K: FnMut(
@@ -777,7 +785,7 @@ fn qualify_input_inner_with_key_loader<I, K, F>(
 ) -> Result<
     (
         NspSemanticQualificationResult,
-        Option<NspProgramExtractionEvidence>,
+        Option<NspProgramExtractionQualification>,
     ),
     NspSemanticQualificationError,
 >
@@ -914,22 +922,24 @@ where
                         size: file.size,
                     });
                 }
-                Some(NspProgramExtractionEvidence {
-                    source_sha256,
-                    source_size: input.input_size(),
-                    title_id: cnmt.title_id,
-                    content_index: program.content_index,
-                    program_content_id: program_row.content_id,
-                    member_offset: program.member_offset,
-                    member_size: program.member_size,
-                    member_sha256: program.member_sha256,
-                    partition_offset: section.partition_offset,
-                    partition_size: section.partition_size,
-                    pfs0_offset: section.pfs0_offset,
-                    pfs0_size: section.pfs0_size,
-                    section_ctr: section.section_ctr,
+                Some(NspProgramExtractionQualification {
+                    evidence: NspProgramExtractionEvidence {
+                        source_sha256,
+                        source_size: input.input_size(),
+                        title_id: cnmt.title_id,
+                        content_index: program.content_index,
+                        program_content_id: program_row.content_id,
+                        member_offset: program.member_offset,
+                        member_size: program.member_size,
+                        member_sha256: program.member_sha256,
+                        partition_offset: section.partition_offset,
+                        partition_size: section.partition_size,
+                        pfs0_offset: section.pfs0_offset,
+                        pfs0_size: section.pfs0_size,
+                        section_ctr: section.section_ctr,
+                        files,
+                    },
                     section_key: section.section_key.clone(),
-                    files,
                 })
             } else {
                 None

@@ -8,6 +8,7 @@ mod synthetic_extraction;
 #[path = "support/synthetic_nsp_qualification.rs"]
 #[allow(dead_code)]
 mod synthetic_nsp_qualification;
+use support::synthetic_pfs0;
 
 use nscb::{
     CancellationHandle, Engine, ExtractionRequest, ExtractionSelection, ExtractionSelectors,
@@ -72,6 +73,52 @@ fn extracts_program_bytes_from_the_qualified_nsp_profile() {
         fs::read(destination.join("content/0/unrelated.bin")).unwrap(),
         b"synthetic program section"
     );
+}
+
+#[test]
+fn partial_nsp_program_selection_publishes_an_incomplete_multi_file_manifest() {
+    let program_pfs0 = synthetic_pfs0::pfs0(
+        &[
+            synthetic_pfs0::EntrySpec {
+                name: "selected.bin",
+                offset: 0,
+                size: 8,
+            },
+            synthetic_pfs0::EntrySpec {
+                name: "omitted.bin",
+                offset: 8,
+                size: 7,
+            },
+        ],
+        b"selectedomitted",
+    );
+    let fixture = synthetic_nsp_qualification::build_with_program_pfs0(program_pfs0);
+    let root = tempfile::tempdir().expect("create partial extraction fixture");
+    let (source, key_file, destination) = write_fixture(&root, &fixture);
+    let selection =
+        ExtractionSelection::selectors(ExtractionSelectors::new().with_path("selected.bin"));
+    let engine = Engine::new();
+    let plan = engine
+        .plan_extraction(
+            ExtractionRequest::new(&source, &destination, &key_file, selection),
+            CancellationHandle::new(),
+        )
+        .expect("plan selected file from a multi-file Program PFS0");
+    let result = engine.execute_operation(plan, &OperationSession::new());
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(destination.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["content_root"], "content");
+    assert_eq!(manifest["completeness"], "incomplete");
+    let files = manifest["partitions"][0]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["path"], "0/selected.bin");
+    assert_eq!(
+        fs::read(destination.join("content/0/selected.bin")).unwrap(),
+        b"selected"
+    );
+    assert!(!destination.join("content/0/omitted.bin").exists());
 }
 
 #[test]

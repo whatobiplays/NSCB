@@ -57,6 +57,7 @@ enum PlannedExtractionSource {
     },
     NspProgram {
         evidence: crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+        section_key: Zeroizing<[u8; 16]>,
     },
 }
 
@@ -69,6 +70,7 @@ enum PreparedExtractionRuntime {
     },
     NspProgram {
         evidence: crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+        section_key: Zeroizing<[u8; 16]>,
         key_file: File,
     },
 }
@@ -391,7 +393,7 @@ pub(super) fn plan(
             Ok(keys)
         };
         let mut checkpoint = |_| {};
-        let evidence = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+        let qualified = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
             qualification_request,
             input,
             &mut key_loader,
@@ -399,6 +401,8 @@ pub(super) fn plan(
         )
         .map_err(|error| super::OperationError::new(super::map_nsp_semantic_error(error.code())))?
         .ok_or_else(|| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+        let evidence = qualified.evidence;
+        let section_key = qualified.section_key;
         if evidence.source_size != source_baseline.snapshot.len
             || evidence.source_sha256 != source_baseline.sha256
         {
@@ -421,7 +425,13 @@ pub(super) fn plan(
             &files,
         )
         .map_err(|error| super::OperationError::new(map_extraction_validation_error(error)))?;
-        (resolved, PlannedExtractionSource::NspProgram { evidence })
+        (
+            resolved,
+            PlannedExtractionSource::NspProgram {
+                evidence,
+                section_key,
+            },
+        )
     } else {
         let header = crate::nca::read_header(
             &mut source_file,
@@ -546,13 +556,17 @@ pub(super) fn plan(
                 .map_err(super::OperationError::new)?;
                 (SelectedExtractionSource::Control { section_offset }, digest)
             }
-            PlannedExtractionSource::NspProgram { evidence } => {
+            PlannedExtractionSource::NspProgram {
+                evidence,
+                section_key,
+            } => {
                 let section_offset = span.offset;
                 validate_nsp_program_span(evidence, section_offset, span.size)
                     .map_err(super::OperationError::new)?;
                 let digest = digest_nsp_program_span(
                     &mut source_file,
                     evidence,
+                    section_key,
                     section_offset,
                     span.size,
                     &cancellation,
@@ -584,9 +598,10 @@ pub(super) fn plan(
         PlannedExtractionSource::Control { metadata, .. } => {
             (ExtractionProfile::Control(metadata), None)
         }
-        PlannedExtractionSource::NspProgram { evidence } => {
-            (ExtractionProfile::NspProgram, Some(evidence))
-        }
+        PlannedExtractionSource::NspProgram {
+            evidence,
+            section_key: _,
+        } => (ExtractionProfile::NspProgram, Some(evidence)),
     };
     let source_after_planning = inspect_planning_file(
         &mut source_file,
@@ -975,6 +990,7 @@ fn validate_nsp_program_span(
 fn digest_nsp_program_span(
     source: &mut File,
     evidence: &crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+    section_key: &[u8; 16],
     section_offset: u64,
     size: u64,
     cancellation: &CancellationHandle,
@@ -993,7 +1009,7 @@ fn digest_nsp_program_span(
         &mut member,
         evidence.partition_offset,
         evidence.partition_size,
-        &evidence.section_key,
+        section_key,
         evidence.section_ctr,
     );
     reader
@@ -1176,14 +1192,19 @@ fn prepare_nsp_program_runtime(
     )
     .map_err(|error| super::map_nsp_semantic_error(error.code()))?
     .ok_or(OperationFailureCode::ValidationFailed)?;
-    if qualified.source_sha256 != plan.source_baseline.sha256 || !qualified.matches(planned) {
+    let crate::nsp_semantic_qualification::NspProgramExtractionQualification {
+        evidence,
+        section_key,
+    } = qualified;
+    if evidence.source_sha256 != plan.source_baseline.sha256 || !evidence.matches(planned) {
         return Err(OperationFailureCode::SourceChanged);
     }
     super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
         .map_err(|_| OperationFailureCode::KeyFileChanged)?;
     super::check_cancelled(session)?;
     Ok(PreparedExtractionRuntime::NspProgram {
-        evidence: qualified,
+        evidence,
+        section_key,
         key_file,
     })
 }
@@ -1917,12 +1938,12 @@ fn copy_selected_span(
         }
         (
             SelectedExtractionSource::NspProgram { section_offset },
-            PreparedExtractionRuntime::NspProgram { evidence, .. },
+            PreparedExtractionRuntime::NspProgram { .. },
         ) => copy_nsp_program_selected_span(
             source,
             destination,
             selected,
-            evidence,
+            runtime,
             section_offset,
             completed_before,
             session,
@@ -1936,11 +1957,19 @@ fn copy_nsp_program_selected_span(
     source: &mut File,
     destination: &mut File,
     selected: &SelectedExtractionSpan,
-    evidence: &crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+    runtime: &PreparedExtractionRuntime,
     section_offset: u64,
     completed_before: u64,
     session: &super::OperationSession,
 ) -> Result<u64, OperationFailureCode> {
+    let PreparedExtractionRuntime::NspProgram {
+        evidence,
+        section_key,
+        ..
+    } = runtime
+    else {
+        return Err(OperationFailureCode::StalePlan);
+    };
     validate_nsp_program_span(evidence, section_offset, selected.size)?;
     let mut member = crate::nsp_semantic_qualification::BoundedReader::new(
         source,
@@ -1953,7 +1982,7 @@ fn copy_nsp_program_selected_span(
         &mut member,
         evidence.partition_offset,
         evidence.partition_size,
-        &evidence.section_key,
+        section_key,
         evidence.section_ctr,
     );
     reader
