@@ -89,6 +89,31 @@ fn verifies_multiple_hash_table_entries_and_a_partial_final_block() {
 }
 
 #[test]
+fn rejects_a_corrupted_program_section_hash_table() {
+    let fixture = synthetic_nsp_qualification::valid();
+    let mut damaged_program = fixture.program_nca.clone();
+    damaged_program[0xc00] ^= 1;
+    let package =
+        synthetic_nsp_qualification::package_with_members(&fixture.meta_nca, &damaged_program);
+    let error = qualify(&package, &fixture.key_file)
+        .expect_err("damaged hierarchical hash data must fail qualification");
+
+    assert_eq!(
+        error.code(),
+        nscb::NspSemanticQualificationErrorCode::KeyOrSectionIntegrityFailure
+    );
+}
+
+#[test]
+fn rejects_a_malformed_program_section_pfs0_table() {
+    let fixture = synthetic_nsp_qualification::build_with_program_pfs0(b"broken".to_vec());
+    assert_eq!(
+        not_qualified(&fixture.package, &fixture.key_file),
+        NspSemanticQualificationReason::InvalidSectionStructure
+    );
+}
+
+#[test]
 fn rejects_each_program_row_mismatch_after_section_integrity_passes() {
     let mutations: [fn(&mut [u8; 0x88]); 6] = [
         |cnmt| cnmt[0x30] ^= 0x01,

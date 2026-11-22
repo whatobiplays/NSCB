@@ -1,11 +1,13 @@
-# Standalone Program and Control extraction
+# Program and Control extraction
 
-Program extraction supports a standalone Nintendo Content Archive (NCA)
-Program with an encrypted NCA3 header and clear, unhashed PartitionFs
-partitions. Control extraction supports one rights-free NCA3 Control profile
-with a single AES-CTR RomFS section and the qualified IVFC SHA-256 integrity
-checks. Those checks do not establish title authenticity, signature validity,
-general NCA authenticity, or device eligibility.
+Program extraction supports standalone Nintendo Content Archive (NCA)
+Programs with clear PartitionFs partitions, plus the Program member of an NSP
+that qualifies as `rights_free_base_application_v1`. That NSP path supports
+one NCA3 Program section using AES-CTR and hierarchical SHA-256 validation.
+Control extraction supports one rights-free NCA3 Control profile with a single
+AES-CTR RomFS section and the qualified IVFC SHA-256 integrity checks. These
+checks do not establish title authenticity, signature validity, general NCA
+authenticity, or device eligibility.
 
 Program extraction passed Engine and CLI runtime tests on native macOS arm64
 with writable local APFS and rights-free synthetic keyed fixtures. Control
@@ -15,8 +17,8 @@ extraction qualification results are recorded under
 ## Request and command line
 
 The Rust domain API represents a request with `ExtractionRequest`. It carries
-the source NCA, a new bundle destination, the header-key file, and an
-`ExtractionSelection`:
+the source NCA or qualified NSP, a new bundle destination, the key file, and
+an `ExtractionSelection`:
 
 ```rust
 use std::path::PathBuf;
@@ -47,23 +49,30 @@ fn make_request(
 }
 ```
 
-The standalone command accepts the same selection dimensions:
+The command accepts the same selection dimensions:
 
 ```text
-nscb extract --source <NCA> [--keys <FILE>] [--output-directory <NEW-DIR>] \
-    (--all | [--program-id <16-HEX>] [--nca-type <program|control> | --role <program|control>] \
+nscb extract --source <NCA|NSP> [--keys <FILE>] [--output-directory <NEW-DIR>] \
+    (--all | [--program-id <16-HEX>] [--title-id <16-HEX>] [--nca-content-id <32-HEX>] \
+    [--nca-type <program|control> | --role <program|control>] \
     [--partition 0..3]... [--path <PARTITION-RELATIVE-PATH>]...) \
     [--json | --jsonl]
 ```
 
 Provide `--all` or at least one selector; `--all` cannot be combined with
-selectors. The CLI accepts at most one `--program-id` and at most one of
-`--nca-type` or `--role`. Repeated partition and path values are ORed within
-their dimension; populated dimensions are combined with AND.
-Program IDs must contain exactly 16 ASCII hexadecimal digits. Either letter
-case is accepted, and manifests use lowercase. The accepted type and role
-values are `program` and `control`; each still requires its matching qualified
-profile. Repeated singleton options and malformed values are usage errors.
+selectors. The CLI accepts at most one value for each scalar selector and at
+most one of `--nca-type` or `--role`. Repeated partition and path values are
+ORed within their dimension; populated dimensions are combined with AND.
+Program and title IDs must contain exactly 16 ASCII hexadecimal digits. NCA
+ContentIds must contain exactly 32. Either letter case is accepted, and
+manifest values use lowercase. The accepted type and role values are
+`program` and `control`; each still requires its matching qualified profile.
+Repeated singleton options and malformed values are usage errors.
+
+`--program-id` continues to match the Program ID in the selected NCA.
+`--title-id` and `--nca-content-id` match only verified NSP package identity;
+a standalone NCA cannot satisfy either selector. The title selector uses the
+64-bit identity confirmed by the Meta NCA, Program NCA, and CNMT relationship.
 
 Paths are exact, case-sensitive names relative to a partition root. A path
 present in more than one selected partition matches in each such partition.
@@ -86,16 +95,29 @@ configuration.
 
 ## Validation boundary and path policy
 
-Program extraction reuses native parsing for the encrypted NCA header,
-supported profile, partition bounds, PartitionFs tables, normalized relative
-paths, hierarchy checks, and checked file spans. Control extraction uses the
-existing private qualifier to verify the complete IVFC tree and RomFS graph.
-It builds its private directory and file-span inventory from the RomFS records
-that passed those checks; public Inspection output is unchanged. Planning
-decrypts each selected span with the existing bounded AES-CTR reader and
-records its digest. Execution derives the section key again from verified
-source and key handles, streams the selected bytes, and checks each staged
-file against the planned digest before publication.
+Standalone Program extraction reuses native parsing for the encrypted NCA
+header, supported profile, partition bounds, PartitionFs tables, normalized
+relative paths, hierarchy checks, and checked file spans. Qualified NSP
+extraction reuses the semantic qualifier, bounded member access, NCA parsing,
+AES-CTR reader, hierarchical hash validation, and PFS0 parser. Its adapter
+passes the extraction operation's already-open anchored source handle and
+`FileEvidence` through `NspSemanticInput`; it checks handle identity, requested
+and canonical path identity, and the captured snapshot at the qualifier's
+existing checkpoints. The key loader reads from the operation's anchored key
+handle and verifies its `FileEvidence` before and after reading. The complete
+NSP digest and qualified Program member evidence therefore share the same
+source handle and identity.
+
+The qualifier returns checked PFS0 entries as section-relative extraction
+spans. Planning compares the qualifier's complete source digest with the
+operation's `FileEvidence` and records each selected plaintext digest.
+Execution requalifies through the same anchored source and key handles, checks
+the reconstructed qualification evidence against the plan, and only then
+streams plaintext. Every staged file is checked against its planned digest
+before publication. Control extraction uses the existing private qualifier
+to verify the complete IVFC tree and RomFS graph; its directory and file-span
+inventory comes from the RomFS records that passed those checks. Public
+Inspection output is unchanged.
 
 Inspection's NSTool launch and provider-tree corroboration are not part of
 extraction. A separate NSTool comparison may provide diagnostic evidence, but
@@ -189,6 +211,14 @@ and directory, including empty partition roots. If any source file is omitted,
 the manifest is incomplete and lists only represented partitions and the
 directories needed by their selected files.
 
+Qualified NSP Program manifests use `nca3_program_partition_fs_hierarchical_sha256_aes_ctr`
+and `rights_free_base_application_v1` as their required features. Their
+`source.profile` is the first identifier, and `source.container` records the
+profile, verified title ID, and Program ContentId. The bundle still uses
+`content_root: "content"`, and file paths such as `0/main.nro` are relative to
+that directory. Completeness describes the selected Program filesystem only;
+it does not describe every file in the NSP.
+
 Control manifests use `nca3_control_romfs_ivfc_sha256_aes_ctr` for both
 `source.profile` and the sole `required_features` entry. They record `control`
 for `source.role` and `source.nca_type`, and `romfs` for the partition
@@ -207,9 +237,12 @@ implemented.
 The fields retained for that future workflow are the schema version and kind,
 required features, content root, completeness, source profile and role, NCA
 type, canonical Program ID, content index, partition indices and filesystem
-types, directories, and file paths. The manifest records no title ownership
-or Nintendo Content ID and does not implement repacking or exact Restoration.
-The manifest is structural metadata, not proof of authenticity or an
+types, directories, and file paths. Qualified NSP manifests also record the
+verified container profile, title ID, and Program ContentId. These fields
+describe a validated relationship; they do not establish title ownership.
+Standalone Program and Control manifests omit the optional container object,
+preserving their existing serialized bytes. The manifest does not implement
+repacking or exact Restoration and is not proof of authenticity or an
 execution receipt.
 
 ## Planning, cancellation, and publication
@@ -238,8 +271,8 @@ through data that may already have been published. Treat that result as a
 manual reconciliation case; a retry may conflict with a bundle that is already
 present. If publication is confirmed but a temporary artifact cannot be
 removed safely, the result can report a cleanup warning and retained evidence
-without changing the confirmed publication outcome. The original NCA and key
-file remain untouched and are never deleted.
+without changing the confirmed publication outcome. The source NCA or NSP and
+key file remain untouched and are never deleted.
 
 In machine mode, `--json` emits one `job.result` for an admitted operation or
 one `error` record for a pre-admission failure. `--jsonl` emits ordered
@@ -251,43 +284,58 @@ result contract.
 
 ## Support and qualification
 
-The approved runtime target is native macOS arm64 on writable local APFS with
-rights-free synthetic keyed fixtures. Program extraction passed 15 extraction
-backend tests, 10 Engine integration tests, and 7 CLI tests with Rust 1.98.1.
-Control extraction passed `make all` and the native qualification
-tests on macOS arm64/APFS. Targeted runs passed 39 Control qualification and
-extraction tests, 20 extraction operation tests, 9 CLI tests, and 9
-partition-path budget tests. Fixtures use generated, rights-free NCA and
-RomFS bytes with synthetic keys.
+Runtime qualification targets native macOS arm64 on writable local APFS. The
+fixtures use generated, rights-free NCA and NSP bytes with synthetic keys.
 
-Linux GNU and Windows GNU all-target cross-compilation passed. The Windows GNU
-check reported existing target-specific warnings. The Windows MSVC build
-stopped in `ring` because this host lacks the Windows SDK header `assert.h`;
-that target remains unqualified. Cross-compilation does not establish runtime
-filesystem support, so other operating systems and filesystem types remain
-unqualified until separately tested.
+Qualified NSP Program extraction was verified with Rust 1.98.1 on native macOS
+arm64 with writable local APFS and synthetic, rights-free fixtures. On the
+corrected candidate, `make all` passed the policy checks, all-target build,
+formatting, Clippy, Python suites, Rust tests, and doc tests. Focused tests
+passed 655 library tests (4 ignored), 7 NSP extraction tests, 22 NSP semantic
+qualification tests, 202 CLI unit tests, and 10 extraction CLI tests.
 
-Focused LLVM line coverage in the latest compatible merged profile reached
-100% in `resolve_control_extraction`, 95.38% in
-`resolve_extraction_from_inventory`, and 93.27% in the CLI
-`parse_extraction`. It also measured 94.29% in the shared verified byte-copy
-loop, 98.08% in `prepare_control_runtime`, 97.22% in
-`copy_control_selected_span`, and 97.96% in `validate_bundle_tree`. The RomFS
-inventory normalizer reached 82.66%, and execution-time key derivation reached
-75.61%; both were below the 90% target. A later direct stale-evidence test
-passed and covers changed program identity, section-counter, and NCA-header
-rejection. Its raw profile uses format version 11, which the available LLVM
-profile tools reject because they expect version 10, so the listed profile
-percentages exclude that test. The normalizer's measured misses are defensive
+An earlier instrumented run measured 750 of 817 added production executable
+lines as covered (91.80%). That calculation excludes test files and unit-test
+modules. Coverage was not remeasured for the corrected candidate because the
+`cargo llvm-cov` subcommand is not installed. The earlier LLVM LCOV export
+reported mismatched counts for eight functions and measured lines only, not
+branches.
+
+Earlier standalone Program runs passed 15 extraction backend tests, 10 Engine
+integration tests, and 7 CLI tests. Earlier Control qualification runs passed
+39 Control qualification and extraction tests, 20 extraction operation
+tests, 9 CLI tests, and 9 partition-path budget tests on macOS arm64/APFS.
+
+Linux GNU and Windows GNU all-target cross-checks passed with Rust 1.98.1. The
+Windows GNU check reported target-specific warnings. The macOS x86_64
+all-target check remains blocked by existing `nsp_nsz` and `operation` target
+gates, so that target is unqualified. An earlier Windows MSVC check stopped
+in `ring` because this host lacks the Windows SDK header `assert.h`; that
+target also remains unqualified. Cross-compilation does not establish runtime
+filesystem support. Other operating systems and filesystem types remain
+unqualified until tested separately.
+
+Earlier Control-focused LLVM profiles measured 100% in
+`resolve_control_extraction`, 95.38% in `resolve_extraction_from_inventory`,
+and 93.27% in the CLI `parse_extraction`. They also measured 94.29% in the
+shared verified byte-copy loop, 98.08% in `prepare_control_runtime`, 97.22%
+in `copy_control_selected_span`, and 97.96% in `validate_bundle_tree`. The
+RomFS inventory normalizer reached 82.66%, and execution-time key derivation
+reached 75.61%. A separate stale-evidence test covered changed Program
+identity, section-counter, and NCA-header rejection; its format-version-11
+profile could not be merged with the format-version-10 profiles used for
+those Control measurements. The normalizer's uncovered lines were defensive
 overflow, path-budget, and malformed-record branches behind bounded
-validation. All six new inventory allocation reservations were refused
-individually in tests and returned typed resource-limit errors without
-changing the inputs or creating a destination.
+validation. Tests refused each of the six inventory allocation reservations
+individually and returned typed resource-limit errors without changing inputs
+or creating a destination.
 
 Neither extraction profile claims Nintendo authenticity, Full Verification,
-or installation eligibility. Program extraction does not support encrypted
-partitions or RomFS. Control extraction supports only its qualified profile.
-Neither adds package or container extraction, repacking, or Restoration. See
+or installation eligibility. Standalone Program extraction does not support
+encrypted partitions or RomFS. NSP Program extraction supports only the one
+qualified rights-free profile; other NSP profiles remain unsupported. Control
+extraction supports only its qualified profile. No path adds repacking or
+Restoration. See
 [Inspection architecture](inspection.md),
 [publication architecture](publication.md), and
 [ADR-0024: versioned extracted-content manifests](../adr/0024-versioned-extracted-content-manifests.md)

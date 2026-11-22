@@ -9,7 +9,7 @@ use super::super::{
 };
 use super::super::{OperationKind, OperationOutcome};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-use super::{ExtractionIoFailurePoint, InjectedExtractionIoFailure};
+use super::{ExtractionIoFailurePoint, ExtractionProfile, InjectedExtractionIoFailure};
 use crate::extraction::ExtractionRequest;
 use crate::{CancellationHandle, Engine};
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -777,4 +777,337 @@ fn existing_plan_wire_omits_an_empty_extraction_manifest() {
     assert!(plan.snapshot().extraction_manifest.is_none());
     let wire = serde_json::to_value(plan.snapshot()).unwrap();
     assert!(wire.get("extraction_manifest").is_none());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn qualified_nsp_extraction_plan() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    super::super::OperationPlan,
+) {
+    let fixture = crate::synthetic_nsp_qualification::valid();
+    let root = tempfile::tempdir().expect("create qualified NSP fixture");
+    let source = root.path().join("package.nsp");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("bundle");
+    std::fs::write(&source, &fixture.package).expect("write synthetic NSP");
+    std::fs::write(&key_file, &fixture.key_file).expect("write synthetic keys");
+    let plan = extraction_plan(&source, &key_file, &destination, CancellationHandle::new());
+    (root, source, key_file, destination, plan)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn open_planned_file(route: &super::super::ResolvedFile) -> std::fs::File {
+    let directory = super::super::open_directory(&route.parent).expect("open planned parent");
+    super::super::open_file_at(&directory, &route.name).expect("open planned file")
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn load_planned_nsp_keys(
+    key_file: &mut std::fs::File,
+    evidence: &super::super::FileEvidence,
+    size: u64,
+) -> Result<
+    crate::key_file::NspQualificationKeys,
+    crate::nsp_semantic_qualification::NspSemanticQualificationError,
+> {
+    use crate::nsp_semantic_qualification::{
+        NspSemanticQualificationError as Error, NspSemanticQualificationErrorCode as Code,
+    };
+    use std::io::{Seek as _, SeekFrom};
+
+    super::super::verify_file_evidence(key_file, evidence)
+        .map_err(|_| Error::new(Code::KeyFileChangedDuringQualification))?;
+    key_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| Error::new(Code::KeyFileUnavailable))?;
+    let keys = crate::key_file::read_nsp_qualification_keys(key_file, size)
+        .map_err(crate::nsp_semantic_qualification::map_key_file_error)?;
+    super::super::verify_file_evidence(key_file, evidence)
+        .map_err(|_| Error::new(Code::KeyFileChangedDuringQualification))?;
+    Ok(keys)
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn operation_owned_nsp_input_checks_identity_size_and_revalidation() {
+    use crate::nsp_semantic_qualification::{
+        NspSemanticInput as _, NspSemanticQualificationErrorCode as Code,
+    };
+
+    let (_root, source, _, _, plan) = qualified_nsp_extraction_plan();
+    let mut file = open_planned_file(&plan.source);
+    let input = super::ExtractionNspInput {
+        file: &mut file,
+        route: &plan.source,
+        evidence: &plan.source_baseline,
+    };
+
+    assert_eq!(input.input_size(), plan.source_baseline.snapshot.len);
+    input
+        .revalidate(Code::InputChangedDuringQualification)
+        .expect("unchanged operation-owned input remains valid");
+
+    let retained = source.with_extension("retained");
+    std::fs::rename(&source, retained).expect("retain the opened source");
+    std::fs::write(
+        &source,
+        vec![0; usize::try_from(plan.source_baseline.snapshot.len).unwrap()],
+    )
+    .expect("replace the source with a same-sized file");
+    let error = input
+        .revalidate(Code::InputChangedDuringQualification)
+        .expect_err("same-sized path replacement must fail identity revalidation");
+    assert_eq!(error.code(), Code::InputChangedDuringQualification);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn unqualified_nsp_reasons_map_to_input_or_profile_failures() {
+    use crate::nsp_semantic_qualification::NspSemanticQualificationReason as Reason;
+    use crate::operation::OperationFailureCode;
+
+    assert_eq!(
+        super::super::map_nsp_semantic_reason(Reason::InvalidContainerStructure),
+        OperationFailureCode::InvalidContentPackage,
+    );
+    assert_eq!(
+        super::super::map_nsp_semantic_reason(Reason::UnsupportedNcaProfile),
+        OperationFailureCode::UnsupportedContentProfile,
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn path_and_operation_owned_inputs_produce_equivalent_qualification_facts() {
+    use crate::nsp_semantic_qualification::{
+        NspSemanticQualificationOutcome, NspSemanticQualificationProfile,
+        NspSemanticQualificationRequest, NspSemanticQualificationRole,
+    };
+
+    let (_root, source, key_file, _, plan) = qualified_nsp_extraction_plan();
+    let result = crate::nsp_semantic_qualification::qualify(NspSemanticQualificationRequest::new(
+        &source, &key_file,
+    ))
+    .expect("qualify the same fixture through the path-based input");
+    let evidence = plan
+        .extraction
+        .as_ref()
+        .and_then(|extraction| match &extraction.profile {
+            ExtractionProfile::NspProgram(evidence) => Some(evidence),
+            _ => None,
+        })
+        .expect("planning retained durable NSP evidence");
+    let NspSemanticQualificationOutcome::Qualified(facts) = result.outcome else {
+        panic!("path-based qualification did not qualify the synthetic package");
+    };
+    let program = facts
+        .members
+        .iter()
+        .find(|member| member.role == NspSemanticQualificationRole::Program)
+        .expect("qualified outcome contains a Program member");
+
+    assert_eq!(
+        facts.profile,
+        NspSemanticQualificationProfile::RightsFreeBaseApplicationV1
+    );
+    assert_eq!(result.source_sha256, evidence.source_sha256);
+    assert_eq!(facts.title_id, evidence.title_id);
+    assert_eq!(facts.cnmt_program_content_id, evidence.program_content_id);
+    assert_eq!(program.size, evidence.member_size);
+    assert_eq!(program.sha256, evidence.member_sha256);
+    let snapshot = serde_json::to_value(plan.snapshot())
+        .expect("serialize the qualified extraction plan snapshot");
+    let title_id = crate::inspection::ProgramId::from_u64(evidence.title_id).to_hex();
+    let content_id =
+        crate::extraction::NcaContentId::from_bytes(evidence.program_content_id).to_hex();
+    assert_eq!(
+        snapshot["extraction_container"],
+        serde_json::json!({
+            "profile": "rights_free_base_application_v1",
+            "title_id": title_id,
+            "program_content_id": content_id
+        })
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn source_mutation_during_operation_owned_qualification_is_rejected() {
+    use crate::nsp_semantic_qualification::{
+        Checkpoint, NspSemanticQualificationErrorCode as Code, NspSemanticQualificationRequest,
+    };
+    use std::io::Write as _;
+
+    let (_root, source, key_path, _, plan) = qualified_nsp_extraction_plan();
+    let extraction = plan.extraction.as_ref().expect("NSP extraction plan");
+    let mut source_file = open_planned_file(&plan.source);
+    let mut key_file = open_planned_file(&extraction.key_file);
+    let key_size = key_file.metadata().unwrap().len();
+    let input = super::ExtractionNspInput {
+        file: &mut source_file,
+        route: &plan.source,
+        evidence: &plan.source_baseline,
+    };
+    let mut changed = false;
+    let mut checkpoint = |point| {
+        if matches!(point, Checkpoint::SourceHashed) && !changed {
+            changed = true;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&source)
+                .expect("open source for deterministic mutation")
+                .write_all(b"x")
+                .expect("append during semantic qualification");
+        }
+    };
+    let mut key_loader = |_: &NspSemanticQualificationRequest| {
+        load_planned_nsp_keys(&mut key_file, &extraction.key_baseline, key_size)
+    };
+    let result = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+        NspSemanticQualificationRequest::new(&source, &key_path),
+        input,
+        &mut key_loader,
+        &mut checkpoint,
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("source mutation during qualification must be detected"),
+    };
+
+    assert!(changed, "source mutation checkpoint was not reached");
+    assert_eq!(error.code(), Code::InputChangedDuringQualification);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn key_file_mutation_during_operation_owned_qualification_is_rejected() {
+    use crate::nsp_semantic_qualification::{
+        NspSemanticQualificationError as Error, NspSemanticQualificationErrorCode as Code,
+        NspSemanticQualificationRequest,
+    };
+    use std::io::{Seek as _, SeekFrom, Write as _};
+
+    let (_root, source, key_path, _, plan) = qualified_nsp_extraction_plan();
+    let extraction = plan.extraction.as_ref().expect("NSP extraction plan");
+    let mut source_file = open_planned_file(&plan.source);
+    let mut key_file = open_planned_file(&extraction.key_file);
+    let key_size = key_file.metadata().unwrap().len();
+    let input = super::ExtractionNspInput {
+        file: &mut source_file,
+        route: &plan.source,
+        evidence: &plan.source_baseline,
+    };
+    let mut changed = false;
+    let mut key_loader = |_: &NspSemanticQualificationRequest| {
+        super::super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+            .map_err(|_| Error::new(Code::KeyFileChangedDuringQualification))?;
+        key_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| Error::new(Code::KeyFileUnavailable))?;
+        let keys = crate::key_file::read_nsp_qualification_keys(&mut key_file, key_size)
+            .map_err(crate::nsp_semantic_qualification::map_key_file_error)?;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&key_path)
+            .expect("open keys for deterministic mutation")
+            .write_all(b"\n")
+            .expect("append during semantic qualification");
+        changed = true;
+        super::super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+            .map_err(|_| Error::new(Code::KeyFileChangedDuringQualification))?;
+        Ok(keys)
+    };
+    let mut checkpoint = |_| {};
+    let result = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+        NspSemanticQualificationRequest::new(&source, &key_path),
+        input,
+        &mut key_loader,
+        &mut checkpoint,
+    );
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("key mutation during qualification must be detected"),
+    };
+
+    assert!(changed, "key mutation hook was not reached");
+    assert_eq!(error.code(), Code::KeyFileChangedDuringQualification);
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn execution_rejects_stale_qualified_nsp_evidence() {
+    let (_root, _, _, destination, mut plan) = qualified_nsp_extraction_plan();
+    let evidence = plan
+        .extraction
+        .as_mut()
+        .and_then(|extraction| match &mut extraction.profile {
+            ExtractionProfile::NspProgram(evidence) => Some(evidence),
+            _ => None,
+        })
+        .expect("NSP extraction evidence");
+    evidence.title_id ^= 1;
+
+    let result = Engine::new().execute_operation(plan, &OperationSession::new());
+
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::SourceChanged)
+    );
+    assert!(!destination.exists());
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn session_cancellation_interrupts_execution_time_nsp_qualification() {
+    use crate::nsp_semantic_qualification::Checkpoint;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let (_root, source, key_file, destination, plan) = qualified_nsp_extraction_plan();
+    let source_before = std::fs::read(&source).expect("read source before execution");
+    let key_file_before = std::fs::read(&key_file).expect("read key file before execution");
+    let session = Arc::new(OperationSession::new());
+    let observer_session = Arc::clone(&session);
+    let source_hash_chunk_reached = Arc::new(AtomicBool::new(false));
+    let cancel_accepted = Arc::new(AtomicBool::new(false));
+    let qualification_finished = Arc::new(AtomicBool::new(false));
+    let observer_source_hash_chunk_reached = Arc::clone(&source_hash_chunk_reached);
+    let observer_cancel_accepted = Arc::clone(&cancel_accepted);
+    let observer_qualification_finished = Arc::clone(&qualification_finished);
+    let _observer = super::install_nsp_qualification_checkpoint_observer(move |checkpoint| {
+        if matches!(checkpoint, Checkpoint::SourceHashChunk)
+            && !observer_source_hash_chunk_reached.swap(true, Ordering::SeqCst)
+        {
+            observer_cancel_accepted.store(observer_session.cancel(), Ordering::SeqCst);
+        }
+        if matches!(checkpoint, Checkpoint::QualificationFinished) {
+            observer_qualification_finished.store(true, Ordering::SeqCst);
+        }
+    });
+
+    let result = Engine::new().execute_operation(plan, &session);
+
+    assert!(source_hash_chunk_reached.load(Ordering::SeqCst));
+    assert!(cancel_accepted.load(Ordering::SeqCst));
+    assert!(!qualification_finished.load(Ordering::SeqCst));
+    assert_eq!(result.state(), super::super::JobState::Cancelled);
+    assert_eq!(
+        result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::Cancelled)
+    );
+    assert!(!result.milestones().contains(&OperationMilestone::Published));
+    assert!(!destination.exists());
+    assert_eq!(
+        std::fs::read(&source).expect("read source after execution"),
+        source_before
+    );
+    assert_eq!(
+        std::fs::read(&key_file).expect("read key file after execution"),
+        key_file_before
+    );
 }

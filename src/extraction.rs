@@ -1,16 +1,93 @@
-//! Typed requests and stable manifest data for standalone Program extraction.
+//! Typed requests and stable manifests for Program and Control extraction.
 
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 use crate::inspection::{NativeNcaFileSpan, NativeNcaInventory};
 use crate::inspection::{NcaContentType, ProgramId};
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::{fmt, str::FromStr};
 
 const MAX_COMPONENT_BYTES: usize = 255;
 
-/// One standalone extraction request.
+/// The canonical 128-bit identifier recorded in an Application CNMT row.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct NcaContentId([u8; 16]);
+
+impl NcaContentId {
+    /// Creates an identifier from its verified 16-byte representation.
+    pub const fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Parses exactly 32 ASCII hexadecimal digits.
+    pub fn from_hex(value: &str) -> Result<Self, NcaContentIdParseError> {
+        if value.len() != 32 || !value.is_ascii() {
+            return Err(NcaContentIdParseError);
+        }
+        let mut bytes = [0_u8; 16];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            let start = index * 2;
+            *byte = u8::from_str_radix(&value[start..start + 2], 16)
+                .map_err(|_| NcaContentIdParseError)?;
+        }
+        Ok(Self(bytes))
+    }
+
+    /// Returns the identifier's bytes.
+    pub const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+
+    /// Returns 32 lowercase hexadecimal digits.
+    pub fn to_hex(self) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut value = String::with_capacity(32);
+        for byte in self.0 {
+            value.push(HEX[(byte >> 4) as usize] as char);
+            value.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        value
+    }
+}
+
+/// Error returned when an NCA ContentId is not 32 ASCII hexadecimal digits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NcaContentIdParseError;
+
+impl fmt::Display for NcaContentIdParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NCA ContentId must contain exactly 32 ASCII hexadecimal digits")
+    }
+}
+
+impl std::error::Error for NcaContentIdParseError {}
+
+impl FromStr for NcaContentId {
+    type Err = NcaContentIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_hex(value)
+    }
+}
+
+impl fmt::Display for NcaContentId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.to_hex())
+    }
+}
+
+impl Serialize for NcaContentId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_hex())
+    }
+}
+
+/// One Program or Control extraction request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExtractionRequest {
     source: PathBuf,
@@ -20,7 +97,7 @@ pub struct ExtractionRequest {
 }
 
 impl ExtractionRequest {
-    /// Creates an extraction request for one NCA, destination bundle, key file, and selection.
+    /// Creates an extraction request for an NCA or qualified NSP, destination bundle, key file, and selection.
     pub fn new(
         source: impl Into<PathBuf>,
         destination: impl Into<PathBuf>,
@@ -35,7 +112,7 @@ impl ExtractionRequest {
         }
     }
 
-    /// Returns the standalone NCA path.
+    /// Returns the NCA or NSP source path.
     pub fn source(&self) -> &std::path::Path {
         &self.source
     }
@@ -81,6 +158,8 @@ impl ExtractionSelection {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExtractionSelectors {
     program_id: Option<ProgramId>,
+    title_id: Option<ProgramId>,
+    nca_content_id: Option<NcaContentId>,
     nca_type: Option<NcaContentType>,
     partitions: Vec<u8>,
     paths: Vec<String>,
@@ -91,6 +170,8 @@ impl ExtractionSelectors {
     pub const fn new() -> Self {
         Self {
             program_id: None,
+            title_id: None,
+            nca_content_id: None,
             nca_type: None,
             partitions: Vec::new(),
             paths: Vec::new(),
@@ -100,6 +181,18 @@ impl ExtractionSelectors {
     /// Adds a Program ID predicate.
     pub fn with_program_id(mut self, program_id: ProgramId) -> Self {
         self.program_id = Some(program_id);
+        self
+    }
+
+    /// Adds a verified NSP title identity predicate.
+    pub fn with_title_id(mut self, title_id: ProgramId) -> Self {
+        self.title_id = Some(title_id);
+        self
+    }
+
+    /// Adds a verified NCA ContentId predicate.
+    pub fn with_nca_content_id(mut self, content_id: NcaContentId) -> Self {
+        self.nca_content_id = Some(content_id);
         self
     }
 
@@ -126,6 +219,16 @@ impl ExtractionSelectors {
         self.program_id
     }
 
+    /// Returns the optional qualified NSP title identity predicate.
+    pub const fn title_id(&self) -> Option<ProgramId> {
+        self.title_id
+    }
+
+    /// Returns the optional qualified NCA ContentId predicate.
+    pub const fn nca_content_id(&self) -> Option<NcaContentId> {
+        self.nca_content_id
+    }
+
     /// Returns the optional NCA content-type predicate.
     pub const fn nca_type(&self) -> Option<NcaContentType> {
         self.nca_type
@@ -144,6 +247,8 @@ impl ExtractionSelectors {
     #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
     pub(crate) fn is_empty(&self) -> bool {
         self.program_id.is_none()
+            && self.title_id.is_none()
+            && self.nca_content_id.is_none()
             && self.nca_type.is_none()
             && self.partitions.is_empty()
             && self.paths.is_empty()
@@ -204,6 +309,59 @@ impl ExtractionManifest {
         bytes.push(b'\n');
         Ok(bytes)
     }
+
+    /// Serializes a qualified NSP manifest with its verified package identity.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn to_json_bytes_with_container(
+        &self,
+        container: &ExtractionManifestContainer,
+    ) -> Result<Vec<u8>, serde_json::Error> {
+        let source = &self.source;
+        let manifest = ExtractionManifestWithContainer {
+            schema_version: self.schema_version,
+            kind: self.kind,
+            selection_mode: self.selection_mode,
+            content_root: self.content_root,
+            required_features: &self.required_features,
+            completeness: self.completeness,
+            source: ExtractionManifestSourceWithContainer {
+                profile: source.profile,
+                role: source.role,
+                nca_type: source.nca_type,
+                program_id: &source.program_id,
+                content_index: source.content_index,
+                container,
+            },
+            partitions: &self.partitions,
+        };
+        let mut bytes = serde_json::to_vec(&manifest)?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Serialize)]
+struct ExtractionManifestWithContainer<'a> {
+    schema_version: u8,
+    kind: &'static str,
+    selection_mode: ExtractionSelectionMode,
+    content_root: &'static str,
+    required_features: &'a [&'static str],
+    completeness: ExtractionCompleteness,
+    source: ExtractionManifestSourceWithContainer<'a>,
+    partitions: &'a [ExtractionManifestPartition],
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Serialize)]
+struct ExtractionManifestSourceWithContainer<'a> {
+    profile: &'static str,
+    role: &'static str,
+    nca_type: &'static str,
+    program_id: &'a str,
+    content_index: u32,
+    container: &'a ExtractionManifestContainer,
 }
 
 /// NCA identity and supported extraction role recorded in the manifest.
@@ -219,6 +377,17 @@ pub struct ExtractionManifestSource {
     pub program_id: String,
     /// NCA header content index.
     pub content_index: u32,
+}
+
+/// Verified identity of the containing application package.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct ExtractionManifestContainer {
+    /// Semantic package profile.
+    pub profile: &'static str,
+    /// Canonical lowercase 16-digit title identity.
+    pub title_id: String,
+    /// Canonical lowercase 32-digit Program ContentId.
+    pub program_content_id: String,
 }
 
 /// Supported filesystem metadata for one NCA partition.
@@ -251,6 +420,8 @@ pub(crate) struct ResolvedExtraction {
     pub(crate) directories: Vec<String>,
     /// Manifest matching the selected files and directories.
     pub(crate) manifest: ExtractionManifest,
+    /// Verified package identity included in the published NSP manifest.
+    pub(crate) container: Option<ExtractionManifestContainer>,
 }
 
 /// Errors found while resolving selectors or validating the published tree names.
@@ -283,6 +454,8 @@ pub(crate) enum ExtractionValidationError {
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 struct ExtractionInventoryView<'a> {
     program_id: u64,
+    title_id: Option<ProgramId>,
+    nca_content_id: Option<NcaContentId>,
     content_index: u32,
     nca_type: NcaContentType,
     nca_type_name: &'static str,
@@ -290,6 +463,8 @@ struct ExtractionInventoryView<'a> {
     role: &'static str,
     filesystem: &'static str,
     required_feature: &'static str,
+    additional_required_features: &'static [&'static str],
+    container: Option<ExtractionManifestContainer>,
     partition_indices: Vec<u8>,
     directories: &'a [String],
     files: &'a [NativeNcaFileSpan],
@@ -310,6 +485,8 @@ pub(crate) fn resolve_extraction(
         selection,
         ExtractionInventoryView {
             program_id: inventory.header.program_id,
+            title_id: None,
+            nca_content_id: None,
             content_index: inventory.header.content_index,
             nca_type: NcaContentType::Program,
             nca_type_name: "program",
@@ -317,6 +494,8 @@ pub(crate) fn resolve_extraction(
             role: "program",
             filesystem: "partition_fs",
             required_feature: "nca3_program_partition_fs",
+            additional_required_features: &[],
+            container: None,
             partition_indices,
             directories: &inventory.directories,
             files: &inventory.files,
@@ -339,6 +518,8 @@ pub(crate) fn resolve_control_extraction(
         selection,
         ExtractionInventoryView {
             program_id: inventory.metadata.program_id,
+            title_id: None,
+            nca_content_id: None,
             content_index: inventory.metadata.content_index,
             nca_type: NcaContentType::Control,
             nca_type_name: "control",
@@ -346,10 +527,48 @@ pub(crate) fn resolve_control_extraction(
             role: "control",
             filesystem: "romfs",
             required_feature: "nca3_control_romfs_ivfc_sha256_aes_ctr",
+            additional_required_features: &[],
+            container: None,
             partition_indices,
             directories: &inventory.directories,
             files: &inventory.files,
             allow_empty_all: true,
+        },
+    )
+}
+
+#[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+/// Resolves selectors against Program spans from a qualified NSP identity.
+pub(crate) fn resolve_nsp_program_extraction(
+    selection: &ExtractionSelection,
+    evidence: &crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+    directories: &[String],
+    files: &[NativeNcaFileSpan],
+) -> Result<ResolvedExtraction, ExtractionValidationError> {
+    let title_id = ProgramId::from_u64(evidence.title_id);
+    resolve_extraction_from_inventory(
+        selection,
+        ExtractionInventoryView {
+            program_id: evidence.title_id,
+            title_id: Some(title_id),
+            nca_content_id: Some(NcaContentId::from_bytes(evidence.program_content_id)),
+            content_index: evidence.content_index,
+            nca_type: NcaContentType::Program,
+            nca_type_name: "program",
+            profile: "nca3_program_partition_fs_hierarchical_sha256_aes_ctr",
+            role: "program",
+            filesystem: "partition_fs",
+            required_feature: "nca3_program_partition_fs_hierarchical_sha256_aes_ctr",
+            additional_required_features: &["rights_free_base_application_v1"],
+            container: Some(ExtractionManifestContainer {
+                profile: "rights_free_base_application_v1",
+                title_id: title_id.to_hex(),
+                program_content_id: NcaContentId::from_bytes(evidence.program_content_id).to_hex(),
+            }),
+            partition_indices: vec![0],
+            directories,
+            files,
+            allow_empty_all: false,
         },
     )
 }
@@ -408,6 +627,12 @@ fn resolve_extraction_from_inventory(
             && selectors
                 .nca_type()
                 .is_none_or(|nca_type| nca_type == inventory.nca_type)
+            && selectors
+                .title_id()
+                .is_none_or(|title_id| inventory.title_id == Some(title_id))
+            && selectors
+                .nca_content_id()
+                .is_none_or(|content_id| inventory.nca_content_id == Some(content_id))
     });
 
     let mut selected_files = Vec::new();
@@ -560,15 +785,23 @@ fn resolve_extraction_from_inventory(
         });
     }
 
+    let mut required_features = Vec::new();
+    required_features
+        .try_reserve_exact(1 + inventory.additional_required_features.len())
+        .map_err(|_| ExtractionValidationError::ResourceLimitExceeded)?;
+    required_features.push(inventory.required_feature);
+    required_features.extend_from_slice(inventory.additional_required_features);
+
     Ok(ResolvedExtraction {
         selected_files,
         directories,
+        container: inventory.container,
         manifest: ExtractionManifest {
             schema_version: 1,
             kind: "extracted_content_manifest",
             selection_mode,
             content_root: "content",
-            required_features: vec![inventory.required_feature],
+            required_features,
             // A full-file candidate includes every inventory directory and
             // partition record above, including roots with no files. Publication
             // validates the planned payload paths before reporting success.
@@ -886,8 +1119,11 @@ mod tests {
 #[cfg(test)]
 mod planning_tests {
     use super::{
-        ExtractionCompleteness, ExtractionSelection, ExtractionSelectionMode, ExtractionSelectors,
-        ExtractionValidationError, resolve_extraction,
+        ExtractionCompleteness, ExtractionManifest, ExtractionManifestContainer,
+        ExtractionManifestFile, ExtractionManifestPartition, ExtractionManifestSource,
+        ExtractionSelection, ExtractionSelectionMode, ExtractionSelectors,
+        ExtractionValidationError, NcaContentId, resolve_extraction,
+        resolve_nsp_program_extraction,
     };
     use crate::inspection::{
         InspectionEntry, NcaEncryptionType, NcaFilesystem, NcaHashType, NcaPartition, ProgramId,
@@ -1117,5 +1353,161 @@ mod planning_tests {
             resolve_extraction(&ExtractionSelection::Selectors(selectors), &inventory()),
             Err(ExtractionValidationError::ResourceLimitExceeded)
         );
+    }
+
+    #[test]
+    fn qualified_nsp_selectors_require_and_record_container_identity() {
+        let evidence = crate::nsp_semantic_qualification::NspProgramExtractionEvidence {
+            source_sha256: crate::sha256::Sha256Digest::from_bytes([0x11; 32]),
+            source_size: 0x8000,
+            title_id: 0x0100_1234_5678_9abc,
+            content_index: 4,
+            program_content_id: [0x22; 16],
+            member_offset: 0x400,
+            member_size: 0x4000,
+            member_sha256: crate::sha256::Sha256Digest::from_bytes([0x22; 32]),
+            partition_offset: 0x400,
+            partition_size: 0x3000,
+            pfs0_offset: 0x1000,
+            pfs0_size: 0x1000,
+            section_ctr: [0; 8],
+            files: Vec::new(),
+        };
+        let directories = vec!["0".to_owned(), "0/nested".to_owned()];
+        let files = vec![NativeNcaFileSpan {
+            partition_index: 0,
+            path: "nested/data.bin".to_owned(),
+            offset: 0x1200,
+            size: 4,
+        }];
+        let title_id = ProgramId::from_u64(evidence.title_id);
+        let content_id = NcaContentId::from_bytes(evidence.program_content_id);
+        let selectors = ExtractionSelectors::new()
+            .with_program_id(title_id)
+            .with_title_id(title_id)
+            .with_nca_content_id(content_id)
+            .with_nca_type(crate::inspection::NcaContentType::Program)
+            .with_partition(0)
+            .with_path("nested/data.bin");
+        let resolved = resolve_nsp_program_extraction(
+            &ExtractionSelection::Selectors(selectors),
+            &evidence,
+            &directories,
+            &files,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.manifest.content_root, "content");
+        assert_eq!(
+            resolved.manifest.required_features,
+            [
+                "nca3_program_partition_fs_hierarchical_sha256_aes_ctr",
+                "rights_free_base_application_v1",
+            ]
+        );
+        assert_eq!(
+            resolved.manifest.source.profile,
+            "nca3_program_partition_fs_hierarchical_sha256_aes_ctr"
+        );
+        assert_eq!(
+            resolved.container,
+            Some(ExtractionManifestContainer {
+                profile: "rights_free_base_application_v1",
+                title_id: "0100123456789abc".to_owned(),
+                program_content_id: "22222222222222222222222222222222".to_owned(),
+            })
+        );
+        let serialized = resolved
+            .manifest
+            .to_json_bytes_with_container(resolved.container.as_ref().unwrap())
+            .unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&serialized).unwrap();
+        assert_eq!(
+            manifest["source"]["container"]["title_id"],
+            "0100123456789abc"
+        );
+        assert_eq!(
+            resolved.manifest.partitions[0].files[0].path,
+            "0/nested/data.bin"
+        );
+
+        let standalone = inventory();
+        for selectors in [
+            ExtractionSelectors::new().with_title_id(title_id),
+            ExtractionSelectors::new().with_nca_content_id(content_id),
+        ] {
+            assert_eq!(
+                resolve_extraction(&ExtractionSelection::Selectors(selectors), &standalone),
+                Err(ExtractionValidationError::SelectorMiss)
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_manifest_bytes_omit_optional_container_metadata() {
+        let manifest = ExtractionManifest {
+            schema_version: 1,
+            kind: "extracted_content_manifest",
+            selection_mode: ExtractionSelectionMode::All,
+            content_root: "content",
+            required_features: vec!["nca3_program_partition_fs"],
+            completeness: ExtractionCompleteness::Complete,
+            source: ExtractionManifestSource {
+                profile: "nca3_program_partition_fs",
+                role: "program",
+                nca_type: "program",
+                program_id: "0102030405060708".to_owned(),
+                content_index: 0,
+            },
+            partitions: vec![ExtractionManifestPartition {
+                index: 0,
+                filesystem: "partition_fs",
+                directories: vec!["0".to_owned()],
+                files: vec![ExtractionManifestFile {
+                    path: "0/main.nro".to_owned(),
+                }],
+            }],
+        };
+        assert_eq!(
+            manifest.to_json_bytes().unwrap(),
+            b"{\"schema_version\":1,\"kind\":\"extracted_content_manifest\",\"selection_mode\":\"all\",\"content_root\":\"content\",\"required_features\":[\"nca3_program_partition_fs\"],\"completeness\":\"complete\",\"source\":{\"profile\":\"nca3_program_partition_fs\",\"role\":\"program\",\"nca_type\":\"program\",\"program_id\":\"0102030405060708\",\"content_index\":0},\"partitions\":[{\"index\":0,\"filesystem\":\"partition_fs\",\"directories\":[\"0\"],\"files\":[{\"path\":\"0/main.nro\"}]}]}\n"
+        );
+
+        let mut control = manifest;
+        control.required_features = vec!["nca3_control_romfs_ivfc_sha256_aes_ctr"];
+        control.source.profile = "nca3_control_romfs_ivfc_sha256_aes_ctr";
+        control.source.role = "control";
+        control.source.nca_type = "control";
+        control.partitions[0].filesystem = "romfs";
+        assert_eq!(
+            control.to_json_bytes().unwrap(),
+            b"{\"schema_version\":1,\"kind\":\"extracted_content_manifest\",\"selection_mode\":\"all\",\"content_root\":\"content\",\"required_features\":[\"nca3_control_romfs_ivfc_sha256_aes_ctr\"],\"completeness\":\"complete\",\"source\":{\"profile\":\"nca3_control_romfs_ivfc_sha256_aes_ctr\",\"role\":\"control\",\"nca_type\":\"control\",\"program_id\":\"0102030405060708\",\"content_index\":0},\"partitions\":[{\"index\":0,\"filesystem\":\"romfs\",\"directories\":[\"0\"],\"files\":[{\"path\":\"0/main.nro\"}]}]}\n"
+        );
+    }
+
+    #[test]
+    fn nca_content_id_uses_canonical_lowercase_hex() {
+        let canonical = "00112233445566778899aabbccddeeff";
+        let id = NcaContentId::from_hex("00112233445566778899AABBCCDDEEFF").unwrap();
+        assert_eq!(
+            id.as_bytes(),
+            &[
+                0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff
+            ]
+        );
+        assert_eq!(id.to_hex(), canonical);
+        assert_eq!(id.to_string(), canonical);
+        assert_eq!(canonical.parse::<NcaContentId>().unwrap(), id);
+        assert_eq!(
+            serde_json::to_string(&id).unwrap(),
+            format!("\"{canonical}\"")
+        );
+        assert_eq!(
+            NcaContentId::from_hex("bad").unwrap_err().to_string(),
+            "NCA ContentId must contain exactly 32 ASCII hexadecimal digits"
+        );
+        assert!(NcaContentId::from_hex("00112233445566778899aabbccddeef").is_err());
+        assert!(NcaContentId::from_hex("00112233445566778899aabbccddeefg").is_err());
     }
 }

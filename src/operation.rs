@@ -1319,6 +1319,9 @@ pub struct OperationPlanSnapshot {
     content_groups: Vec<PlannedContentGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     extraction_manifest: Option<crate::extraction::ExtractionManifest>,
+    /// Verified identity of the package containing an extracted NSP Program.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extraction_container: Option<crate::extraction::ExtractionManifestContainer>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     output_paths: Vec<PathBuf>,
     destination: PathBuf,
@@ -2026,6 +2029,24 @@ impl OperationSession {
             .lock()
             .map(|state| state.cancellation_flag())
             .map_err(|_| OperationFailureCode::SessionUnavailable)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn execution_cancellation_handle(
+        &self,
+    ) -> Result<CancellationHandle, OperationFailureCode> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| OperationFailureCode::SessionUnavailable)?;
+        let handle = state
+            .execution_cancellation
+            .get_or_insert_with(CancellationHandle::new)
+            .clone();
+        if state.cancel_requested {
+            handle.cancel();
+        }
+        Ok(handle)
     }
 
     #[cfg(target_os = "macos")]
@@ -3128,6 +3149,38 @@ fn map_nsp_semantic_error(
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn map_nsp_semantic_reason(
+    reason: crate::nsp_semantic_qualification::NspSemanticQualificationReason,
+) -> OperationFailureCode {
+    use crate::nsp_semantic_qualification::NspSemanticQualificationReason as Reason;
+    match reason {
+        Reason::InvalidContainerStructure
+        | Reason::UnaccountedPfs0Payload
+        | Reason::InvalidNcaHeader
+        | Reason::InvalidSectionStructure
+        | Reason::ProgramRelationshipMismatch => OperationFailureCode::InvalidContentPackage,
+        Reason::UnsupportedMemberSet
+        | Reason::UnsupportedNcaProfile
+        | Reason::RightsBearingContent
+        | Reason::UnsupportedCnmtProfile => OperationFailureCode::UnsupportedContentProfile,
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn map_nsp_semantic_qualification_result(
+    result: &crate::nsp_semantic_qualification::NspSemanticQualificationResult,
+) -> OperationFailureCode {
+    match &result.outcome {
+        crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::NotQualified(
+            reason,
+        ) => map_nsp_semantic_reason(*reason),
+        crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::Qualified(_) => {
+            OperationFailureCode::InvalidContentPackage
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub(crate) fn map_nsp_nsz_format_error(
     error: crate::nsp_nsz::NspNszFormatError,
 ) -> OperationFailureCode {
@@ -4188,6 +4241,7 @@ fn plan_multi_content_build_unix(
         sources,
         content_groups: snapshot_content_groups(&source),
         extraction_manifest: None,
+        extraction_container: None,
         output_paths: vec![destination.path.clone()],
         destination: destination.path.clone(),
         workspace: environment.workspace.path.clone(),
@@ -4405,6 +4459,7 @@ fn plan_multi_content_split_unix(
         sources,
         content_groups: snapshot_content_groups(&source),
         extraction_manifest: None,
+        extraction_container: None,
         output_paths,
         destination: destination.path.clone(),
         workspace: environment.workspace.path.clone(),
@@ -4757,6 +4812,7 @@ fn plan_copy_through_unix_for_output_inner(
         sources: Vec::new(),
         content_groups: Vec::new(),
         extraction_manifest: None,
+        extraction_container: None,
         output_paths: Vec::new(),
         destination: destination.path.clone(),
         workspace: workspace.path.clone(),

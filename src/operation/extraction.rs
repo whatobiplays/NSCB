@@ -31,6 +31,7 @@ struct SelectedExtractionSpan {
 enum SelectedExtractionSource {
     Program { offset: u64 },
     Control { section_offset: u64 },
+    NspProgram { section_offset: u64 },
 }
 
 #[cfg(target_os = "macos")]
@@ -40,10 +41,10 @@ struct ControlExtractionRuntime {
 }
 
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug)]
 enum ExtractionProfile {
     Program,
     Control(crate::control_nca_qualification::ControlNcaExtractionMetadata),
+    NspProgram(crate::nsp_semantic_qualification::NspProgramExtractionEvidence),
 }
 
 #[cfg(target_os = "macos")]
@@ -53,6 +54,10 @@ enum PlannedExtractionSource {
         metadata: crate::control_nca_qualification::ControlNcaExtractionMetadata,
         section_key: Zeroizing<[u8; 16]>,
     },
+    NspProgram {
+        evidence: crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+        section_key: Zeroizing<[u8; 16]>,
+    },
 }
 
 #[cfg(target_os = "macos")]
@@ -60,6 +65,11 @@ enum PreparedExtractionRuntime {
     Program,
     Control {
         runtime: ControlExtractionRuntime,
+        key_file: File,
+    },
+    NspProgram {
+        evidence: crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+        section_key: Zeroizing<[u8; 16]>,
         key_file: File,
     },
 }
@@ -148,8 +158,75 @@ pub(super) struct ExtractionOperationPlan {
     selected_files: Vec<SelectedExtractionSpan>,
     directories: Vec<String>,
     manifest: crate::extraction::ExtractionManifest,
+    manifest_container: Option<crate::extraction::ExtractionManifestContainer>,
     profile: ExtractionProfile,
     total_bytes: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl ExtractionOperationPlan {
+    fn manifest_json_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        match &self.manifest_container {
+            Some(container) => self.manifest.to_json_bytes_with_container(container),
+            None => self.manifest.to_json_bytes(),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// Presents the operation's anchored source handle to the NSP qualifier.
+/// Revalidation uses the same path and `FileEvidence` captured by planning.
+struct ExtractionNspInput<'a> {
+    file: &'a mut File,
+    route: &'a super::ResolvedFile,
+    evidence: &'a super::FileEvidence,
+}
+
+#[cfg(target_os = "macos")]
+impl Read for ExtractionNspInput<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buffer)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Seek for ExtractionNspInput<'_> {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(position)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl crate::nsp_semantic_qualification::NspSemanticInput for ExtractionNspInput<'_> {
+    fn input_size(&self) -> u64 {
+        self.evidence.snapshot.len
+    }
+
+    fn revalidate(
+        &self,
+        code: crate::nsp_semantic_qualification::NspSemanticQualificationErrorCode,
+    ) -> Result<(), crate::nsp_semantic_qualification::NspSemanticQualificationError> {
+        use crate::nsp_semantic_qualification::NspSemanticQualificationError as Error;
+        use crate::nsp_semantic_qualification::NspSemanticQualificationErrorCode as Code;
+
+        let metadata = self
+            .file
+            .metadata()
+            .map_err(|_| Error::new(Code::InputUnavailable))?;
+        let identity = crate::file_identity::handle_identity(self.file);
+        let snapshot = crate::file_identity::file_snapshot(&metadata, identity);
+        let requested_path = self.route.requested_parent.join(&self.route.name);
+        if identity != Some(self.evidence.identity)
+            || snapshot != self.evidence.snapshot
+            || crate::file_identity::path_identity(&self.route.path) != Some(self.evidence.identity)
+            || crate::file_identity::followed_path_identity(&requested_path)
+                != Some(self.evidence.identity)
+            || super::validate_file_route(self.route, None).is_err()
+        {
+            return Err(Error::new(code));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -278,73 +355,173 @@ pub(super) fn plan(
     super::verify_file_evidence(&mut key_handle, &key_baseline)
         .map_err(|_| super::OperationError::new(OperationFailureCode::KeyFileChanged))?;
 
-    let header = crate::nca::read_header(
-        &mut source_file,
-        source_baseline.snapshot.len,
-        header_key.as_bytes(),
-    )
-    .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
-    drop(header_key);
-    let (resolved, planned_source) = match header.content_type {
-        crate::nca::ContentType::Program => {
-            let inventory = crate::inspection::validate_native_inventory(&mut source_file, &header)
-                .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
-            let resolved =
-                resolve_extraction(request.selection(), &inventory).map_err(|error| {
-                    super::OperationError::new(map_extraction_validation_error(error))
-                })?;
-            (resolved, PlannedExtractionSource::Program)
-        }
-        crate::nca::ContentType::Control => {
-            key_handle.seek(SeekFrom::Start(0)).map_err(|_| {
-                super::OperationError::new(OperationFailureCode::KeyFileUnavailable)
-            })?;
-            let keys = crate::key_file::read_nsp_qualification_keys(&mut key_handle, key_size)
-                .map_err(|error| super::OperationError::new(map_nsp_key_file_error(error)))?;
-            super::verify_file_evidence(&mut key_handle, &key_baseline)
-                .map_err(|_| super::OperationError::new(OperationFailureCode::KeyFileChanged))?;
+    if source_baseline.snapshot.len < 4 {
+        return Err(super::OperationError::new(
+            OperationFailureCode::ValidationFailed,
+        ));
+    }
+    source_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| super::OperationError::new(OperationFailureCode::SourceChanged))?;
+    let mut source_magic = [0_u8; 4];
+    source_file
+        .read_exact(&mut source_magic)
+        .map_err(|_| super::OperationError::new(OperationFailureCode::SourceChanged))?;
+    let is_nsp = source_magic == *b"PFS0";
+    let (resolved, planned_source) = if is_nsp {
+        drop(header_key);
+        let qualification_request =
+            crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+                source.path.clone(),
+                key_file.path.clone(),
+            )
+            .with_cancellation(cancellation.clone());
+        let input = ExtractionNspInput {
+            file: &mut source_file,
+            route: &source,
+            evidence: &source_baseline,
+        };
+        let mut key_loader = |_: &crate::nsp_semantic_qualification::
+            NspSemanticQualificationRequest|
+         -> Result<_, crate::nsp_semantic_qualification::NspSemanticQualificationError> {
+            use crate::nsp_semantic_qualification::NspSemanticQualificationError as Error;
+            use crate::nsp_semantic_qualification::NspSemanticQualificationErrorCode as Code;
+
             if cancellation.is_cancelled() {
-                return Err(super::OperationError::new(OperationFailureCode::Cancelled));
+                return Err(Error::new(Code::Cancelled));
             }
-            let inventory = crate::control_nca_qualification::qualify_for_extraction_opened(
-                &mut source_file,
-                source_baseline.snapshot.len,
-                &keys,
-                &cancellation,
+            super::verify_file_evidence(&mut key_handle, &key_baseline)
+                .map_err(|_| Error::new(Code::KeyFileChangedDuringQualification))?;
+            key_handle
+                .seek(SeekFrom::Start(0))
+                .map_err(|_| Error::new(Code::KeyFileUnavailable))?;
+            let keys = crate::key_file::read_nsp_qualification_keys(&mut key_handle, key_size)
+                .map_err(crate::nsp_semantic_qualification::map_key_file_error)?;
+            super::verify_file_evidence(&mut key_handle, &key_baseline)
+                .map_err(|_| Error::new(Code::KeyFileChangedDuringQualification))?;
+            Ok(keys)
+        };
+        let mut checkpoint = |_| {};
+        let (qualification_result, qualified) =
+            crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+                qualification_request,
+                input,
+                &mut key_loader,
+                &mut checkpoint,
             )
             .map_err(|error| {
-                super::OperationError::new(map_control_qualification_error(error.code()))
-            })?
-            .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
-            let metadata = inventory.metadata;
-            let resolved =
-                crate::extraction::resolve_control_extraction(request.selection(), &inventory)
-                    .map_err(|error| {
+                super::OperationError::new(super::map_nsp_semantic_error(error.code()))
+            })?;
+        let qualified = qualified.ok_or_else(|| {
+            super::OperationError::new(super::map_nsp_semantic_qualification_result(
+                &qualification_result,
+            ))
+        })?;
+        let evidence = qualified.evidence;
+        let section_key = qualified.section_key;
+        if evidence.source_size != source_baseline.snapshot.len
+            || evidence.source_sha256 != source_baseline.sha256
+        {
+            return Err(super::OperationError::new(
+                OperationFailureCode::SourceChanged,
+            ));
+        }
+        super::verify_file_evidence(&mut key_handle, &key_baseline)
+            .map_err(|_| super::OperationError::new(OperationFailureCode::KeyFileChanged))?;
+        let (directories, files) = crate::inspection::validate_qualified_program_inventory(
+            &evidence.files,
+            evidence.pfs0_offset,
+            evidence.pfs0_size,
+        )
+        .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+        let resolved = crate::extraction::resolve_nsp_program_extraction(
+            request.selection(),
+            &evidence,
+            &directories,
+            &files,
+        )
+        .map_err(|error| super::OperationError::new(map_extraction_validation_error(error)))?;
+        (
+            resolved,
+            PlannedExtractionSource::NspProgram {
+                evidence,
+                section_key,
+            },
+        )
+    } else {
+        let header = crate::nca::read_header(
+            &mut source_file,
+            source_baseline.snapshot.len,
+            header_key.as_bytes(),
+        )
+        .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+        drop(header_key);
+        match header.content_type {
+            crate::nca::ContentType::Program => {
+                let inventory =
+                    crate::inspection::validate_native_inventory(&mut source_file, &header)
+                        .map_err(|_| {
+                            super::OperationError::new(OperationFailureCode::ValidationFailed)
+                        })?;
+                let resolved =
+                    resolve_extraction(request.selection(), &inventory).map_err(|error| {
                         super::OperationError::new(map_extraction_validation_error(error))
                     })?;
-            let section_key = crate::control_nca_qualification::derive_control_extraction_key(
-                &mut source_file,
-                source_baseline.snapshot.len,
-                &keys,
-                &metadata,
-            )
-            .map_err(|error| {
-                super::OperationError::new(map_control_qualification_error(error.code()))
-            })?;
-            super::verify_file_evidence(&mut key_handle, &key_baseline)
-                .map_err(|_| super::OperationError::new(OperationFailureCode::KeyFileChanged))?;
-            (
-                resolved,
-                PlannedExtractionSource::Control {
-                    metadata,
-                    section_key,
-                },
-            )
-        }
-        _ => {
-            return Err(super::OperationError::new(
-                OperationFailureCode::ValidationFailed,
-            ));
+                (resolved, PlannedExtractionSource::Program)
+            }
+            crate::nca::ContentType::Control => {
+                key_handle.seek(SeekFrom::Start(0)).map_err(|_| {
+                    super::OperationError::new(OperationFailureCode::KeyFileUnavailable)
+                })?;
+                let keys = crate::key_file::read_nsp_qualification_keys(&mut key_handle, key_size)
+                    .map_err(|error| super::OperationError::new(map_nsp_key_file_error(error)))?;
+                super::verify_file_evidence(&mut key_handle, &key_baseline).map_err(|_| {
+                    super::OperationError::new(OperationFailureCode::KeyFileChanged)
+                })?;
+                if cancellation.is_cancelled() {
+                    return Err(super::OperationError::new(OperationFailureCode::Cancelled));
+                }
+                let inventory = crate::control_nca_qualification::qualify_for_extraction_opened(
+                    &mut source_file,
+                    source_baseline.snapshot.len,
+                    &keys,
+                    &cancellation,
+                )
+                .map_err(|error| {
+                    super::OperationError::new(map_control_qualification_error(error.code()))
+                })?
+                .map_err(|_| super::OperationError::new(OperationFailureCode::ValidationFailed))?;
+                let metadata = inventory.metadata;
+                let resolved =
+                    crate::extraction::resolve_control_extraction(request.selection(), &inventory)
+                        .map_err(|error| {
+                            super::OperationError::new(map_extraction_validation_error(error))
+                        })?;
+                let section_key = crate::control_nca_qualification::derive_control_extraction_key(
+                    &mut source_file,
+                    source_baseline.snapshot.len,
+                    &keys,
+                    &metadata,
+                )
+                .map_err(|error| {
+                    super::OperationError::new(map_control_qualification_error(error.code()))
+                })?;
+                super::verify_file_evidence(&mut key_handle, &key_baseline).map_err(|_| {
+                    super::OperationError::new(OperationFailureCode::KeyFileChanged)
+                })?;
+                (
+                    resolved,
+                    PlannedExtractionSource::Control {
+                        metadata,
+                        section_key,
+                    },
+                )
+            }
+            _ => {
+                return Err(super::OperationError::new(
+                    OperationFailureCode::ValidationFailed,
+                ));
+            }
         }
     };
 
@@ -395,6 +572,27 @@ pub(super) fn plan(
                 .map_err(super::OperationError::new)?;
                 (SelectedExtractionSource::Control { section_offset }, digest)
             }
+            PlannedExtractionSource::NspProgram {
+                evidence,
+                section_key,
+            } => {
+                let section_offset = span.offset;
+                validate_nsp_program_span(evidence, section_offset, span.size)
+                    .map_err(super::OperationError::new)?;
+                let digest = digest_nsp_program_span(
+                    &mut source_file,
+                    evidence,
+                    section_key,
+                    section_offset,
+                    span.size,
+                    &cancellation,
+                )
+                .map_err(super::OperationError::new)?;
+                (
+                    SelectedExtractionSource::NspProgram { section_offset },
+                    digest,
+                )
+            }
         };
         total_bytes = total_bytes.checked_add(span.size).ok_or_else(|| {
             super::OperationError::new(OperationFailureCode::ResourceLimitExceeded)
@@ -414,6 +612,10 @@ pub(super) fn plan(
     let profile = match planned_source {
         PlannedExtractionSource::Program => ExtractionProfile::Program,
         PlannedExtractionSource::Control { metadata, .. } => ExtractionProfile::Control(metadata),
+        PlannedExtractionSource::NspProgram {
+            evidence,
+            section_key: _,
+        } => ExtractionProfile::NspProgram(evidence),
     };
     let source_after_planning = inspect_planning_file(
         &mut source_file,
@@ -456,6 +658,7 @@ pub(super) fn plan(
     let stage_path = workspace.path.join(&stage_directory_name);
     let destination_name = OsStr::new("bundle");
     let destination_state = DestinationBaseline::Absent;
+    let manifest_container = resolved.container;
     let manifest = resolved.manifest;
     let child_path_count = resolved
         .directories
@@ -503,6 +706,7 @@ pub(super) fn plan(
         sources: Vec::new(),
         content_groups: Vec::new(),
         extraction_manifest: Some(manifest.clone()),
+        extraction_container: manifest_container.clone(),
         output_paths,
         destination: destination.path.clone(),
         workspace: workspace.path.clone(),
@@ -512,7 +716,14 @@ pub(super) fn plan(
         conflict_policy: ConflictPolicy::Fail,
         destination_baseline: destination_state,
         required_providers: Vec::new(),
-        required_keys: vec!["nca_header_key".to_owned()],
+        required_keys: if matches!(&profile, ExtractionProfile::NspProgram(_)) {
+            vec![
+                "nca_header_key".to_owned(),
+                "key_area_key_application_00".to_owned(),
+            ]
+        } else {
+            vec!["nca_header_key".to_owned()]
+        },
         effects: vec![
             PlannedEffect::ReadSource,
             PlannedEffect::CoordinateDestination,
@@ -614,13 +825,14 @@ pub(super) fn plan(
             selected_files,
             directories: resolved.directories,
             manifest,
+            manifest_container,
             profile,
             total_bytes,
         }),
     })
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn map_extraction_validation_error(
     error: crate::extraction::ExtractionValidationError,
 ) -> OperationFailureCode {
@@ -771,6 +983,79 @@ fn digest_control_span(
     Ok(Sha256Digest::from_bytes(digest.finalize().into()))
 }
 
+#[cfg(target_os = "macos")]
+fn validate_nsp_program_span(
+    evidence: &crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+    section_offset: u64,
+    size: u64,
+) -> Result<(), OperationFailureCode> {
+    let pfs0_end = evidence
+        .pfs0_offset
+        .checked_add(evidence.pfs0_size)
+        .ok_or(OperationFailureCode::ValidationFailed)?;
+    let end = section_offset
+        .checked_add(size)
+        .ok_or(OperationFailureCode::ValidationFailed)?;
+    if section_offset < evidence.pfs0_offset || end > pfs0_end || end > evidence.partition_size {
+        return Err(OperationFailureCode::ValidationFailed);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn digest_nsp_program_span(
+    source: &mut File,
+    evidence: &crate::nsp_semantic_qualification::NspProgramExtractionEvidence,
+    section_key: &[u8; 16],
+    section_offset: u64,
+    size: u64,
+    cancellation: &CancellationHandle,
+) -> Result<Sha256Digest, OperationFailureCode> {
+    use sha2::{Digest as _, Sha256};
+
+    validate_nsp_program_span(evidence, section_offset, size)?;
+    let mut member = crate::nsp_semantic_qualification::BoundedReader::new(
+        source,
+        evidence.member_offset,
+        evidence.member_size,
+        evidence.source_size,
+    )
+    .ok_or(OperationFailureCode::SourceChanged)?;
+    let mut reader = crate::nca_crypto::NcaCtrReader::new(
+        &mut member,
+        evidence.partition_offset,
+        evidence.partition_size,
+        section_key,
+        evidence.section_ctr,
+    );
+    reader
+        .seek(SeekFrom::Start(section_offset))
+        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    let mut digest = Sha256::new();
+    let mut remaining = size;
+    let mut buffer = Zeroizing::new(Vec::new());
+    buffer
+        .try_reserve_exact(super::IO_BUFFER_SIZE)
+        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+    buffer.resize(super::IO_BUFFER_SIZE, 0);
+    while remaining != 0 {
+        if cancellation.is_cancelled() {
+            return Err(OperationFailureCode::Cancelled);
+        }
+        let length = usize::try_from(remaining.min(buffer.len() as u64))
+            .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+        let read = reader
+            .read(&mut buffer[..length])
+            .map_err(|_| OperationFailureCode::SourceChanged)?;
+        if read == 0 {
+            return Err(OperationFailureCode::SourceChanged);
+        }
+        digest.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    Ok(Sha256Digest::from_bytes(digest.finalize().into()))
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn extraction_relative_path(
     span: &crate::inspection::NativeNcaFileSpan,
@@ -792,15 +1077,25 @@ fn extraction_relative_path(
 }
 
 #[cfg(target_os = "macos")]
-fn prepare_control_runtime(
+fn prepare_extraction_runtime(
     source: &mut File,
     plan: &OperationPlan,
     extraction: &ExtractionOperationPlan,
     session: &super::OperationSession,
 ) -> Result<PreparedExtractionRuntime, OperationFailureCode> {
-    let metadata = match extraction.profile {
+    let metadata = match &extraction.profile {
         ExtractionProfile::Program => return Ok(PreparedExtractionRuntime::Program),
-        ExtractionProfile::Control(metadata) => metadata,
+        ExtractionProfile::Control(metadata) => *metadata,
+        ExtractionProfile::NspProgram(_) => {
+            #[cfg(target_arch = "aarch64")]
+            {
+                return prepare_nsp_program_runtime(source, plan, extraction, session);
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                return Err(OperationFailureCode::StalePlan);
+            }
+        }
     };
     super::check_cancelled(session)?;
     let key_directory = super::open_directory(&extraction.key_file.parent)
@@ -847,8 +1142,165 @@ fn prepare_control_runtime(
     })
 }
 
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+type NspQualificationCheckpointObserver =
+    Box<dyn FnMut(crate::nsp_semantic_qualification::Checkpoint)>;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+std::thread_local! {
+    static NSP_QUALIFICATION_CHECKPOINT_OBSERVER: std::cell::RefCell<
+        Option<NspQualificationCheckpointObserver>,
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+struct NspQualificationCheckpointObserverGuard;
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+impl Drop for NspQualificationCheckpointObserverGuard {
+    fn drop(&mut self) {
+        NSP_QUALIFICATION_CHECKPOINT_OBSERVER.with(|observer| {
+            let _ = observer.borrow_mut().take();
+        });
+    }
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+/// Installs an observer for deterministic extraction checkpoint tests.
+fn install_nsp_qualification_checkpoint_observer(
+    observer: impl FnMut(crate::nsp_semantic_qualification::Checkpoint) + 'static,
+) -> NspQualificationCheckpointObserverGuard {
+    NSP_QUALIFICATION_CHECKPOINT_OBSERVER.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "qualification checkpoint observer already installed"
+        );
+        *slot = Some(Box::new(observer));
+    });
+    NspQualificationCheckpointObserverGuard
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+fn notify_nsp_qualification_checkpoint_observer(
+    checkpoint: crate::nsp_semantic_qualification::Checkpoint,
+) {
+    NSP_QUALIFICATION_CHECKPOINT_OBSERVER.with(|observer| {
+        if let Some(observer) = observer.borrow_mut().as_mut() {
+            observer(checkpoint);
+        }
+    });
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+/// Reconstructs NSP qualification from execution handles before plaintext is read.
+/// It forwards accepted session cancellation at each bounded qualifier checkpoint.
+fn prepare_nsp_program_runtime(
+    source: &mut File,
+    plan: &OperationPlan,
+    extraction: &ExtractionOperationPlan,
+    session: &super::OperationSession,
+) -> Result<PreparedExtractionRuntime, OperationFailureCode> {
+    use crate::nsp_semantic_qualification::{
+        NspSemanticQualificationError as QualificationError,
+        NspSemanticQualificationErrorCode as QualificationCode,
+    };
+
+    super::check_cancelled(session)?;
+    let key_directory = super::open_directory(&extraction.key_file.parent)
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?;
+    super::verify_directory_identity(&key_directory, extraction.key_file.parent_identity)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    let mut key_file = super::open_file_at(&key_directory, &extraction.key_file.name)
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?;
+    super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    let key_size = key_file
+        .metadata()
+        .map_err(|_| OperationFailureCode::KeyFileUnavailable)?
+        .len();
+    if key_size > crate::key_file::MAX_KEY_FILE_BYTES {
+        return Err(OperationFailureCode::ResourceLimitExceeded);
+    }
+
+    let planned = match &extraction.profile {
+        ExtractionProfile::NspProgram(evidence) => evidence,
+        _ => return Err(OperationFailureCode::StalePlan),
+    };
+    let cancellation = session.execution_cancellation_handle()?;
+    let request = crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+        plan.source.path.clone(),
+        extraction.key_file.path.clone(),
+    )
+    .with_cancellation(cancellation.clone());
+    let input = ExtractionNspInput {
+        file: source,
+        route: &plan.source,
+        evidence: &plan.source_baseline,
+    };
+    let mut key_loader = |_: &crate::nsp_semantic_qualification::NspSemanticQualificationRequest|
+     -> Result<_, QualificationError> {
+        super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+            .map_err(|_| QualificationError::new(QualificationCode::KeyFileChangedDuringQualification))?;
+        key_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| QualificationError::new(QualificationCode::KeyFileUnavailable))?;
+        let keys = crate::key_file::read_nsp_qualification_keys(&mut key_file, key_size)
+            .map_err(crate::nsp_semantic_qualification::map_key_file_error)?;
+        super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+            .map_err(|_| QualificationError::new(QualificationCode::KeyFileChangedDuringQualification))?;
+        Ok(keys)
+    };
+    let mut checkpoint_failure = None;
+    let mut checkpoint = |_point| {
+        #[cfg(test)]
+        notify_nsp_qualification_checkpoint_observer(_point);
+
+        if checkpoint_failure.is_some() {
+            cancellation.cancel();
+            return;
+        }
+        match session.cancellation_requested() {
+            Ok(true) => cancellation.cancel(),
+            Ok(false) => {}
+            Err(error) => {
+                checkpoint_failure = Some(error);
+                cancellation.cancel();
+            }
+        }
+    };
+    let qualification = crate::nsp_semantic_qualification::qualify_opened_for_extraction(
+        request,
+        input,
+        &mut key_loader,
+        &mut checkpoint,
+    );
+    if let Some(error) = checkpoint_failure {
+        return Err(error);
+    }
+    let (qualification_result, qualified) =
+        qualification.map_err(|error| super::map_nsp_semantic_error(error.code()))?;
+    let qualified = qualified
+        .ok_or_else(|| super::map_nsp_semantic_qualification_result(&qualification_result))?;
+    let crate::nsp_semantic_qualification::NspProgramExtractionQualification {
+        evidence,
+        section_key,
+    } = qualified;
+    if evidence.source_sha256 != plan.source_baseline.sha256 || !evidence.matches(planned) {
+        return Err(OperationFailureCode::SourceChanged);
+    }
+    super::verify_file_evidence(&mut key_file, &extraction.key_baseline)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    super::check_cancelled(session)?;
+    Ok(PreparedExtractionRuntime::NspProgram {
+        evidence,
+        section_key,
+        key_file,
+    })
+}
+
 #[cfg(target_os = "macos")]
-fn verify_control_key_handle(
+fn verify_extraction_key_handle(
     runtime: &mut PreparedExtractionRuntime,
     extraction: &ExtractionOperationPlan,
 ) -> Result<(), OperationFailureCode> {
@@ -858,6 +1310,11 @@ fn verify_control_key_handle(
             super::verify_file_evidence(key_file, &extraction.key_baseline)
                 .map_err(|_| OperationFailureCode::KeyFileChanged)
         }
+        (
+            ExtractionProfile::NspProgram(_),
+            PreparedExtractionRuntime::NspProgram { key_file, .. },
+        ) => super::verify_file_evidence(key_file, &extraction.key_baseline)
+            .map_err(|_| OperationFailureCode::KeyFileChanged),
         _ => Err(OperationFailureCode::StalePlan),
     }
 }
@@ -933,7 +1390,8 @@ pub(super) fn execute_unix(
     super::verify_file_evidence(source_file, &plan.source_baseline)
         .map_err(|_| OperationFailureCode::SourceChanged)?;
     super::verify_conversion_key_identity(plan)?;
-    let mut extraction_runtime = prepare_control_runtime(source_file, plan, extraction, session)?;
+    let mut extraction_runtime =
+        prepare_extraction_runtime(source_file, plan, extraction, session)?;
 
     let mut destination_directory = destination_anchor;
     if plan.destination.creation_parent.is_some() {
@@ -1015,12 +1473,11 @@ pub(super) fn execute_unix(
     )?;
     super::verify_source_entry(plan, &source_directory)?;
     super::verify_conversion_key_identity(plan)?;
-    verify_control_key_handle(&mut extraction_runtime, extraction)?;
+    verify_extraction_key_handle(&mut extraction_runtime, extraction)?;
     ensure_destination_absent(&destination_directory, &plan.destination.name)?;
 
     let manifest_bytes = extraction
-        .manifest
-        .to_json_bytes()
+        .manifest_json_bytes()
         .map_err(|_| OperationFailureCode::ValidationFailed)?;
     let required_space = extraction
         .total_bytes
@@ -1072,7 +1529,7 @@ pub(super) fn execute_unix(
     )?;
     verify_source_for_promotion(plan, &source_directory, source_file, session, checkpoint)?;
     super::verify_conversion_key_identity(plan)?;
-    verify_control_key_handle(&mut extraction_runtime, extraction)?;
+    verify_extraction_key_handle(&mut extraction_runtime, extraction)?;
     super::validate_plan_routes(
         plan,
         Some(workspace_identity),
@@ -1098,7 +1555,7 @@ pub(super) fn execute_unix(
     )?;
     verify_source_for_promotion(plan, &source_directory, source_file, session, checkpoint)?;
     super::verify_conversion_key_identity(plan)?;
-    verify_control_key_handle(&mut extraction_runtime, extraction)?;
+    verify_extraction_key_handle(&mut extraction_runtime, extraction)?;
     ensure_destination_absent(&destination_directory, &plan.destination.name)?;
     validate_bundle_tree(
         &bundle_directory,
@@ -1569,8 +2026,67 @@ fn copy_selected_span(
                 session,
             )
         }
+        (
+            SelectedExtractionSource::NspProgram { section_offset },
+            PreparedExtractionRuntime::NspProgram { .. },
+        ) => copy_nsp_program_selected_span(
+            source,
+            destination,
+            selected,
+            runtime,
+            section_offset,
+            completed_before,
+            session,
+        ),
         _ => Err(OperationFailureCode::StalePlan),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn copy_nsp_program_selected_span(
+    source: &mut File,
+    destination: &mut File,
+    selected: &SelectedExtractionSpan,
+    runtime: &PreparedExtractionRuntime,
+    section_offset: u64,
+    completed_before: u64,
+    session: &super::OperationSession,
+) -> Result<u64, OperationFailureCode> {
+    let PreparedExtractionRuntime::NspProgram {
+        evidence,
+        section_key,
+        ..
+    } = runtime
+    else {
+        return Err(OperationFailureCode::StalePlan);
+    };
+    validate_nsp_program_span(evidence, section_offset, selected.size)?;
+    let mut member = crate::nsp_semantic_qualification::BoundedReader::new(
+        source,
+        evidence.member_offset,
+        evidence.member_size,
+        evidence.source_size,
+    )
+    .ok_or(OperationFailureCode::SourceChanged)?;
+    let mut reader = crate::nca_crypto::NcaCtrReader::new(
+        &mut member,
+        evidence.partition_offset,
+        evidence.partition_size,
+        section_key,
+        evidence.section_ctr,
+    );
+    reader
+        .seek(SeekFrom::Start(section_offset))
+        .map_err(|_| OperationFailureCode::SourceChanged)?;
+    let mut buffer = [0_u8; super::IO_BUFFER_SIZE];
+    copy_verified_selected_bytes(
+        &mut reader,
+        destination,
+        selected,
+        &mut buffer,
+        completed_before,
+        session,
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1701,8 +2217,7 @@ pub(super) fn validate_published_bundle_tree(
     extraction: &ExtractionOperationPlan,
 ) -> Result<(), OperationFailureCode> {
     let manifest_bytes = extraction
-        .manifest
-        .to_json_bytes()
+        .manifest_json_bytes()
         .map_err(|_| OperationFailureCode::ValidationFailed)?;
     validate_bundle_tree(bundle, extraction, &manifest_bytes, None)
 }
@@ -1795,7 +2310,7 @@ fn validate_bundle_tree(
             actual_files.push(relative.clone());
             if relative == "manifest.json" {
                 validate_regular_file_at(&directory, name, |manifest_file| {
-                    validate_manifest_file(manifest_file, &extraction.manifest, manifest_bytes)
+                    validate_manifest_file(manifest_file, manifest_bytes)
                 })
             } else {
                 let payload_path = relative
@@ -1864,7 +2379,6 @@ fn single_link_file_identity(file: &File) -> Result<(u64, u64), OperationFailure
 #[cfg(target_os = "macos")]
 fn validate_manifest_file(
     file: &mut File,
-    manifest: &crate::extraction::ExtractionManifest,
     expected_bytes: &[u8],
 ) -> Result<(), OperationFailureCode> {
     let observed_length = file
@@ -1893,8 +2407,8 @@ fn validate_manifest_file(
     }
     let parsed: serde_json::Value =
         serde_json::from_slice(&observed).map_err(|_| OperationFailureCode::ValidationFailed)?;
-    let expected =
-        serde_json::to_value(manifest).map_err(|_| OperationFailureCode::ValidationFailed)?;
+    let expected: serde_json::Value = serde_json::from_slice(expected_bytes)
+        .map_err(|_| OperationFailureCode::ValidationFailed)?;
     if parsed == expected {
         Ok(())
     } else {

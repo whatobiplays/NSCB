@@ -24,6 +24,11 @@ mod process;
 #[path = "support/synthetic_extraction.rs"]
 mod synthetic_extraction;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(dead_code)]
+#[path = "support/synthetic_nsp_qualification.rs"]
+mod synthetic_nsp_qualification;
+
 use serde_json::Value;
 use std::ffi::OsString;
 use std::path::Path;
@@ -206,6 +211,156 @@ fn json_success_reports_the_published_extraction_result_and_manifest() {
         fs::read(destination.join("content/0/nested/program.bin")).unwrap(),
         b"nested program bytes"
     );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn json_success_extracts_nsp_with_title_and_content_id_selectors() {
+    use std::fs;
+    use synthetic_nsp_qualification::{self as fixture_support, PROGRAM_ID};
+
+    let fixture = fixture_support::valid();
+    let root = tempfile::tempdir().expect("create qualified NSP CLI fixture");
+    let source = root.path().join("package.nsp");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("bundle");
+    fs::write(&source, &fixture.package).expect("write synthetic NSP");
+    fs::write(&key_file, &fixture.key_file).expect("write synthetic key material");
+
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(&fixture.program_nca);
+    let content_id = digest[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let output = run(&[
+        "extract".into(),
+        "--source".into(),
+        path_arg(&source),
+        "--keys".into(),
+        path_arg(&key_file),
+        "--output-directory".into(),
+        path_arg(&destination),
+        "--title-id".into(),
+        format!("{PROGRAM_ID:016x}").into(),
+        "--nca-content-id".into(),
+        content_id.clone().into(),
+        "--json".into(),
+    ]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let result = document(&output);
+    assert_eq!(result["kind"], "job.result");
+    assert_eq!(result["result"]["state"], "succeeded");
+
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(destination.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["content_root"], "content");
+    assert_eq!(
+        manifest["source"]["container"]["title_id"],
+        "0100123456789abc"
+    );
+    assert_eq!(
+        manifest["source"]["container"]["program_content_id"],
+        content_id
+    );
+    assert_eq!(
+        fs::read(destination.join("content/0/unrelated.bin")).unwrap(),
+        b"synthetic program section"
+    );
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn nsp_cli_rejects_mismatched_qualified_identity_selectors() {
+    use std::fs;
+    use synthetic_nsp_qualification::{self as fixture_support, PROGRAM_ID};
+
+    let fixture = fixture_support::valid();
+    let root = tempfile::tempdir().expect("create qualified NSP CLI fixture");
+    let source = root.path().join("package.nsp");
+    let key_file = root.path().join("prod.keys");
+    fs::write(&source, &fixture.package).expect("write synthetic NSP");
+    fs::write(&key_file, &fixture.key_file).expect("write synthetic key material");
+
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(&fixture.program_nca);
+    let mut content_id = [0_u8; 16];
+    content_id.copy_from_slice(&digest[..16]);
+    content_id[0] ^= 1;
+    let wrong_content_id = content_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let mismatch_cases = [
+        ("--title-id", format!("{:016x}", PROGRAM_ID ^ 1)),
+        ("--nca-content-id", wrong_content_id),
+    ];
+
+    for (index, (selector, value)) in mismatch_cases.into_iter().enumerate() {
+        let destination = root.path().join(format!("mismatched-bundle-{index}"));
+        let output = run(&[
+            "extract".into(),
+            "--source".into(),
+            path_arg(&source),
+            "--keys".into(),
+            path_arg(&key_file),
+            "--output-directory".into(),
+            path_arg(&destination),
+            selector.into(),
+            value.into(),
+            "--json".into(),
+        ]);
+
+        assert_eq!(output.status.code(), Some(3));
+        assert!(output.stderr.is_empty());
+        let error = document(&output);
+        assert_eq!(error["kind"], "error");
+        assert_eq!(error["error"]["code"], "empty_selection");
+        assert!(!destination.exists());
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn malformed_nsp_cli_input_fails_without_publishing() {
+    use std::fs;
+    use synthetic_nsp_qualification::{self as fixture_support, PROGRAM_ID};
+
+    let fixture = fixture_support::valid();
+    let root = tempfile::tempdir().expect("create malformed NSP CLI fixture");
+    let source = root.path().join("malformed.nsp");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("bundle");
+    fs::write(&source, b"PFS0bad").expect("write malformed NSP bytes");
+    fs::write(&key_file, &fixture.key_file).expect("write synthetic key material");
+
+    let output = run(&[
+        "extract".into(),
+        "--source".into(),
+        path_arg(&source),
+        "--keys".into(),
+        path_arg(&key_file),
+        "--output-directory".into(),
+        path_arg(&destination),
+        "--title-id".into(),
+        format!("{PROGRAM_ID:016x}").into(),
+        "--json".into(),
+    ]);
+
+    let error = document(&output);
+    assert_eq!(error["kind"], "error");
+    assert_eq!(error["error"]["code"], "invalid_content_package");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    assert!(!destination.exists());
 }
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

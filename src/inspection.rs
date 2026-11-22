@@ -421,7 +421,7 @@ pub(crate) struct NativeNcaFileSpan {
     pub(crate) partition_index: u8,
     /// Normalized path relative to that partition.
     pub(crate) path: String,
-    /// Absolute byte offset in the NCA file.
+    /// Checked byte offset in the profile's source address space.
     pub(crate) offset: u64,
     /// Declared file length.
     pub(crate) size: u64,
@@ -931,6 +931,67 @@ pub(crate) fn validate_native_inventory(
         directories,
         files,
     })
+}
+
+/// Validates PFS0 names and spans exposed by qualified NSP Program evidence.
+#[cfg(target_os = "macos")]
+pub(crate) fn validate_qualified_program_inventory(
+    entries: &[crate::nsp_semantic_qualification::NspProgramPfs0Entry],
+    pfs0_offset: u64,
+    pfs0_size: u64,
+) -> Result<(Vec<String>, Vec<NativeNcaFileSpan>), InspectionErrorCode> {
+    let pfs0_end = pfs0_offset
+        .checked_add(pfs0_size)
+        .ok_or(InspectionErrorCode::MalformedInput)?;
+    let mut validation = PartitionFsValidation::default();
+    let checked = validation
+        .validate_partition(
+            0,
+            entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.size)),
+        )
+        .map_err(map_partition_fs_error)?;
+    let mut files = Vec::new();
+    files
+        .try_reserve_exact(entries.len())
+        .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+    for entry in entries {
+        let end = entry
+            .section_offset
+            .checked_add(entry.size)
+            .ok_or(InspectionErrorCode::MalformedInput)?;
+        if checked.get(&entry.name) != Some(&entry.size)
+            || entry.section_offset < pfs0_offset
+            || end > pfs0_end
+        {
+            return Err(InspectionErrorCode::MalformedInput);
+        }
+        let mut path = String::new();
+        path.try_reserve_exact(entry.name.len())
+            .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+        path.push_str(&entry.name);
+        files.push(NativeNcaFileSpan {
+            partition_index: 0,
+            path,
+            offset: entry.section_offset,
+            size: entry.size,
+        });
+    }
+    let mut directories = Vec::new();
+    directories
+        .try_reserve_exact(validation.expected_directories().len())
+        .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+    for directory in validation.expected_directories() {
+        let mut path = String::new();
+        path.try_reserve_exact(directory.len())
+            .map_err(|_| InspectionErrorCode::AllocationFailed)?;
+        path.push_str(directory);
+        directories.push(path);
+    }
+    directories.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    files.sort_unstable_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+    Ok((directories, files))
 }
 
 pub(crate) fn validate_nca_profile(header: &crate::nca::Header) -> Result<(), InspectionErrorCode> {
