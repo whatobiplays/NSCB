@@ -372,6 +372,7 @@ fn make_source_member(
         .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
     member_name.push_str(name);
     Ok(crate::multi_content_format::Pfs0SourceMember {
+        source_index: 0,
         name: member_name,
         source_offset,
         size,

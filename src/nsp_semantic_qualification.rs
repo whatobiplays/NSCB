@@ -22,6 +22,8 @@ use zeroize::Zeroizing;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PFS0_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_PROGRAM_PFS0_ENTRIES: usize = 4096;
+#[cfg(target_os = "macos")]
+const MAX_APPLICATION_CONTENT_MEMBERS: usize = 4096;
 const MAX_WORKING_BUFFER_BYTES: usize = 1024 * 1024;
 const MIN_HASH_BLOCK_BYTES: u32 = 0x200;
 const MAX_HASH_BLOCK_BYTES: u32 = 0x100000;
@@ -502,6 +504,7 @@ enum NcaRole {
 enum MemberQualificationProfile {
     MetaProgram,
     MetaProgramControl,
+    ApplicationInventory,
 }
 
 #[derive(Clone, Copy)]
@@ -648,6 +651,34 @@ pub(crate) struct NspApplicationControlResult {
     pub(crate) outcome: NspApplicationControlOutcome,
 }
 
+/// The NCA role read from a decrypted NCA header during inventory.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NspApplicationMemberRole {
+    Meta,
+    Program,
+    Control,
+}
+
+/// One supported, rights-free Application member found in a source PFS0.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NspApplicationMember {
+    pub(crate) title_id: u64,
+    pub(crate) content_index: u32,
+    pub(crate) role: NspApplicationMemberRole,
+    pub(crate) offset: u64,
+    pub(crate) size: u64,
+    pub(crate) sha256: Sha256Digest,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum NspApplicationMemberInspectionOutcome {
+    Inspected(Vec<NspApplicationMember>),
+    NotQualified(NspSemanticQualificationReason),
+}
+
 #[cfg(target_os = "macos")]
 /// Checks the three-member Application CNMT and NCA relationships.
 ///
@@ -703,6 +734,134 @@ where
         NspSemanticQualificationErrorCode::InputChangedDuringQualification,
     )?;
     qualify_application_with_control_input_inner(request, input, &mut checkpoint)
+}
+
+/// Classifies every bounded outer-PFS0 member from its decrypted NCA header.
+///
+/// The returned inventory contains only source spans and key-free facts. A
+/// complete application still needs the corresponding semantic qualifier.
+#[cfg(target_os = "macos")]
+pub(crate) fn inspect_application_members_with_cancellation_probe<F>(
+    request: NspSemanticQualificationRequest,
+    mut is_cancelled: F,
+) -> Result<NspApplicationMemberInspectionOutcome, NspSemanticQualificationError>
+where
+    F: FnMut() -> bool,
+{
+    let cancellation = crate::CancellationHandle::new();
+    let request = request.with_cancellation(cancellation.clone());
+    let mut checkpoint = |_| {
+        if is_cancelled() {
+            cancellation.cancel();
+        }
+    };
+    check_cancelled(&request)?;
+    let mut input = open_snapshot_file(
+        &request.input,
+        NspSemanticQualificationErrorCode::InputUnavailable,
+        NspSemanticQualificationErrorCode::InputChangedDuringQualification,
+    )?;
+    validate_input_size(input.input_size())?;
+    let input_size = input.input_size();
+    input.seek(SeekFrom::Start(0)).map_err(|_| {
+        NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InputUnavailable)
+    })?;
+    let outer = match crate::pfs0::probe_with_limits(
+        &mut input,
+        input_size,
+        OUTER_PFS0_MAX_ENTRIES,
+        MAX_PFS0_METADATA_BYTES,
+    ) {
+        Ok(probe) => probe,
+        Err(error) => {
+            let code = error.code();
+            if code == crate::ContainerProbeErrorCode::InputUnavailable {
+                return Err(NspSemanticQualificationError::new(
+                    NspSemanticQualificationErrorCode::InputUnavailable,
+                ));
+            }
+            if matches!(
+                code,
+                crate::ContainerProbeErrorCode::LimitExceeded
+                    | crate::ContainerProbeErrorCode::ResourceLimitExceeded
+            ) {
+                return Err(NspSemanticQualificationError::new(
+                    if code == crate::ContainerProbeErrorCode::ResourceLimitExceeded {
+                        NspSemanticQualificationErrorCode::AllocationFailed
+                    } else {
+                        NspSemanticQualificationErrorCode::Pfs0ResourceLimitExceeded
+                    },
+                ));
+            }
+            input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
+            return Ok(NspApplicationMemberInspectionOutcome::NotQualified(
+                NspSemanticQualificationReason::InvalidContainerStructure,
+            ));
+        }
+    };
+    input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
+    if outer.entries.is_empty() || !pfs0_payload_is_fully_accounted(&outer)? {
+        return Ok(NspApplicationMemberInspectionOutcome::NotQualified(
+            if outer.entries.is_empty() {
+                NspSemanticQualificationReason::UnsupportedMemberSet
+            } else {
+                NspSemanticQualificationReason::UnaccountedPfs0Payload
+            },
+        ));
+    }
+    if outer.entries.len() > MAX_APPLICATION_CONTENT_MEMBERS {
+        return Err(NspSemanticQualificationError::new(
+            NspSemanticQualificationErrorCode::Pfs0ResourceLimitExceeded,
+        ));
+    }
+
+    let keys = load_qualification_keys_from_path(&request)?;
+    check_cancelled(&request)?;
+    let mut members = try_reserve_vec(outer.entries.len(), AllocationSite::NspRecords)?;
+    for entry in &outer.entries {
+        checkpoint(Checkpoint::MemberStarted);
+        check_cancelled(&request)?;
+        let member_sha256 =
+            hash_member_span(&mut input, entry, input_size, &request, &mut checkpoint)?;
+        let record = match read_nca_member(
+            &mut input,
+            input_size,
+            entry,
+            member_sha256,
+            &keys,
+            &request,
+            MemberQualificationProfile::ApplicationInventory,
+            false,
+            &mut checkpoint,
+        )? {
+            ReadDecision::Supported(record) => record,
+            ReadDecision::NotQualified(reason) => {
+                input.revalidate(
+                    NspSemanticQualificationErrorCode::InputChangedDuringQualification,
+                )?;
+                return Ok(NspApplicationMemberInspectionOutcome::NotQualified(reason));
+            }
+        };
+        let role = match record.role {
+            NcaRole::Meta => NspApplicationMemberRole::Meta,
+            NcaRole::Program => NspApplicationMemberRole::Program,
+            NcaRole::Control => NspApplicationMemberRole::Control,
+        };
+        members.push(NspApplicationMember {
+            title_id: record.title_id,
+            content_index: record.content_index,
+            role,
+            offset: record.member_offset,
+            size: record.member_size,
+            sha256: record.member_sha256,
+        });
+        input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
+        checkpoint(Checkpoint::MemberFinished);
+        check_cancelled(&request)?;
+    }
+    input.revalidate(NspSemanticQualificationErrorCode::InputChangedDuringQualification)?;
+    revalidate_expected_key_snapshot(&request)?;
+    Ok(NspApplicationMemberInspectionOutcome::Inspected(members))
 }
 
 #[cfg(test)]
@@ -1266,6 +1425,7 @@ where
     let expected_members = match profile {
         MemberQualificationProfile::MetaProgram => 2,
         MemberQualificationProfile::MetaProgramControl => 3,
+        MemberQualificationProfile::ApplicationInventory => 0,
     };
     if outer.entries.len() != expected_members {
         let digests = hash_source(&mut input, None, request, checkpoint)?;
@@ -1582,6 +1742,51 @@ where
     Ok(SourceDigests { source, members })
 }
 
+#[cfg(target_os = "macos")]
+/// Hashes one bounded PFS0 member without buffering the complete NCA.
+fn hash_member_span<I, F>(
+    input: &mut I,
+    entry: &ContainerProbeEntry,
+    input_size: u64,
+    request: &NspSemanticQualificationRequest,
+    checkpoint: &mut F,
+) -> Result<Sha256Digest, NspSemanticQualificationError>
+where
+    I: NspSemanticInput,
+    F: FnMut(Checkpoint),
+{
+    let mut member = BoundedReader::new(input, entry.file_offset, entry.size, input_size)
+        .ok_or_else(|| {
+            NspSemanticQualificationError::new(
+                NspSemanticQualificationErrorCode::InputChangedDuringQualification,
+            )
+        })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = allocate_zeroizing_buffer(
+        MAX_WORKING_BUFFER_BYTES,
+        AllocationSite::NspSourceHashBuffer,
+    )?;
+    let mut remaining = entry.size;
+    while remaining > 0 {
+        check_cancelled(request)?;
+        let wanted = usize::try_from(remaining.min(buffer.len() as u64)).map_err(|_| {
+            NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InternalIo)
+        })?;
+        let read = member.read(&mut buffer[..wanted]).map_err(|_| {
+            NspSemanticQualificationError::new(NspSemanticQualificationErrorCode::InputUnavailable)
+        })?;
+        if read == 0 {
+            return Err(NspSemanticQualificationError::new(
+                NspSemanticQualificationErrorCode::InputChangedDuringQualification,
+            ));
+        }
+        hasher.update(&buffer[..read]);
+        remaining -= read as u64;
+        checkpoint(Checkpoint::SourceHashChunk);
+    }
+    Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
+}
+
 enum ReadDecision<T> {
     Supported(T),
     NotQualified(NspSemanticQualificationReason),
@@ -1649,7 +1854,11 @@ where
         ContentType::Meta => NcaRole::Meta,
         ContentType::Program => NcaRole::Program,
         ContentType::Control
-            if matches!(profile, MemberQualificationProfile::MetaProgramControl) =>
+            if matches!(
+                profile,
+                MemberQualificationProfile::MetaProgramControl
+                    | MemberQualificationProfile::ApplicationInventory
+            ) =>
         {
             NcaRole::Control
         }
@@ -1763,6 +1972,17 @@ where
         let (cnmt_size, cnmt_rows) = match profile {
             MemberQualificationProfile::MetaProgram => (SUPPORTED_CNMT_BYTES, 1),
             MemberQualificationProfile::MetaProgramControl => (SUPPORTED_CONTROL_CNMT_BYTES, 2),
+            MemberQualificationProfile::ApplicationInventory => {
+                match probe.entries.first().map(|entry| entry.size as usize) {
+                    Some(SUPPORTED_CNMT_BYTES) => (SUPPORTED_CNMT_BYTES, 1),
+                    Some(SUPPORTED_CONTROL_CNMT_BYTES) => (SUPPORTED_CONTROL_CNMT_BYTES, 2),
+                    _ => {
+                        return Ok(ReadDecision::NotQualified(
+                            NspSemanticQualificationReason::UnsupportedCnmtProfile,
+                        ));
+                    }
+                }
+            }
         };
         if probe.entries.len() != 1 || probe.entries[0].size != cnmt_size as u64 {
             return Ok(ReadDecision::NotQualified(

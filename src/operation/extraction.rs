@@ -704,6 +704,7 @@ pub(super) fn plan(
             sha256: source_baseline.sha256,
         },
         sources: Vec::new(),
+        qualification_key: None,
         content_groups: Vec::new(),
         extraction_manifest: Some(manifest.clone()),
         extraction_container: manifest_container.clone(),
