@@ -343,6 +343,150 @@ fn application_profile_build_and_split_preserve_qualified_groups() {
 }
 
 #[test]
+fn application_profile_build_requires_two_logical_groups() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let fixture = synthetic_nsp_qualification::valid();
+    let source = root.path().join("one-application.pfs0");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("combined.pfs0");
+    fs::write(&source, &fixture.package).expect("source package");
+    fs::write(&key_file, &fixture.key_file).expect("key file");
+
+    let error = match Engine::new().plan_multi_content_build(application_build_request(
+        vec![source],
+        &destination,
+        &workspace,
+        &key_file,
+    )) {
+        Err(error) => error,
+        Ok(_) => panic!("a one-group Application Build must be rejected"),
+    };
+
+    assert_eq!(
+        error.code(),
+        OperationFailureCode::InsufficientContentEvidence
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
+fn application_profile_split_accepts_one_complete_group() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let fixture = synthetic_nsp_qualification::valid();
+    let source = root.path().join("application.pfs0");
+    let key_file = root.path().join("prod.keys");
+    let destination = root.path().join("split-output");
+    fs::write(&source, &fixture.package).expect("source package");
+    fs::write(&key_file, &fixture.key_file).expect("key file");
+    let source_bytes = fs::read(&source).expect("source bytes");
+
+    let plan = Engine::new()
+        .plan_multi_content_split(
+            MultiContentSplitRequest::new(&source, &destination, &workspace)
+                .with_profile(MultiContentProfile::RightsFreeBaseApplicationV1)
+                .with_key_file(&key_file),
+        )
+        .expect("single-group Split plan");
+    assert_eq!(plan.snapshot().content_groups().len(), 1);
+    let result = Engine::new().execute_operation(plan, &Default::default());
+
+    assert_eq!(result.state(), JobState::Succeeded);
+    assert_eq!(result.outcome(), Some(OperationOutcome::Split));
+    assert_eq!(
+        fs::read(&source).expect("source remains unchanged"),
+        source_bytes
+    );
+    let output =
+        read_pfs0(&fs::read(destination.join("0100123456789abc.pfs0")).expect("split package"));
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0].1, fixture.meta_nca);
+    assert_eq!(output[1].1, fixture.program_nca);
+}
+
+#[test]
+fn application_profile_destination_conflicts_preserve_existing_content() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let first = synthetic_nsp_qualification::valid();
+    let control = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        SECOND_PROGRAM_ID,
+    );
+    let second = synthetic_nsp_qualification::build_application_with_control(
+        &control.bytes,
+        SECOND_PROGRAM_ID,
+    );
+    let key_file = root.path().join("prod.keys");
+    fs::write(&key_file, &first.key_file).expect("key file");
+    let first_source = root.path().join("first-application.pfs0");
+    let second_source = root.path().join("second-application.pfs0");
+    fs::write(&first_source, &first.package).expect("first Application");
+    fs::write(&second_source, &second.package).expect("second Application");
+    let engine = Engine::new();
+
+    let build_destination = root.path().join("existing-build.pfs0");
+    let build_marker = b"preserve existing Build destination";
+    fs::write(&build_destination, build_marker).expect("existing Build destination");
+    let build_plan = engine
+        .plan_multi_content_build(
+            application_build_request(
+                vec![first_source.clone(), second_source.clone()],
+                &build_destination,
+                &workspace,
+                &key_file,
+            )
+            .with_conflict_policy(nscb::ConflictPolicy::Fail),
+        )
+        .expect("plan conflicting Application Build");
+    let build = engine.execute_operation(build_plan, &Default::default());
+    assert_eq!(build.state(), JobState::Failed);
+    assert_eq!(
+        build.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::DestinationConflict)
+    );
+    assert_eq!(fs::read(&build_destination).unwrap(), build_marker);
+
+    let split_source = root.path().join("combined-application.pfs0");
+    fs::write(
+        &split_source,
+        pfs0(&[
+            ("first-meta.nca", first.meta_nca.clone()),
+            ("first-program.nca", first.program_nca.clone()),
+            ("second-meta.nca", second.meta_nca.clone()),
+            ("second-program.nca", second.program_nca.clone()),
+            ("second-control.nca", second.control_nca.clone()),
+        ]),
+    )
+    .expect("combined Application source");
+    let split_destination = root.path().join("existing-split");
+    fs::create_dir(&split_destination).expect("existing Split destination");
+    let split_marker_path = split_destination.join("preserve.txt");
+    let split_marker = b"preserve existing Split destination";
+    fs::write(&split_marker_path, split_marker).expect("existing Split marker");
+    let split_plan = engine
+        .plan_multi_content_split(
+            MultiContentSplitRequest::new(&split_source, &split_destination, &workspace)
+                .with_profile(MultiContentProfile::RightsFreeBaseApplicationV1)
+                .with_key_file(&key_file)
+                .with_conflict_policy(nscb::ConflictPolicy::Fail),
+        )
+        .expect("plan conflicting Application Split");
+    let split = engine.execute_operation(split_plan, &Default::default());
+    assert_eq!(split.state(), JobState::Failed);
+    assert_eq!(
+        split.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::DestinationConflict)
+    );
+    assert_eq!(fs::read(&split_marker_path).unwrap(), split_marker);
+}
+
+#[test]
 fn application_profile_rejects_incomplete_duplicate_and_mixed_groups() {
     let root = tempfile::tempdir().expect("temporary root");
     let workspace = root.path().join("workspace");
@@ -512,6 +656,15 @@ fn application_profile_binds_source_and_key_evidence_to_execution() {
     let workspace = root.path().join("workspace");
     fs::create_dir(&workspace).expect("workspace");
     let fixture = synthetic_nsp_qualification::valid();
+    let control = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        SECOND_PROGRAM_ID,
+    );
+    let second = synthetic_nsp_qualification::build_application_with_control(
+        &control.bytes,
+        SECOND_PROGRAM_ID,
+    );
     let key_file = root.path().join("prod.keys");
     fs::write(&key_file, &fixture.key_file).expect("key file");
     let source = root.path().join("application.pfs0");
@@ -520,6 +673,9 @@ fn application_profile_binds_source_and_key_evidence_to_execution() {
         pfs0(&[
             ("meta.nca", fixture.meta_nca.clone()),
             ("program.nca", fixture.program_nca.clone()),
+            ("second-meta.nca", second.meta_nca),
+            ("second-program.nca", second.program_nca),
+            ("second-control.nca", second.control_nca),
         ]),
     )
     .expect("source package");

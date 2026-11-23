@@ -4835,6 +4835,11 @@ fn plan_multi_content_build_unix(
         request.profile,
         request.key_file.as_deref(),
     )?;
+    if source.groups.len() < 2 {
+        return Err(OperationError::new(
+            OperationFailureCode::InsufficientContentEvidence,
+        ));
+    }
     source
         .outputs
         .push(plan_content_output(&source.members, None, None)?);
@@ -15042,6 +15047,70 @@ mod tests {
         (root, source, destination, workspace)
     }
 
+    fn application_multi_group_build_plan(
+        root: &std::path::Path,
+        destination: &std::path::Path,
+        conflict_policy: ConflictPolicy,
+    ) -> (OperationPlan, Vec<(PathBuf, Vec<u8>)>, PathBuf) {
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).expect("create Application workspace");
+        let first = crate::synthetic_nsp_qualification::valid();
+        let control = crate::control_nca_qualification::synthetic_fixture::build_for_program_id(
+            &crate::control_nca_qualification::synthetic_fixture::empty_romfs(),
+            crate::control_nca_qualification::synthetic_fixture::Mutation::None,
+            0x1112_1314_1516_1718,
+        );
+        let second = crate::synthetic_nsp_qualification::build_application_with_control(
+            &control.bytes,
+            0x1112_1314_1516_1718,
+        );
+        let first_source = root.join("first-application.pfs0");
+        let second_source = root.join("second-application.pfs0");
+        let key_file = root.join("prod.keys");
+        fs::write(&first_source, &first.package).expect("write first Application");
+        fs::write(&second_source, &second.package).expect("write second Application");
+        fs::write(&key_file, &first.key_file).expect("write Application keys");
+        let source_bytes = vec![
+            (
+                first_source.clone(),
+                fs::read(&first_source).expect("read first Application"),
+            ),
+            (
+                second_source.clone(),
+                fs::read(&second_source).expect("read second Application"),
+            ),
+        ];
+        let plan = plan_multi_content_build(
+            MultiContentBuildRequest::new([first_source, second_source], destination, &workspace)
+                .with_profile(MultiContentProfile::RightsFreeBaseApplicationV1)
+                .with_key_file(&key_file)
+                .with_conflict_policy(conflict_policy),
+        )
+        .expect("plan multi-group Application Build");
+        (plan, source_bytes, workspace)
+    }
+
+    fn application_single_group_split_plan(
+        root: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> (OperationPlan, PathBuf, Vec<u8>, PathBuf) {
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).expect("create Application workspace");
+        let fixture = crate::synthetic_nsp_qualification::valid();
+        let source = root.join("application.pfs0");
+        let key_file = root.join("prod.keys");
+        fs::write(&source, &fixture.package).expect("write Application source");
+        fs::write(&key_file, &fixture.key_file).expect("write Application keys");
+        let source_bytes = fs::read(&source).expect("read Application source");
+        let plan = plan_multi_content_split(
+            MultiContentSplitRequest::new(&source, destination, &workspace)
+                .with_profile(MultiContentProfile::RightsFreeBaseApplicationV1)
+                .with_key_file(&key_file),
+        )
+        .expect("plan single-group Application Split");
+        (plan, source, source_bytes, workspace)
+    }
+
     fn plan(source: &Path, destination: &Path, workspace: &Path) -> OperationPlan {
         plan_copy_through(CopyThroughRequest::new(source, destination, workspace))
             .expect("create operation plan")
@@ -15151,6 +15220,330 @@ mod tests {
         .expect_err("group qualification observes cancellation");
         assert_eq!(error.code(), OperationFailureCode::Cancelled);
         assert_eq!(observed_probe_calls, cancel_on_call);
+    }
+
+    #[test]
+    fn application_build_rejects_corrupted_staged_semantic_output() {
+        let root = tempfile::tempdir().expect("create Application fixture");
+        let destination = root.path().join("combined.pfs0");
+        let (plan, sources, workspace) =
+            application_multi_group_build_plan(root.path(), &destination, ConflictPolicy::Fail);
+        let stage_path = workspace
+            .join(
+                plan.stage_directory_name
+                    .as_ref()
+                    .expect("planned staging directory"),
+            )
+            .join(plan.stage_file_name.as_ref().expect("planned staging file"));
+        let members = match plan.multi_content.as_ref() {
+            Some(MultiContentPlan::Build(source)) => source.members.clone(),
+            _ => panic!("expected a multi-content Build plan"),
+        };
+        let mut corrupted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            move |_, stage, session| write_multi_content_package(&members, stage, session),
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion && !corrupted {
+                    corrupted = true;
+                    let mut stage = OpenOptions::new()
+                        .write(true)
+                        .open(&stage_path)
+                        .expect("open validated Application stage");
+                    stage.set_len(0).expect("truncate staged package");
+                    stage
+                        .write_all(b"staged semantic output corruption")
+                        .expect("corrupt staged package");
+                    stage.sync_all().expect("sync corrupted package");
+                }
+            },
+        );
+
+        assert!(
+            corrupted,
+            "semantic staging checkpoint did not run: {result:?}"
+        );
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(result.outcome(), None);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::ValidationFailed)
+        );
+        assert!(!destination.exists());
+        for (source, expected) in sources {
+            assert_eq!(
+                fs::read(source).expect("read unchanged Application source"),
+                expected
+            );
+        }
+        assert_cleanup_incomplete(&result);
+        let staged = retained_artifact(&result, OperationArtifactRole::StagedOutput);
+        assert!(staged.retained());
+        assert_ne!(staged.sha256(), staged.recorded_sha256());
+    }
+
+    #[test]
+    fn application_split_rejects_corrupted_staged_semantic_output() {
+        let root = tempfile::tempdir().expect("create Application fixture");
+        let destination = root.path().join("split-output");
+        let (plan, source, source_bytes, workspace) =
+            application_single_group_split_plan(root.path(), &destination);
+        let stage_path = match plan.multi_content.as_ref() {
+            Some(MultiContentPlan::Split {
+                source,
+                staged_directory_name,
+                ..
+            }) => workspace
+                .join(
+                    plan.stage_directory_name
+                        .as_ref()
+                        .expect("planned staging directory"),
+                )
+                .join(
+                    staged_directory_name
+                        .as_ref()
+                        .expect("planned staged output directory"),
+                )
+                .join(
+                    source
+                        .outputs
+                        .first()
+                        .and_then(|output| output.name.as_ref())
+                        .expect("planned Split package name"),
+                ),
+            _ => panic!("expected a multi-content Split plan"),
+        };
+        let mut corrupted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            |_, _, _| Ok(()),
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::SourceEvidenceReadChunk
+                    && stage_path.is_file()
+                    && !corrupted
+                {
+                    corrupted = true;
+                    let mut stage = OpenOptions::new()
+                        .write(true)
+                        .open(&stage_path)
+                        .expect("open staged Split package");
+                    stage.set_len(0).expect("truncate staged Split package");
+                    stage
+                        .write_all(b"staged semantic output corruption")
+                        .expect("corrupt staged Split package");
+                    stage.sync_all().expect("sync corrupted Split package");
+                }
+            },
+        );
+
+        assert!(corrupted, "semantic staging checkpoint did not run");
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(result.outcome(), None);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::ValidationFailed)
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read(&source).expect("read unchanged Application source"),
+            source_bytes
+        );
+        assert_cleanup_incomplete(&result);
+        let staged = retained_artifact(&result, OperationArtifactRole::StagedOutput);
+        assert!(staged.retained());
+        assert_ne!(staged.sha256(), staged.recorded_sha256());
+    }
+
+    #[test]
+    fn application_build_publication_interruption_does_not_report_success() {
+        let root = tempfile::tempdir().expect("create Application fixture");
+        let destination = root.path().join("combined.pfs0");
+        let original_destination = b"previous package bytes";
+        let competing_destination = b"competing writer bytes";
+        fs::write(&destination, original_destination).expect("write existing destination");
+        let (plan, sources, _) =
+            application_multi_group_build_plan(root.path(), &destination, ConflictPolicy::Replace);
+        let members = match plan.multi_content.as_ref() {
+            Some(MultiContentPlan::Build(source)) => source.members.clone(),
+            _ => panic!("expected a multi-content Build plan"),
+        };
+        let mut interrupted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            move |_, stage, session| write_multi_content_package(&members, stage, session),
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::AfterPromotion && !interrupted {
+                    interrupted = true;
+                    fs::remove_file(&destination).expect("remove committed package");
+                    fs::write(&destination, competing_destination)
+                        .expect("install competing destination");
+                }
+            },
+        );
+
+        assert!(
+            interrupted,
+            "publication checkpoint did not run: {result:?}"
+        );
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(result.outcome(), None);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+        assert!(result.milestones().contains(&OperationMilestone::Published));
+        assert_eq!(
+            fs::read(&destination).expect("read competing destination"),
+            competing_destination
+        );
+        for (source, expected) in sources {
+            assert_eq!(
+                fs::read(source).expect("read unchanged Application source"),
+                expected
+            );
+        }
+        let backup = retained_artifact(&result, OperationArtifactRole::DestinationBackup);
+        assert!(backup.retained());
+        assert_eq!(
+            fs::read(backup.path()).expect("read destination backup"),
+            original_destination
+        );
+    }
+
+    #[test]
+    fn application_split_publication_interruption_reports_uncertain_output() {
+        let root = tempfile::tempdir().expect("create Application fixture");
+        let destination = root.path().join("split-output");
+        let (plan, source, source_bytes, _) =
+            application_single_group_split_plan(root.path(), &destination);
+        let output_path = match plan.multi_content.as_ref() {
+            Some(MultiContentPlan::Split { source, .. }) => destination.join(
+                source
+                    .outputs
+                    .first()
+                    .and_then(|output| output.name.as_ref())
+                    .expect("planned Split package name"),
+            ),
+            _ => panic!("expected a multi-content Split plan"),
+        };
+        let competing_output = b"output changed during final verification";
+        let mut interrupted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &OperationSession::new(),
+            |_, _, _| Ok(()),
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::FinalValidationHashChunk
+                    && output_path.is_file()
+                    && !interrupted
+                {
+                    interrupted = true;
+                    let mut output = OpenOptions::new()
+                        .write(true)
+                        .open(&output_path)
+                        .expect("open published Split output");
+                    output.set_len(0).expect("truncate published Split output");
+                    output
+                        .write_all(competing_output)
+                        .expect("mutate published Split output");
+                    output.sync_all().expect("sync changed Split output");
+                }
+            },
+        );
+
+        assert!(
+            interrupted,
+            "post-publication verification checkpoint did not run: {result:?}"
+        );
+        assert_eq!(result.state(), JobState::Failed);
+        assert_eq!(result.outcome(), None);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::PublicationUncertain)
+        );
+        assert_eq!(
+            fs::read(&source).expect("read unchanged Application source"),
+            source_bytes
+        );
+        assert!(result.milestones().contains(&OperationMilestone::Published));
+        assert_eq!(fs::read(&output_path).unwrap(), competing_output);
+        let published = result
+            .artifacts()
+            .iter()
+            .find(|artifact| {
+                artifact.role() == OperationArtifactRole::PublishedDestination
+                    && artifact.path().is_file()
+            })
+            .unwrap_or_else(|| panic!("published Split file is missing: {result:?}"));
+        assert!(published.retained());
+        let output_bytes = fs::read(&output_path).expect("read published Split output");
+        assert_eq!(published.length(), Some(output_bytes.len() as u64));
+        assert_ne!(published.recorded_length(), published.length());
+        assert_ne!(
+            published.recorded_sha256(),
+            Some(Sha256Digest::digest(&output_bytes))
+        );
+        assert!(
+            published
+                .sha256()
+                .is_none_or(|digest| digest == Sha256Digest::digest(&output_bytes))
+        );
+    }
+
+    #[test]
+    fn application_split_cancellation_preserves_source_and_reports_artifacts() {
+        let root = tempfile::tempdir().expect("create Application fixture");
+        let destination = root.path().join("split-output");
+        let (plan, source, source_bytes, _) =
+            application_single_group_split_plan(root.path(), &destination);
+        let session = OperationSession::new();
+        let mut cancellation_accepted = false;
+        let result = execute_with_producer_and_checkpoint(
+            plan,
+            &session,
+            |_, _, _| Ok(()),
+            |checkpoint| {
+                if checkpoint == ExecutionCheckpoint::BeforePromotion && !cancellation_accepted {
+                    cancellation_accepted = session.cancel();
+                }
+            },
+        );
+
+        assert!(
+            cancellation_accepted,
+            "staged Split cancellation was not accepted"
+        );
+        assert_eq!(result.state(), JobState::Cancelled);
+        assert_eq!(result.outcome(), None);
+        assert_eq!(
+            result.failure().map(|failure| failure.code()),
+            Some(OperationFailureCode::Cancelled)
+        );
+        assert!(!destination.exists());
+        assert_eq!(
+            fs::read(&source).expect("read unchanged Application source"),
+            source_bytes
+        );
+        assert_eq!(
+            result.cleanup_artifact_retained(),
+            result
+                .artifacts()
+                .iter()
+                .any(|artifact| artifact.retained())
+        );
+        for artifact in result
+            .artifacts()
+            .iter()
+            .filter(|artifact| artifact.retained())
+        {
+            assert!(
+                artifact.path().exists(),
+                "retained artifact path remains present"
+            );
+        }
     }
 
     #[test]

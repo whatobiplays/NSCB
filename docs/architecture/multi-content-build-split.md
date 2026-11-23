@@ -4,7 +4,7 @@
 
 Build and Split default to `ProgramOnly`. This profile accepts direct PFS0 members with clear NCA3 Program headers and one clear, un-hashed PartitionFS section containing valid PFS0 framing. It groups members by the ProgramId and content index read from each header. A selection needs at least two ProgramId groups. Duplicate identities and unsupported members fail planning.
 
-The optional `RightsFreeBaseApplicationV1` profile accepts rights-free base Applications with either one Meta and one Program NCA, or one Meta, one Program, and one Control NCA. The operation reads PFS0 member spans, decrypts NCA headers with the selected key file, and groups members by title ID, role, and content index. Package names do not establish member identity.
+The optional `RightsFreeBaseApplicationV1` profile accepts rights-free base Applications with either one Meta and one Program NCA, or one Meta, one Program, and one Control NCA. The operation reads PFS0 member spans, decrypts NCA headers with the selected key file, and groups members by title ID, role, and content index. Package names do not establish member identity. An Application Build requires at least two distinct title ID groups. Split accepts one complete group and requalifies each staged package.
 
 Each Application group must be complete and unique. The Meta CNMT must describe the matching Program and, when present, Control member. The existing semantic qualifier checks the two-member or three-member relationship. Three-member groups also pass the Control NCA integrity and RomFS checks. Orphaned, duplicate, ambiguous, rights-bearing, mixed, or contradictory groups fail planning.
 
