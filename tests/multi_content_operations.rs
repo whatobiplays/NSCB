@@ -1,12 +1,20 @@
 #![cfg(target_os = "macos")]
 
 use nscb::{
-    CancellationHandle, Engine, JobState, MultiContentBuildRequest, MultiContentSplitRequest,
-    OperationArtifactRole, OperationFailureCode, OperationKind, OperationOutcome, OperationSession,
+    CancellationHandle, Engine, JobState, MultiContentBuildRequest, MultiContentProfile,
+    MultiContentSplitRequest, OperationArtifactRole, OperationFailureCode, OperationKind,
+    OperationOutcome, OperationSession,
 };
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::process::Command;
+
+#[allow(dead_code)]
+#[path = "../src/control_nca_test_fixture.rs"]
+mod synthetic_control_nca;
+#[allow(dead_code)]
+#[path = "support/synthetic_nsp_qualification.rs"]
+mod synthetic_nsp_qualification;
 
 const FIRST_PROGRAM_ID: u64 = 0x0102_0304_0506_0708;
 const SECOND_PROGRAM_ID: u64 = 0x1112_1314_1516_1718;
@@ -158,6 +166,421 @@ fn build_then_split_recovers_each_program_group_without_original_sources() {
             b"related component bytes"
         ))
     );
+}
+
+#[test]
+fn application_profile_build_and_split_preserve_qualified_groups() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+
+    let first_application = synthetic_nsp_qualification::valid();
+    let control_nca = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::None,
+        SECOND_PROGRAM_ID,
+    );
+    let second_application = synthetic_nsp_qualification::build_application_with_control(
+        &control_nca.bytes,
+        SECOND_PROGRAM_ID,
+    );
+
+    let first_meta_source = root.path().join("first-meta.pfs0");
+    let first_program_source = root.path().join("first-program.pfs0");
+    let second_source = root.path().join("second-application.pfs0");
+    fs::write(
+        &first_meta_source,
+        pfs0(&[("program.nca", first_application.meta_nca.clone())]),
+    )
+    .expect("first Meta source");
+    fs::write(
+        &first_program_source,
+        pfs0(&[("meta.cnmt.nca", first_application.program_nca.clone())]),
+    )
+    .expect("first Program source");
+    fs::write(
+        &second_source,
+        pfs0(&[
+            ("program.nca", second_application.meta_nca.clone()),
+            ("meta.cnmt.nca", second_application.control_nca.clone()),
+            ("control.nca", second_application.program_nca.clone()),
+        ]),
+    )
+    .expect("second Application source");
+    let key_file = root.path().join("prod.keys");
+    fs::write(&key_file, &first_application.key_file).expect("key file");
+
+    let source_bytes = [
+        fs::read(&first_meta_source).expect("first Meta source bytes"),
+        fs::read(&first_program_source).expect("first Program source bytes"),
+        fs::read(&second_source).expect("second source bytes"),
+    ];
+    let profile = MultiContentProfile::RightsFreeBaseApplicationV1;
+    let engine = Engine::new();
+    let combined = root.path().join("combined.pfs0");
+    let build_plan = engine
+        .plan_multi_content_build(
+            MultiContentBuildRequest::new(
+                [
+                    first_program_source.clone(),
+                    second_source.clone(),
+                    first_meta_source.clone(),
+                ],
+                &combined,
+                &workspace,
+            )
+            .with_profile(profile)
+            .with_key_file(&key_file),
+        )
+        .expect("build plan");
+    assert_eq!(build_plan.snapshot().content_groups().len(), 2);
+    let build = engine.execute_operation(build_plan, &Default::default());
+    assert_eq!(
+        build.state(),
+        JobState::Succeeded,
+        "failure={:?}, cleanup_warning={:?}",
+        build.failure().map(|failure| failure.code()),
+        build.cleanup_warning().map(|failure| failure.code())
+    );
+    assert_eq!(build.outcome(), Some(OperationOutcome::Built));
+
+    let repeated = root.path().join("repeated.pfs0");
+    let repeated_plan = engine
+        .plan_multi_content_build(
+            MultiContentBuildRequest::new(
+                [
+                    first_meta_source.clone(),
+                    second_source.clone(),
+                    first_program_source.clone(),
+                ],
+                &repeated,
+                &workspace,
+            )
+            .with_profile(profile)
+            .with_key_file(&key_file),
+        )
+        .expect("repeat build plan");
+    assert_eq!(
+        engine
+            .execute_operation(repeated_plan, &Default::default())
+            .outcome(),
+        Some(OperationOutcome::Built)
+    );
+    assert_eq!(
+        fs::read(&combined).expect("combined package"),
+        fs::read(&repeated).expect("repeated package")
+    );
+
+    let built_members = read_pfs0(&fs::read(&combined).expect("combined package"));
+    assert_eq!(
+        built_members
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "0100123456789ABC_meta_00000000.nca",
+            "0100123456789ABC_00000000.nca",
+            "1112131415161718_meta_00000000.nca",
+            "1112131415161718_00000000.nca",
+            "1112131415161718_control_00000000.nca",
+        ]
+    );
+    let built_payloads = built_members
+        .iter()
+        .map(|(_, bytes)| bytes)
+        .collect::<Vec<_>>();
+    let expected_payloads = [
+        &first_application.meta_nca,
+        &first_application.program_nca,
+        &second_application.meta_nca,
+        &second_application.program_nca,
+        &second_application.control_nca,
+    ];
+    for (actual, expected) in built_payloads.iter().zip(expected_payloads) {
+        assert_eq!(actual.as_slice(), expected.as_slice());
+        assert_eq!(sha256(actual), sha256(expected));
+    }
+    for (path, before) in [&first_meta_source, &first_program_source, &second_source]
+        .iter()
+        .zip(source_bytes)
+    {
+        assert_eq!(fs::read(path).expect("source remains unchanged"), before);
+    }
+
+    for path in [&first_meta_source, &first_program_source, &second_source] {
+        fs::remove_file(path).expect("remove original source package");
+    }
+    let split_directory = root.path().join("split-output");
+    let split_plan = engine
+        .plan_multi_content_split(
+            MultiContentSplitRequest::new(&combined, &split_directory, &workspace)
+                .with_profile(profile)
+                .with_key_file(&key_file),
+        )
+        .expect("split plan after deleting original packages");
+    assert_eq!(split_plan.snapshot().content_groups().len(), 2);
+    let split = engine.execute_operation(split_plan, &Default::default());
+    assert_eq!(
+        split.state(),
+        JobState::Succeeded,
+        "failure={:?}, cleanup_warning={:?}",
+        split.failure().map(|failure| failure.code()),
+        split.cleanup_warning().map(|failure| failure.code())
+    );
+    assert_eq!(split.outcome(), Some(OperationOutcome::Split));
+
+    let first_split =
+        read_pfs0(&fs::read(split_directory.join("0100123456789abc.pfs0")).expect("first output"));
+    let second_split =
+        read_pfs0(&fs::read(split_directory.join("1112131415161718.pfs0")).expect("second output"));
+    assert_eq!(first_split.len(), 2);
+    assert_eq!(second_split.len(), 3);
+    assert_eq!(first_split[0].1, first_application.meta_nca);
+    assert_eq!(first_split[1].1, first_application.program_nca);
+    assert_eq!(second_split[0].1, second_application.meta_nca);
+    assert_eq!(second_split[1].1, second_application.program_nca);
+    assert_eq!(second_split[2].1, second_application.control_nca);
+}
+
+#[test]
+fn application_profile_rejects_incomplete_duplicate_and_mixed_groups() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let fixture = synthetic_nsp_qualification::valid();
+    let key_file = root.path().join("prod.keys");
+    fs::write(&key_file, &fixture.key_file).expect("key file");
+    let engine = Engine::new();
+
+    let orphan = root.path().join("orphan.pfs0");
+    fs::write(
+        &orphan,
+        pfs0(&[("meta-looking-program.nca", fixture.program_nca.clone())]),
+    )
+    .expect("orphan package");
+    let orphan_result = engine.plan_multi_content_build(application_build_request(
+        vec![orphan],
+        root.path().join("orphan-output.pfs0"),
+        &workspace,
+        &key_file,
+    ));
+    assert_eq!(
+        orphan_result.err().map(|error| error.code()),
+        Some(OperationFailureCode::AmbiguousContentGrouping)
+    );
+
+    let duplicate = root.path().join("duplicate.pfs0");
+    fs::write(
+        &duplicate,
+        pfs0(&[
+            ("control-looking-meta.nca", fixture.meta_nca.clone()),
+            ("meta-looking-program.nca", fixture.program_nca.clone()),
+            ("second-program.nca", fixture.program_nca.clone()),
+        ]),
+    )
+    .expect("duplicate package");
+    let duplicate_result = engine.plan_multi_content_build(application_build_request(
+        vec![duplicate],
+        root.path().join("duplicate-output.pfs0"),
+        &workspace,
+        &key_file,
+    ));
+    assert_eq!(
+        duplicate_result.err().map(|error| error.code()),
+        Some(OperationFailureCode::DuplicateContentMember)
+    );
+
+    let mixed = root.path().join("mixed.pfs0");
+    fs::write(
+        &mixed,
+        pfs0(&[
+            ("program.nca", fixture.meta_nca),
+            ("meta.cnmt.nca", fixture.program_nca),
+            ("extra.bin", b"not an NCA".to_vec()),
+        ]),
+    )
+    .expect("mixed package");
+    let mixed_result = engine.plan_multi_content_build(application_build_request(
+        vec![mixed],
+        root.path().join("mixed-output.pfs0"),
+        &workspace,
+        &key_file,
+    ));
+    assert_eq!(
+        mixed_result.err().map(|error| error.code()),
+        Some(OperationFailureCode::UnsupportedContentProfile)
+    );
+}
+
+#[test]
+fn application_profile_requires_a_readable_key_file() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let fixture = synthetic_nsp_qualification::valid();
+    let source = root.path().join("application.pfs0");
+    fs::write(&source, &fixture.package).expect("source package");
+    let engine = Engine::new();
+
+    let missing_key = engine.plan_multi_content_build(
+        MultiContentBuildRequest::new(
+            vec![source.clone()],
+            root.path().join("missing-key-output.pfs0"),
+            &workspace,
+        )
+        .with_profile(MultiContentProfile::RightsFreeBaseApplicationV1),
+    );
+    assert_eq!(
+        missing_key.err().map(|error| error.code()),
+        Some(OperationFailureCode::KeyFileUnavailable)
+    );
+
+    let malformed_key = root.path().join("malformed.keys");
+    fs::write(&malformed_key, b"not a recognized key file\n").expect("malformed key file");
+    let malformed = engine.plan_multi_content_build(application_build_request(
+        vec![source],
+        root.path().join("malformed-key-output.pfs0"),
+        &workspace,
+        malformed_key,
+    ));
+    assert!(malformed.is_err());
+}
+
+#[test]
+fn application_profile_rejects_contradictory_cnmt_and_invalid_control_integrity() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let key_file = root.path().join("prod.keys");
+    let engine = Engine::new();
+
+    let contradictory = synthetic_nsp_qualification::build_with_cnmt_change(|cnmt| {
+        cnmt[..8].copy_from_slice(&(synthetic_nsp_qualification::PROGRAM_ID + 1).to_le_bytes());
+    });
+    fs::write(&key_file, &contradictory.key_file).expect("two-member keys");
+    let contradictory_source = root.path().join("contradictory.pfs0");
+    fs::write(
+        &contradictory_source,
+        pfs0(&[
+            ("program.nca", contradictory.program_nca),
+            ("meta.cnmt.nca", contradictory.meta_nca),
+        ]),
+    )
+    .expect("contradictory package");
+    let contradictory_result = engine.plan_multi_content_build(application_build_request(
+        vec![contradictory_source],
+        root.path().join("contradictory-output.pfs0"),
+        &workspace,
+        &key_file,
+    ));
+    assert!(contradictory_result.is_err());
+
+    let control = synthetic_control_nca::build_for_program_id(
+        &synthetic_control_nca::empty_romfs(),
+        synthetic_control_nca::Mutation::CorruptMasterHash,
+        SECOND_PROGRAM_ID,
+    );
+    let with_control = synthetic_nsp_qualification::build_application_with_control(
+        &control.bytes,
+        SECOND_PROGRAM_ID,
+    );
+    fs::write(&key_file, &with_control.key_file).expect("three-member keys");
+    let control_source = root.path().join("invalid-control.pfs0");
+    fs::write(
+        &control_source,
+        pfs0(&[
+            ("control.nca", with_control.control_nca),
+            ("program.nca", with_control.program_nca),
+            ("meta.nca", with_control.meta_nca),
+        ]),
+    )
+    .expect("invalid Control package");
+    let control_destination = root.path().join("invalid-control-output.pfs0");
+    let control_result = engine.plan_multi_content_build(application_build_request(
+        vec![control_source],
+        &control_destination,
+        &workspace,
+        &key_file,
+    ));
+    assert!(control_result.is_err());
+    assert!(!control_destination.exists());
+}
+
+#[test]
+fn application_profile_binds_source_and_key_evidence_to_execution() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let fixture = synthetic_nsp_qualification::valid();
+    let key_file = root.path().join("prod.keys");
+    fs::write(&key_file, &fixture.key_file).expect("key file");
+    let source = root.path().join("application.pfs0");
+    fs::write(
+        &source,
+        pfs0(&[
+            ("meta.nca", fixture.meta_nca.clone()),
+            ("program.nca", fixture.program_nca.clone()),
+        ]),
+    )
+    .expect("source package");
+    let engine = Engine::new();
+
+    let key_destination = root.path().join("key-changed-output.pfs0");
+    let key_plan = engine
+        .plan_multi_content_build(application_build_request(
+            vec![source.clone()],
+            &key_destination,
+            &workspace,
+            &key_file,
+        ))
+        .expect("key-bound plan");
+    assert!(key_plan.snapshot().qualification_key().is_some());
+    let snapshot = serde_json::to_string(key_plan.snapshot()).expect("plan snapshot JSON");
+    let key_text = std::str::from_utf8(&fixture.key_file).expect("key text");
+    for line in key_text.lines() {
+        let secret = line.split_once('=').expect("key assignment").1.trim();
+        assert!(!snapshot.contains(secret));
+    }
+    fs::write(&key_file, b"changed key file\n").expect("change key file");
+    let key_result = engine.execute_operation(key_plan, &Default::default());
+    assert_eq!(key_result.state(), JobState::Failed);
+    assert_eq!(
+        key_result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::KeyFileChanged)
+    );
+    assert!(!key_destination.exists());
+
+    fs::write(&key_file, &fixture.key_file).expect("restore key file");
+    let source_destination = root.path().join("source-changed-output.pfs0");
+    let source_plan = engine
+        .plan_multi_content_build(application_build_request(
+            vec![source.clone()],
+            &source_destination,
+            &workspace,
+            &key_file,
+        ))
+        .expect("source-bound plan");
+    let mut changed_source = fs::read(&source).expect("source bytes");
+    changed_source.push(0);
+    fs::write(&source, changed_source).expect("change source package");
+    let source_result = engine.execute_operation(source_plan, &Default::default());
+    assert_eq!(source_result.state(), JobState::Failed);
+    assert_eq!(
+        source_result.failure().map(|failure| failure.code()),
+        Some(OperationFailureCode::SourceChanged)
+    );
+    assert!(!source_destination.exists());
+}
+
+fn application_build_request(
+    sources: Vec<std::path::PathBuf>,
+    destination: impl Into<std::path::PathBuf>,
+    workspace: impl Into<std::path::PathBuf>,
+    key_file: impl Into<std::path::PathBuf>,
+) -> MultiContentBuildRequest {
+    MultiContentBuildRequest::new(sources, destination, workspace)
+        .with_profile(MultiContentProfile::RightsFreeBaseApplicationV1)
+        .with_key_file(key_file)
 }
 
 #[test]

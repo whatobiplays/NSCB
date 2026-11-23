@@ -908,7 +908,7 @@ fn run_with_control(
             || argument == OsStr::new("nsp-to-nsz")
             || argument == OsStr::new("nsz-to-nsp")
     }) {
-        return run_multi_content_command(args, engine, stdout, stderr);
+        return run_multi_content_command(args, engine, standalone, stdout, stderr);
     }
 
     if is_split_command(args) {
@@ -1020,6 +1020,8 @@ enum MultiContentInvocation {
         sources: Vec<PathBuf>,
         destination: PathBuf,
         workspace: PathBuf,
+        profile: nscb::MultiContentProfile,
+        key_file: Option<PathBuf>,
         conflict_policy: ConflictPolicy,
         json: bool,
         jsonl: bool,
@@ -1028,6 +1030,8 @@ enum MultiContentInvocation {
         source: PathBuf,
         destination_directory: PathBuf,
         workspace: PathBuf,
+        profile: nscb::MultiContentProfile,
+        key_file: Option<PathBuf>,
         conflict_policy: ConflictPolicy,
         json: bool,
         jsonl: bool,
@@ -1122,6 +1126,8 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
     let mut destination = None;
     let mut destination_directory = None;
     let mut key_file = None;
+    let mut profile = nscb::MultiContentProfile::ProgramOnly;
+    let mut profile_seen = false;
     let mut workspace = None;
     let mut conflict_policy = ConflictPolicy::Fail;
     let mut conflict_policy_seen = false;
@@ -1135,7 +1141,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
         index += 1;
         match option {
             "--source" | "--output" | "--output-directory" | "--workspace" | "--keys"
-            | "--conflict-policy" | "--preset" | "--level" => {
+            | "--profile" | "--conflict-policy" | "--preset" | "--level" => {
                 let value = args.get(index).ok_or(())?;
                 if value.is_empty() {
                     return Err(());
@@ -1152,8 +1158,21 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                     "--output-directory" if !is_build && destination_directory.is_none() => {
                         destination_directory = Some(PathBuf::from(value));
                     }
-                    "--keys" if (is_xci_xcz_conversion || is_nsp_nsz) && key_file.is_none() => {
+                    "--keys"
+                        if (is_build || is_split || is_xci_xcz_conversion || is_nsp_nsz)
+                            && key_file.is_none() =>
+                    {
                         key_file = Some(PathBuf::from(value));
+                    }
+                    "--profile" if (is_build || is_split) && !profile_seen => {
+                        profile_seen = true;
+                        profile = match value.to_str().ok_or(())? {
+                            "program-only" => nscb::MultiContentProfile::ProgramOnly,
+                            "rights-free-base-application-v1" => {
+                                nscb::MultiContentProfile::RightsFreeBaseApplicationV1
+                            }
+                            _ => return Err(()),
+                        };
                     }
                     "--workspace" if workspace.is_none() => {
                         workspace = Some(PathBuf::from(value));
@@ -1195,25 +1214,35 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
 
     let workspace = workspace.ok_or(())?;
     if is_build {
-        if sources.is_empty() || destination_directory.is_some() {
+        if sources.is_empty()
+            || destination_directory.is_some()
+            || (key_file.is_some() && profile == nscb::MultiContentProfile::ProgramOnly)
+        {
             return Err(());
         }
         Ok(MultiContentInvocation::Build {
             sources,
             destination: destination.ok_or(())?,
             workspace,
+            profile,
+            key_file,
             conflict_policy,
             json,
             jsonl,
         })
     } else if is_split {
-        if sources.len() != 1 || destination.is_some() {
+        if sources.len() != 1
+            || destination.is_some()
+            || (key_file.is_some() && profile == nscb::MultiContentProfile::ProgramOnly)
+        {
             return Err(());
         }
         Ok(MultiContentInvocation::Split {
             source: sources.remove(0),
             destination_directory: destination_directory.ok_or(())?,
             workspace,
+            profile,
+            key_file,
             conflict_policy,
             json,
             jsonl,
@@ -1290,8 +1319,12 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
 
 #[cfg(test)]
 mod nsp_nsz_cli_tests {
-    use super::{MultiContentInvocation, parse_multi_content_invocation};
+    use super::{
+        MultiContentInvocation, parse_multi_content_invocation, resolve_inspection_key_file,
+        resolve_multi_content_key_file,
+    };
     use std::ffi::OsString;
+    use std::path::PathBuf;
 
     fn conversion_args(command: &str) -> Vec<OsString> {
         [
@@ -1355,6 +1388,113 @@ mod nsp_nsz_cli_tests {
                 "conversion command rejected its required arguments"
             );
         }
+    }
+
+    #[test]
+    fn multi_content_accepts_application_profile_and_resolves_key_precedence() {
+        let mut args = [
+            "multi-content-build",
+            "--source",
+            "input.pfs0",
+            "--output",
+            "output.pfs0",
+            "--workspace",
+            "workspace",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        let default = parse_multi_content_invocation(&args).expect("default profile");
+        assert!(matches!(
+            default,
+            MultiContentInvocation::Build {
+                profile: nscb::MultiContentProfile::ProgramOnly,
+                key_file: None,
+                ..
+            }
+        ));
+
+        let mut configured_key_args = args.clone();
+        configured_key_args.extend(
+            ["--profile", "rights-free-base-application-v1"]
+                .into_iter()
+                .map(OsString::from),
+        );
+        assert!(matches!(
+            parse_multi_content_invocation(&configured_key_args),
+            Ok(MultiContentInvocation::Build {
+                profile: nscb::MultiContentProfile::RightsFreeBaseApplicationV1,
+                key_file: None,
+                ..
+            })
+        ));
+
+        args.extend(
+            [
+                "--profile",
+                "rights-free-base-application-v1",
+                "--keys",
+                "explicit.keys",
+            ]
+            .into_iter()
+            .map(OsString::from),
+        );
+        let explicit = parse_multi_content_invocation(&args).expect("application profile");
+        assert!(matches!(
+            explicit,
+            MultiContentInvocation::Build {
+                profile: nscb::MultiContentProfile::RightsFreeBaseApplicationV1,
+                key_file: Some(path),
+                ..
+            } if path == std::path::Path::new("explicit.keys")
+        ));
+
+        let explicit = PathBuf::from("explicit.keys");
+        let configured = PathBuf::from("configured.keys");
+        let home = PathBuf::from("/fake-home");
+        assert_eq!(
+            resolve_inspection_key_file(
+                Some(explicit.clone()),
+                Some(configured.clone()),
+                Some(home.clone()),
+            ),
+            Ok(explicit.clone())
+        );
+        assert_eq!(
+            resolve_inspection_key_file(None, Some(configured.clone()), Some(home.clone())),
+            Ok(configured.clone())
+        );
+        assert_eq!(
+            resolve_inspection_key_file(None, None, Some(home.clone())),
+            Ok(home.join(".switch").join("prod.keys"))
+        );
+        assert_eq!(
+            resolve_multi_content_key_file(
+                nscb::MultiContentProfile::RightsFreeBaseApplicationV1,
+                Some(explicit.clone()),
+                None,
+            ),
+            Ok(Some(explicit))
+        );
+    }
+
+    #[test]
+    fn multi_content_rejects_keys_without_application_profile() {
+        let args = [
+            "multi-content-split",
+            "--source",
+            "input.pfs0",
+            "--output-directory",
+            "output",
+            "--workspace",
+            "workspace",
+            "--keys",
+            "explicit.keys",
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+        assert!(parse_multi_content_invocation(&args).is_err());
     }
 
     #[test]
@@ -1434,6 +1574,7 @@ mod nsp_nsz_cli_tests {
 fn run_multi_content_command(
     args: &[OsString],
     engine: &Engine,
+    standalone: Option<&StandaloneConfig>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> i32 {
@@ -1452,38 +1593,63 @@ fn run_multi_content_command(
             sources,
             destination,
             workspace,
+            profile,
+            key_file,
             conflict_policy,
             json,
             jsonl,
-        } => (
-            engine.plan_multi_content_build(
-                nscb::MultiContentBuildRequest::new(sources, destination, workspace)
-                    .with_conflict_policy(conflict_policy),
-            ),
-            json,
-            jsonl,
-            "build",
-            "multi-content",
-            "multi_content.job_result",
-        ),
+        } => {
+            let key_file = match resolve_multi_content_key_file(profile, key_file, standalone) {
+                Ok(key_file) => key_file,
+                Err(_) => return emit_error(stdout, "invalid_key_path", EXIT_USAGE),
+            };
+            let request = nscb::MultiContentBuildRequest::new(sources, destination, workspace)
+                .with_conflict_policy(conflict_policy)
+                .with_profile(profile);
+            let request = match key_file {
+                Some(path) => request.with_key_file(path),
+                None => request,
+            };
+            (
+                engine.plan_multi_content_build(request),
+                json,
+                jsonl,
+                "build",
+                "multi-content",
+                "multi_content.job_result",
+            )
+        }
         MultiContentInvocation::Split {
             source,
             destination_directory,
             workspace,
+            profile,
+            key_file,
             conflict_policy,
             json,
             jsonl,
-        } => (
-            engine.plan_multi_content_split(
+        } => {
+            let key_file = match resolve_multi_content_key_file(profile, key_file, standalone) {
+                Ok(key_file) => key_file,
+                Err(_) => return emit_error(stdout, "invalid_key_path", EXIT_USAGE),
+            };
+            let request =
                 nscb::MultiContentSplitRequest::new(source, destination_directory, workspace)
-                    .with_conflict_policy(conflict_policy),
-            ),
-            json,
-            jsonl,
-            "split",
-            "multi-content",
-            "multi_content.job_result",
-        ),
+                    .with_conflict_policy(conflict_policy)
+                    .with_profile(profile);
+            let request = match key_file {
+                Some(path) => request.with_key_file(path),
+                None => request,
+            };
+            (
+                engine.plan_multi_content_split(request),
+                json,
+                jsonl,
+                "split",
+                "multi-content",
+                "multi_content.job_result",
+            )
+        }
         MultiContentInvocation::XciToNsp {
             source,
             destination,
@@ -1718,12 +1884,12 @@ fn multi_content_usage(args: &[OsString]) -> &'static str {
         .first()
         .is_some_and(|value| value == OsStr::new("multi-content-build"))
     {
-        "usage: multi-content-build --source PACKAGE [--source PACKAGE...] --output PACKAGE --workspace DIR [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+        "usage: multi-content-build --source PACKAGE [--source PACKAGE...] --output PACKAGE --workspace DIR [--profile rights-free-base-application-v1] [--keys FILE] [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     } else if args
         .first()
         .is_some_and(|value| value == OsStr::new("multi-content-split"))
     {
-        "usage: multi-content-split --source PACKAGE --output-directory DIR --workspace DIR [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+        "usage: multi-content-split --source PACKAGE --output-directory DIR --workspace DIR [--profile rights-free-base-application-v1] [--keys FILE] [--conflict-policy fail|replace|skip] [--json|--jsonl]"
     } else if args
         .first()
         .is_some_and(|value| value == OsStr::new("nsp-to-nsz"))
@@ -2763,6 +2929,26 @@ fn resolve_cli_key_file(
         .map_err(|_| CliKeyFileResolutionError::InvalidPath)?;
     resolve_inspection_key_file(None, configured, home)
         .map_err(|_| CliKeyFileResolutionError::InvalidPath)
+}
+
+fn resolve_multi_content_key_file(
+    profile: nscb::MultiContentProfile,
+    explicit: Option<PathBuf>,
+    standalone: Option<&StandaloneConfig>,
+) -> Result<Option<PathBuf>, CliKeyFileResolutionError> {
+    match profile {
+        nscb::MultiContentProfile::ProgramOnly => {
+            if explicit.is_some() {
+                Err(CliKeyFileResolutionError::InvalidPath)
+            } else {
+                Ok(None)
+            }
+        }
+        nscb::MultiContentProfile::RightsFreeBaseApplicationV1 => {
+            resolve_cli_key_file(explicit, standalone, inspection_home_directory()).map(Some)
+        }
+        _ => Err(CliKeyFileResolutionError::InvalidPath),
+    }
 }
 
 fn resolve_home_directory(

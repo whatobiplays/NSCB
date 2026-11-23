@@ -1,28 +1,30 @@
 # Multi-content Build and Split
 
-## Supported package profile
+## Profiles
 
-Build and Split accept PFS0 packages whose direct members each contain a readable NCA3 Program header. Each NCA must have one clear, un-hashed PartitionFS section with valid PFS0 framing. Member names must be safe, path-free ASCII names without case-fold collisions. Names do not establish content identity.
+Build and Split default to `ProgramOnly`. This profile accepts direct PFS0 members with clear NCA3 Program headers and one clear, un-hashed PartitionFS section containing valid PFS0 framing. It groups members by the ProgramId and content index read from each header. A selection needs at least two ProgramId groups. Duplicate identities and unsupported members fail planning.
 
-The operation reads the 64-bit ProgramId and content index from each NCA header. A logical component is the set of admitted Program NCA members with the same exact ProgramId, ordered by content index. A package needs at least two distinct ProgramId groups. Duplicate ProgramId/content-index pairs and unsupported or ambiguous members fail planning.
+The optional `RightsFreeBaseApplicationV1` profile accepts rights-free base Applications with either one Meta and one Program NCA, or one Meta, one Program, and one Control NCA. The operation reads PFS0 member spans, decrypts NCA headers with the selected key file, and groups members by title ID, role, and content index. Package names do not establish member identity.
+
+Each Application group must be complete and unique. The Meta CNMT must describe the matching Program and, when present, Control member. The existing semantic qualifier checks the two-member or three-member relationship. Three-member groups also pass the Control NCA integrity and RomFS checks. Orphaned, duplicate, ambiguous, rights-bearing, mixed, or contradictory groups fail planning.
 
 ## Build and Split behavior
 
-Build combines the validated NCA members from the selected PFS0 sources into a new deterministic PFS0. Its member names come from ProgramId and content index. Split reads those identities from the NCA bytes and writes one PFS0 per ProgramId into a staged output directory.
+Build combines selected members into a new deterministic PFS0. Split reads the same identities from the member bytes and writes one PFS0 per title ID. Program-only names retain the existing ProgramId and content-index format. Application-profile Meta and Control names include their role and content index; Program names keep the existing format.
 
-The writer streams member bytes in bounded chunks and checks each member against its planned SHA-256 digest. Before publication, the operation revalidates source evidence, reparses the staged PFS0 output or outputs, and compares each parsed member digest with the planned evidence. Build and Split use the Engine's immutable plan, operation session, conflict policy, and staged publication path. Sources remain unchanged.
+The writer streams raw NCA member bytes in bounded chunks and checks each member against its planned SHA-256 digest. Before publication, the operation revalidates the source packages and key file, reparses and requalifies the staged output, and compares every member with the planned identity and digest. The serialized plan records the key-file path, opaque file identity, and length. It does not include key lines, parsed values, or derived keys. Build and Split use the Engine's operation plan, session, conflict policy, and staged publication path. Source packages remain unchanged.
 
-On qualified macOS/APFS volumes, invoke the CLI with:
+On qualified macOS/APFS volumes, the default Program-only commands are:
 
 ```text
 nscb multi-content-build --source FIRST.pfs0 --source SECOND.pfs0 --output COMBINED.pfs0 --workspace WORKSPACE --json
 nscb multi-content-split --source COMBINED.pfs0 --output-directory COMPONENTS --workspace WORKSPACE --json
 ```
 
-Use `--jsonl` for job events and a terminal result. `--conflict-policy` accepts `fail`, `replace`, or `skip`.
+Select the Application profile with `--profile rights-free-base-application-v1`. `--keys FILE` selects a key file explicitly. Without it, the standalone CLI uses the configured `keys_path`, then `~/.switch/prod.keys`. Embedded Engine callers must supply the key-file path for this profile. Program-only commands do not need a key file. Use `--jsonl` for job events and a terminal result. `--conflict-policy` accepts `fail`, `replace`, or `skip`.
 
 ## Limits
 
-Encrypted NCA profiles and structures outside this profile are rejected. Header and PFS0 checks establish structural consistency; they do not establish full content verification, signature validity, or authenticity. Build creates a new PFS0 and does not restore the original NSP container bytes or headers. Split preserves the admitted NCA member bytes and leaves its source package in place.
+The Application profile covers rights-free base Applications with supported NCA3 members and CNMT layouts. It does not accept tickets, updates, DLC, modified or third-party content, legacy `.xcN` or `.nsN` layouts, or groups whose ownership cannot be established from the supported NCA and CNMT bytes.
 
-This operation groups content using NCA metadata. It does not implement Issue #14's generic byte-stream Split, legacy `.xcN`/`.nsN` layouts, or imported multi-content formats whose component ownership cannot be established from the supported bytes.
+These checks establish bounded structural consistency and the stated member relationships. They do not establish Nintendo signature validity, authenticity, installability, or broad package compatibility. Build creates a new PFS0; it does not restore the original package bytes or headers. Split preserves the admitted NCA member bytes and leaves its source package in place. This operation does not implement Issue #14's generic byte-stream Split.

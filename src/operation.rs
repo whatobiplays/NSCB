@@ -22,7 +22,7 @@ use crate::inspection::CancellationHandle;
 #[cfg(target_os = "macos")]
 use crate::multi_content_format::FormatError;
 #[cfg(target_os = "macos")]
-use crate::multi_content_format::{ComponentGroup, ProgramMember};
+use crate::multi_content_format::{ContentGroup, ContentMember};
 use crate::sha256::Sha256Digest;
 use crate::split_operation::{SplitOutputPaths, SplitReceiptCommitState};
 #[cfg(target_os = "macos")]
@@ -262,22 +262,38 @@ impl CopyThroughRequest {
     }
 }
 
-/// Describes a request to combine structurally supported PFS0 content packages.
+/// Selects the validation rules used by multi-content Build and Split operations.
+///
+/// One profile applies to every source package and output group. Program-only
+/// operations remain the default. The Application profile requires a key file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MultiContentProfile {
+    /// Accepts clear Program NCA members grouped by ProgramId.
+    ProgramOnly,
+    /// Accepts rights-free base Applications with one Meta and one Program NCA.
+    /// One Control NCA may be included when its CNMT relationship and integrity qualify.
+    RightsFreeBaseApplicationV1,
+}
+
+/// Describes a request to combine PFS0 members that match the selected profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultiContentBuildRequest {
     sources: Vec<PathBuf>,
     destination: PathBuf,
     workspace: PathBuf,
     conflict_policy: ConflictPolicy,
+    profile: MultiContentProfile,
+    key_file: Option<PathBuf>,
 }
 
 impl MultiContentBuildRequest {
     /// Creates a Build request from one or more source package paths.
     ///
-    /// Every package member must match the readable plaintext Program NCA
-    /// profile supported by the current operation. The output is a newly
-    /// composed PFS0 package; it is not an NSP authenticity or reconstruction
-    /// claim.
+    /// The request defaults to `ProgramOnly`. Use `with_profile` to select the
+    /// rights-free Application profile and `with_key_file` to supply its keys.
+    /// The output is a newly composed PFS0 package, not an NSP reconstruction.
     pub fn new(
         sources: impl IntoIterator<Item = impl Into<PathBuf>>,
         destination: impl Into<PathBuf>,
@@ -288,7 +304,23 @@ impl MultiContentBuildRequest {
             destination: destination.into(),
             workspace: workspace.into(),
             conflict_policy: ConflictPolicy::Fail,
+            profile: MultiContentProfile::ProgramOnly,
+            key_file: None,
         }
+    }
+
+    /// Selects the profile applied to every source package and content group.
+    #[must_use]
+    pub fn with_profile(mut self, profile: MultiContentProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Supplies the resolved key file required by the Application profile.
+    #[must_use]
+    pub fn with_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.key_file = Some(path.into());
+        self
     }
 
     /// Selects how an existing output is handled.
@@ -299,21 +331,23 @@ impl MultiContentBuildRequest {
     }
 }
 
-/// Describes a request to split a multi-Program PFS0 package into component packages.
+/// Describes a request to split supported PFS0 members into component packages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultiContentSplitRequest {
     source: PathBuf,
     destination_directory: PathBuf,
     workspace: PathBuf,
     conflict_policy: ConflictPolicy,
+    profile: MultiContentProfile,
+    key_file: Option<PathBuf>,
 }
 
 impl MultiContentSplitRequest {
     /// Creates a Split request whose destination is one published directory.
     ///
-    /// Each exact ProgramId group is written as a deterministic PFS0 package
-    /// inside the directory. The directory is staged and published as one
-    /// operation unit.
+    /// The request defaults to `ProgramOnly`. Use `with_profile` to select the
+    /// rights-free Application profile and `with_key_file` to supply its keys.
+    /// The directory is staged and published as one operation unit.
     pub fn new(
         source: impl Into<PathBuf>,
         destination_directory: impl Into<PathBuf>,
@@ -324,7 +358,23 @@ impl MultiContentSplitRequest {
             destination_directory: destination_directory.into(),
             workspace: workspace.into(),
             conflict_policy: ConflictPolicy::Fail,
+            profile: MultiContentProfile::ProgramOnly,
+            key_file: None,
         }
+    }
+
+    /// Selects the profile used to validate and split every content group.
+    #[must_use]
+    pub fn with_profile(mut self, profile: MultiContentProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Supplies the resolved key file required by the Application profile.
+    #[must_use]
+    pub fn with_key_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.key_file = Some(path.into());
+        self
     }
 
     /// Selects how an existing output directory is handled.
@@ -1161,20 +1211,54 @@ impl PlannedSource {
     }
 }
 
-/// One exact ProgramId group resolved by a multi-content plan.
+/// Plan evidence for the key file used to qualify an Application profile.
+///
+/// The snapshot records the file path, identity, and length. It never stores
+/// key lines, parsed key values, or derived keys.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PlannedQualificationKey {
+    path: PathBuf,
+    identity: Sha256Digest,
+    size: u64,
+}
+
+impl PlannedQualificationKey {
+    /// Returns the canonical path of the qualification key file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns an opaque digest of the file identity observed during planning.
+    pub const fn identity(&self) -> Sha256Digest {
+        self.identity
+    }
+
+    /// Returns the key-file length observed during planning.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+/// One title-ID group resolved by a multi-content plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlannedContentGroup {
     program_id: u64,
+    profile: MultiContentProfile,
     members: Vec<PlannedContentMember>,
 }
 
 impl PlannedContentGroup {
-    /// Returns the ProgramId parsed from each member's supported NCA header.
+    /// Returns the profile used to qualify this group.
+    pub const fn profile(&self) -> MultiContentProfile {
+        self.profile
+    }
+
+    /// Returns the title ID parsed from each member's supported NCA header.
     pub const fn program_id(&self) -> u64 {
         self.program_id
     }
 
-    /// Returns the number of validated Program NCA members in this group.
+    /// Returns the number of qualified NCA members in this group.
     pub const fn member_count(&self) -> usize {
         self.members.len()
     }
@@ -1185,11 +1269,12 @@ impl PlannedContentGroup {
     }
 }
 
-/// One structurally validated NCA member captured by a multi-content plan.
+/// One qualified NCA member captured by a multi-content plan.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PlannedContentMember {
     source_path: PathBuf,
     content_index: u32,
+    role: &'static str,
     size: u64,
     sha256: Sha256Digest,
 }
@@ -1203,6 +1288,11 @@ impl PlannedContentMember {
     /// Returns the content index parsed from the NCA header bytes.
     pub const fn content_index(&self) -> u32 {
         self.content_index
+    }
+
+    /// Returns the NCA role derived from its header and qualification evidence.
+    pub const fn role(&self) -> &'static str {
+        self.role
     }
 
     /// Returns the member size observed during planning.
@@ -1315,6 +1405,9 @@ pub struct OperationPlanSnapshot {
     source: PlannedSource,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     sources: Vec<PlannedSource>,
+    /// Identity-only evidence for the key file used by semantic qualification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    qualification_key: Option<PlannedQualificationKey>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     content_groups: Vec<PlannedContentGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1360,6 +1453,11 @@ impl OperationPlanSnapshot {
     /// Returns the complete source identity and content evidence captured by planning.
     pub const fn source(&self) -> &PlannedSource {
         &self.source
+    }
+
+    /// Returns the key-file identity used for rights-free Application checks.
+    pub fn qualification_key(&self) -> Option<&PlannedQualificationKey> {
+        self.qualification_key.as_ref()
     }
 
     /// Returns every input package captured by the plan in deterministic order.
@@ -2361,8 +2459,11 @@ struct FileEvidence {
 struct ContentSourceSet {
     files: Vec<ResolvedFile>,
     evidence: Vec<FileEvidence>,
-    groups: Vec<ComponentGroup>,
-    members: Vec<ProgramMember>,
+    profile: MultiContentProfile,
+    key_file: Option<ResolvedFile>,
+    key_evidence: Option<FileEvidence>,
+    groups: Vec<ContentGroup>,
+    members: Vec<ContentMember>,
     outputs: Vec<ContentOutputEvidence>,
     total_member_bytes: u64,
 }
@@ -2372,7 +2473,7 @@ struct ContentSourceSet {
 struct ContentOutputEvidence {
     name: Option<OsString>,
     program_id: Option<u64>,
-    members: Vec<ProgramMember>,
+    members: Vec<ContentMember>,
     length: u64,
     sha256: Sha256Digest,
 }
@@ -3504,7 +3605,21 @@ pub(crate) fn map_content_format_error(error: FormatError) -> OperationFailureCo
 }
 
 #[cfg(target_os = "macos")]
-fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, OperationError> {
+fn resolve_content_sources(
+    paths: &[PathBuf],
+    profile: MultiContentProfile,
+    requested_key_file: Option<&Path>,
+) -> Result<ContentSourceSet, OperationError> {
+    resolve_content_sources_with_cancellation_probe(paths, profile, requested_key_file, || false)
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_content_sources_with_cancellation_probe(
+    paths: &[PathBuf],
+    profile: MultiContentProfile,
+    requested_key_file: Option<&Path>,
+    mut cancellation_probe: impl FnMut() -> bool,
+) -> Result<ContentSourceSet, OperationError> {
     if paths.is_empty() {
         return Err(OperationError::new(OperationFailureCode::EmptySelection));
     }
@@ -3513,6 +3628,46 @@ fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, Operat
             OperationFailureCode::ResourceLimitExceeded,
         ));
     }
+
+    let (key_file, key_evidence) = match (profile, requested_key_file) {
+        (MultiContentProfile::ProgramOnly, None) => (None, None),
+        (MultiContentProfile::ProgramOnly, Some(_)) => {
+            return Err(OperationError::new(
+                OperationFailureCode::UnsupportedContentProfile,
+            ));
+        }
+        (MultiContentProfile::RightsFreeBaseApplicationV1, Some(path)) => {
+            let mut resolved = resolve_file(path, OperationFailureCode::KeyFileUnavailable)?;
+            let parent = open_directory(&resolved.parent)
+                .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+            let mut key = open_file_at(&parent, &resolved.name)
+                .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+            let evidence = inspect_file(&mut key)
+                .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+            let canonical_path = fs::canonicalize(&resolved.path)
+                .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+            let canonical_parent = canonical_path
+                .parent()
+                .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+            let canonical_name = canonical_path
+                .file_name()
+                .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?
+                .to_os_string();
+            if canonical_parent != resolved.parent {
+                return Err(OperationError::new(OperationFailureCode::StalePlan));
+            }
+            resolved.path = canonical_path;
+            resolved.name = canonical_name;
+            validate_file_route(&resolved, None)
+                .map_err(|_| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+            (Some(resolved), Some(evidence))
+        }
+        (MultiContentProfile::RightsFreeBaseApplicationV1, None) => {
+            return Err(OperationError::new(
+                OperationFailureCode::KeyFileUnavailable,
+            ));
+        }
+    };
 
     let mut files = Vec::new();
     files
@@ -3556,24 +3711,94 @@ fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, Operat
         resolved.path = canonical_path;
         resolved.name = canonical_name;
 
-        let package = crate::multi_content_format::inspect_package(&resolved.path)
-            .map_err(|error| OperationError::new(map_content_format_error(error)))?;
+        if key_evidence
+            .as_ref()
+            .is_some_and(|key| key.identity == baseline.identity)
+        {
+            return Err(OperationError::new(OperationFailureCode::UnsafePath));
+        }
+        let source_index = files.len();
+        let package_members = match profile {
+            MultiContentProfile::ProgramOnly => {
+                let package = crate::multi_content_format::inspect_package(&resolved.path)
+                    .map_err(|error| OperationError::new(map_content_format_error(error)))?;
+                package.members
+            }
+            MultiContentProfile::RightsFreeBaseApplicationV1 => {
+                let key_path = key_file
+                    .as_ref()
+                    .map(|file| file.path.as_path())
+                    .ok_or_else(|| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+                let key_snapshot = key_evidence
+                    .as_ref()
+                    .map(|evidence| evidence.snapshot.clone())
+                    .ok_or_else(|| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+                let request =
+                    crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+                        resolved.path.clone(),
+                        key_path.to_path_buf(),
+                    )
+                    .with_expected_key_snapshot(key_snapshot);
+                let inventory = crate::nsp_semantic_qualification::
+                    inspect_application_members_with_cancellation_probe(
+                        request,
+                        &mut cancellation_probe,
+                    )
+                    .map_err(|error| OperationError::new(map_nsp_semantic_error(error.code())))?;
+                match inventory {
+                    crate::nsp_semantic_qualification::NspApplicationMemberInspectionOutcome::
+                        Inspected(members) => members
+                            .into_iter()
+                            .map(|member| ContentMember {
+                                source_path: resolved.path.clone(),
+                                source_file_offset: member.offset,
+                                source_index,
+                                size: member.size,
+                                program_id: member.title_id,
+                                content_index: member.content_index,
+                                role: match member.role {
+                                    crate::nsp_semantic_qualification::
+                                        NspApplicationMemberRole::Meta => {
+                                        crate::multi_content_format::ContentMemberRole::Meta
+                                    }
+                                    crate::nsp_semantic_qualification::
+                                        NspApplicationMemberRole::Program => {
+                                        crate::multi_content_format::ContentMemberRole::Program
+                                    }
+                                    crate::nsp_semantic_qualification::
+                                        NspApplicationMemberRole::Control => {
+                                        crate::multi_content_format::ContentMemberRole::Control
+                                    }
+                                },
+                                sha256: member.sha256,
+                            })
+                            .collect(),
+                    crate::nsp_semantic_qualification::NspApplicationMemberInspectionOutcome::
+                        NotQualified(_) => {
+                        return Err(OperationError::new(
+                            OperationFailureCode::UnsupportedContentProfile,
+                        ));
+                    }
+                }
+            }
+        };
         verify_file_evidence(&mut source, &baseline)
             .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
         validate_file_route(&resolved, None).map_err(OperationError::new)?;
-        if package.members.len() > MAX_MULTI_CONTENT_MEMBERS.saturating_sub(members.len()) {
+        if package_members.len() > MAX_MULTI_CONTENT_MEMBERS.saturating_sub(members.len()) {
             return Err(OperationError::new(
                 OperationFailureCode::ResourceLimitExceeded,
             ));
         }
         member_identities
-            .try_reserve(package.members.len())
+            .try_reserve(package_members.len())
             .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
         members
-            .try_reserve(package.members.len())
+            .try_reserve(package_members.len())
             .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
-        for member in package.members {
-            if !member_identities.insert((member.program_id, member.content_index)) {
+        for mut member in package_members {
+            member.source_index = source_index;
+            if !member_identities.insert((member.program_id, member.role, member.content_index)) {
                 return Err(OperationError::new(
                     OperationFailureCode::DuplicateContentMember,
                 ));
@@ -3598,9 +3823,24 @@ fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, Operat
     if files.windows(2).any(|pair| pair[0].path == pair[1].path) {
         return Err(OperationError::new(OperationFailureCode::DuplicateInput));
     }
-    members.sort_by_key(|member| (member.program_id, member.content_index));
+    let mut source_remap = vec![0; order.len()];
+    for (sorted_index, original_index) in order.iter().copied().enumerate() {
+        source_remap[original_index] = sorted_index;
+    }
+    for member in &mut members {
+        member.source_index = *source_remap
+            .get(member.source_index)
+            .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+    }
+    members.sort_by_key(|member| {
+        (
+            member.program_id,
+            member.role.sort_order(),
+            member.content_index,
+        )
+    });
 
-    let mut groups: Vec<ComponentGroup> = Vec::new();
+    let mut groups: Vec<ContentGroup> = Vec::new();
     groups
         .try_reserve_exact(members.len())
         .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
@@ -3620,16 +3860,26 @@ fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, Operat
                 .try_reserve_exact(1)
                 .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
             group_members.push(member.clone());
-            groups.push(ComponentGroup {
+            groups.push(ContentGroup {
                 program_id: member.program_id,
                 members: group_members,
             });
         }
     }
-    if groups.len() < 2 {
+    if profile == MultiContentProfile::ProgramOnly && groups.len() < 2 {
         return Err(OperationError::new(
             OperationFailureCode::InsufficientContentEvidence,
         ));
+    }
+    if profile == MultiContentProfile::RightsFreeBaseApplicationV1 {
+        if groups.is_empty() {
+            return Err(OperationError::new(
+                OperationFailureCode::InsufficientContentEvidence,
+            ));
+        }
+        for group in &groups {
+            validate_application_group(group)?;
+        }
     }
 
     let total_member_bytes = members
@@ -3637,19 +3887,468 @@ fn resolve_content_sources(paths: &[PathBuf]) -> Result<ContentSourceSet, Operat
         .try_fold(0_u64, |total, member| total.checked_add(member.size));
     let total_member_bytes = total_member_bytes
         .ok_or_else(|| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
-    Ok(ContentSourceSet {
+    let source = ContentSourceSet {
         files,
         evidence,
+        profile,
+        key_file,
+        key_evidence,
         groups,
         members,
         outputs: Vec::new(),
         total_member_bytes,
-    })
+    };
+    if profile == MultiContentProfile::RightsFreeBaseApplicationV1 {
+        for group in &source.groups {
+            if cancellation_probe() {
+                return Err(OperationError::new(OperationFailureCode::Cancelled));
+            }
+            qualify_application_content_group(&source, group, &mut cancellation_probe)?;
+        }
+    }
+    Ok(source)
+}
+
+#[cfg(target_os = "macos")]
+/// One source file opened against the evidence captured for an Application group.
+struct ContentGroupInputSource {
+    source_index: usize,
+    path: PathBuf,
+    file: std::fs::File,
+    identity: FileIdentity,
+    snapshot: FileSnapshot,
+}
+
+#[cfg(target_os = "macos")]
+/// A random-access PFS0 view over member spans in one or more source packages.
+struct ContentGroupPfs0Input {
+    layout: crate::multi_content_format::Pfs0WriteLayout,
+    members: Vec<crate::multi_content_format::Pfs0SourceMember>,
+    sources: Vec<ContentGroupInputSource>,
+    position: u64,
+}
+
+#[cfg(target_os = "macos")]
+impl ContentGroupPfs0Input {
+    fn new(source: &ContentSourceSet, group: &ContentGroup) -> Result<Self, OperationError> {
+        let mut layout_members = Vec::new();
+        layout_members
+            .try_reserve_exact(group.members.len())
+            .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(group.members.len())
+            .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+        let mut source_indices = Vec::new();
+        source_indices
+            .try_reserve_exact(group.members.len())
+            .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+
+        for (index, member) in group.members.iter().enumerate() {
+            let mut name = String::new();
+            name.try_reserve_exact(20)
+                .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+            use std::fmt::Write as _;
+            write!(&mut name, "member-{index:04}.nca")
+                .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+            layout_members.push((name.clone(), member.size));
+            members.push(crate::multi_content_format::Pfs0SourceMember {
+                source_index: member.source_index,
+                name,
+                source_offset: member.source_file_offset,
+                size: member.size,
+                sha256: member.sha256,
+            });
+            source_indices.push(member.source_index);
+        }
+        source_indices.sort_unstable();
+        source_indices.dedup();
+
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(source_indices.len())
+            .map_err(|_| OperationError::new(OperationFailureCode::ResourceLimitExceeded))?;
+        for source_index in source_indices {
+            let resolved = source
+                .files
+                .get(source_index)
+                .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+            let evidence = source
+                .evidence
+                .get(source_index)
+                .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+            validate_file_route(resolved, None).map_err(OperationError::new)?;
+            let directory = open_directory(&resolved.parent)
+                .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            let file = open_file_at(&directory, &resolved.name)
+                .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            let metadata = file
+                .metadata()
+                .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
+            let identity = crate::file_identity::handle_identity(&file)
+                .ok_or_else(|| OperationError::new(OperationFailureCode::UnsupportedCapability))?;
+            let snapshot = crate::file_identity::file_snapshot(&metadata, Some(identity));
+            if !metadata.file_type().is_file()
+                || identity != evidence.identity
+                || snapshot != evidence.snapshot
+                || crate::file_identity::path_identity(&resolved.path) != Some(identity)
+                || crate::file_identity::followed_path_identity(&resolved.path) != Some(identity)
+            {
+                return Err(OperationError::new(OperationFailureCode::SourceChanged));
+            }
+            sources.push(ContentGroupInputSource {
+                source_index,
+                path: resolved.path.clone(),
+                file,
+                identity,
+                snapshot,
+            });
+        }
+
+        let layout = crate::multi_content_format::build_pfs0_layout(&layout_members)
+            .map_err(|error| OperationError::new(map_content_format_error(error)))?;
+        Ok(Self {
+            layout,
+            members,
+            sources,
+            position: 0,
+        })
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::io::Read for ContentGroupPfs0Input {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        use std::io::{Seek, SeekFrom};
+
+        if buffer.is_empty() || self.position >= self.layout.length {
+            return Ok(0);
+        }
+        if self.position < self.layout.payload_offset {
+            let start = usize::try_from(self.position)
+                .map_err(|_| io::Error::other("virtual offset is too large"))?;
+            let count = buffer
+                .len()
+                .min(self.layout.metadata.len().saturating_sub(start));
+            buffer[..count].copy_from_slice(&self.layout.metadata[start..start + count]);
+            self.position = self
+                .position
+                .checked_add(
+                    u64::try_from(count)
+                        .map_err(|_| io::Error::other("virtual read length is too large"))?,
+                )
+                .ok_or_else(|| io::Error::other("virtual position overflow"))?;
+            return Ok(count);
+        }
+
+        let payload_position = self.position - self.layout.payload_offset;
+        let Some((layout_member, source_member)) = self
+            .layout
+            .members
+            .iter()
+            .zip(&self.members)
+            .find(|(layout_member, _)| {
+                layout_member.data_offset <= payload_position
+                    && layout_member
+                        .data_offset
+                        .checked_add(layout_member.size)
+                        .is_some_and(|end| payload_position < end)
+            })
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "virtual package has an unaccounted payload range",
+            ));
+        };
+        let member_offset = payload_position - layout_member.data_offset;
+        let count = usize::try_from((layout_member.size - member_offset).min(buffer.len() as u64))
+            .map_err(|_| io::Error::other("virtual read length is too large"))?;
+        let source_offset = source_member
+            .source_offset
+            .checked_add(member_offset)
+            .ok_or_else(|| io::Error::other("source member offset overflow"))?;
+        let source = self
+            .sources
+            .iter_mut()
+            .find(|source| source.source_index == source_member.source_index)
+            .ok_or_else(|| io::Error::other("source member is unavailable"))?;
+        source.file.seek(SeekFrom::Start(source_offset))?;
+        let read = source.file.read(&mut buffer[..count])?;
+        if read == 0 && count > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "source member ended before its recorded span",
+            ));
+        }
+        self.position = self
+            .position
+            .checked_add(
+                u64::try_from(read)
+                    .map_err(|_| io::Error::other("virtual read length is too large"))?,
+            )
+            .ok_or_else(|| io::Error::other("virtual position overflow"))?;
+        Ok(read)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl std::io::Seek for ContentGroupPfs0Input {
+    fn seek(&mut self, position: std::io::SeekFrom) -> io::Result<u64> {
+        let requested = match position {
+            std::io::SeekFrom::Start(offset) => i128::from(offset),
+            std::io::SeekFrom::Current(delta) => i128::from(self.position) + i128::from(delta),
+            std::io::SeekFrom::End(delta) => i128::from(self.layout.length) + i128::from(delta),
+        };
+        if requested < 0 || requested > i128::from(self.layout.length) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek is outside the virtual package",
+            ));
+        }
+        self.position = u64::try_from(requested)
+            .map_err(|_| io::Error::other("virtual offset is too large"))?;
+        Ok(self.position)
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl crate::nsp_semantic_qualification::NspSemanticInput for ContentGroupPfs0Input {
+    fn input_size(&self) -> u64 {
+        self.layout.length
+    }
+
+    fn revalidate(
+        &self,
+        code: crate::nsp_semantic_qualification::NspSemanticQualificationErrorCode,
+    ) -> Result<(), crate::nsp_semantic_qualification::NspSemanticQualificationError> {
+        use crate::nsp_semantic_qualification::NspSemanticQualificationError;
+
+        for source in &self.sources {
+            let metadata = source
+                .file
+                .metadata()
+                .map_err(|_| NspSemanticQualificationError::new(code))?;
+            if !metadata.file_type().is_file()
+                || crate::file_identity::handle_identity(&source.file) != Some(source.identity)
+                || crate::file_identity::path_identity(&source.path) != Some(source.identity)
+                || crate::file_identity::followed_path_identity(&source.path)
+                    != Some(source.identity)
+                || crate::file_identity::file_snapshot(&metadata, Some(source.identity))
+                    != source.snapshot
+            {
+                return Err(NspSemanticQualificationError::new(code));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// Accepts only the supported Meta+Program and Meta+Program+Control role sets.
+fn validate_application_group(group: &ContentGroup) -> Result<(), OperationError> {
+    let roles = group
+        .members
+        .iter()
+        .map(|member| member.role)
+        .collect::<Vec<_>>();
+    let supported = matches!(
+        roles.as_slice(),
+        [
+            crate::multi_content_format::ContentMemberRole::Meta,
+            crate::multi_content_format::ContentMemberRole::Program
+        ] | [
+            crate::multi_content_format::ContentMemberRole::Meta,
+            crate::multi_content_format::ContentMemberRole::Program,
+            crate::multi_content_format::ContentMemberRole::Control
+        ]
+    );
+    if supported {
+        Ok(())
+    } else {
+        Err(OperationError::new(
+            OperationFailureCode::AmbiguousContentGrouping,
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// Rechecks CNMT relationships and Control integrity for one grouped Application.
+fn qualify_application_content_group(
+    source: &ContentSourceSet,
+    group: &ContentGroup,
+    cancellation_probe: &mut impl FnMut() -> bool,
+) -> Result<(), OperationError> {
+    let key_file = source
+        .key_file
+        .as_ref()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    let key_evidence = source
+        .key_evidence
+        .as_ref()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::KeyFileUnavailable))?;
+    let input = ContentGroupPfs0Input::new(source, group)?;
+    let request = crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+        source
+            .files
+            .first()
+            .map(|file| file.path.clone())
+            .ok_or_else(|| OperationError::new(OperationFailureCode::EmptySelection))?,
+        key_file.path.clone(),
+    )
+    .with_expected_key_snapshot(key_evidence.snapshot.clone());
+
+    match group.members.len() {
+        2 => {
+            let result =
+                crate::nsp_semantic_qualification::qualify_with_input_and_cancellation_probe(
+                    request,
+                    input,
+                    &mut *cancellation_probe,
+                )
+                .map_err(|error| OperationError::new(map_nsp_semantic_error(error.code())))?;
+            let facts = match result.outcome {
+                crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::Qualified(
+                    facts,
+                ) => facts,
+                crate::nsp_semantic_qualification::NspSemanticQualificationOutcome::NotQualified(
+                    _,
+                ) => {
+                    return Err(OperationError::new(
+                        OperationFailureCode::UnsupportedContentProfile,
+                    ));
+                }
+            };
+            if facts.title_id != group.program_id
+                || facts.members.len() != group.members.len()
+                || !group.members.iter().all(|expected| {
+                    facts.members.iter().any(|observed| {
+                        let role_matches = matches!(
+                            (expected.role, observed.role),
+                            (
+                                crate::multi_content_format::ContentMemberRole::Meta,
+                                crate::nsp_semantic_qualification::NspSemanticQualificationRole::Meta
+                            ) | (
+                                crate::multi_content_format::ContentMemberRole::Program,
+                                crate::nsp_semantic_qualification::NspSemanticQualificationRole::Program
+                            )
+                        );
+                        role_matches && observed.size == expected.size && observed.sha256 == expected.sha256
+                    })
+                })
+            {
+                return Err(OperationError::new(
+                    OperationFailureCode::UnsupportedContentProfile,
+                ));
+            }
+        }
+        3 => {
+            let result = crate::nsp_semantic_qualification::
+                qualify_application_with_control_input_and_probe(request, input, || {
+                    cancellation_probe()
+                })
+                    .map_err(|error| OperationError::new(map_nsp_semantic_error(error.code())))?;
+            let candidate = match result.outcome {
+                crate::nsp_semantic_qualification::NspApplicationControlOutcome::Qualified(
+                    candidate,
+                ) => candidate,
+                crate::nsp_semantic_qualification::NspApplicationControlOutcome::NotQualified(
+                    _,
+                ) => {
+                    return Err(OperationError::new(
+                        OperationFailureCode::UnsupportedContentProfile,
+                    ));
+                }
+            };
+            let meta = group
+                .members
+                .iter()
+                .find(|member| member.role == crate::multi_content_format::ContentMemberRole::Meta)
+                .ok_or_else(|| {
+                    OperationError::new(OperationFailureCode::AmbiguousContentGrouping)
+                })?;
+            let program = group
+                .members
+                .iter()
+                .find(|member| {
+                    member.role == crate::multi_content_format::ContentMemberRole::Program
+                })
+                .ok_or_else(|| {
+                    OperationError::new(OperationFailureCode::AmbiguousContentGrouping)
+                })?;
+            let control = group
+                .members
+                .iter()
+                .find(|member| {
+                    member.role == crate::multi_content_format::ContentMemberRole::Control
+                })
+                .ok_or_else(|| {
+                    OperationError::new(OperationFailureCode::AmbiguousContentGrouping)
+                })?;
+            if candidate.facts.title_id != group.program_id
+                || candidate.facts.meta.size != meta.size
+                || candidate.facts.meta.sha256 != meta.sha256
+                || candidate.facts.program.size != program.size
+                || candidate.facts.program.sha256 != program.sha256
+                || candidate.facts.control_size != control.size
+                || candidate.facts.control_sha256 != control.sha256
+            {
+                return Err(OperationError::new(
+                    OperationFailureCode::UnsupportedContentProfile,
+                ));
+            }
+            let control_source = source
+                .evidence
+                .get(control.source_index)
+                .ok_or_else(|| OperationError::new(OperationFailureCode::StalePlan))?;
+            let control_request =
+                crate::control_nca_qualification::ControlNcaQualificationRequest::new(
+                    control.source_path.clone(),
+                    key_file.path.clone(),
+                )
+                .with_expected_key_snapshot(key_evidence.snapshot.clone());
+            let control_result =
+                crate::control_nca_qualification::qualify_bounded_path_with_cancellation_probe(
+                    control_request,
+                    control.source_file_offset,
+                    control.size,
+                    Some(control_source.snapshot.clone()),
+                    cancellation_probe,
+                )
+                .map_err(|error| {
+                    OperationError::new(crate::xci_to_nsp::map_control_qualification_error(
+                        error.code(),
+                    ))
+                })?;
+            match control_result {
+                crate::control_nca_qualification::ControlNcaQualificationOutcome::Qualified(
+                    facts,
+                ) if facts.program_id == group.program_id => {}
+                crate::control_nca_qualification::ControlNcaQualificationOutcome::NotQualified(
+                    _,
+                ) => {
+                    return Err(OperationError::new(
+                        OperationFailureCode::UnsupportedContentProfile,
+                    ));
+                }
+                _ => {
+                    return Err(OperationError::new(
+                        OperationFailureCode::UnsupportedContentProfile,
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(OperationError::new(
+                OperationFailureCode::AmbiguousContentGrouping,
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
 fn plan_content_output(
-    members: &[ProgramMember],
+    members: &[ContentMember],
     name: Option<OsString>,
     program_id: Option<u64>,
 ) -> Result<ContentOutputEvidence, OperationError> {
@@ -3660,9 +4359,13 @@ fn plan_content_output(
     output.name = name;
     output.program_id = program_id;
     output.members = members.to_vec();
-    output
-        .members
-        .sort_by_key(|member| (member.program_id, member.content_index));
+    output.members.sort_by_key(|member| {
+        (
+            member.program_id,
+            member.role.sort_order(),
+            member.content_index,
+        )
+    });
     Ok(output)
 }
 
@@ -3673,11 +4376,13 @@ fn snapshot_content_groups(source: &ContentSourceSet) -> Vec<PlannedContentGroup
         .iter()
         .map(|group| PlannedContentGroup {
             program_id: group.program_id,
+            profile: source.profile,
             members: group
                 .members
                 .iter()
                 .map(|member| PlannedContentMember {
                     source_path: member.source_path.clone(),
+                    role: member.role.as_str(),
                     content_index: member.content_index,
                     size: member.size,
                     sha256: member.sha256,
@@ -3700,6 +4405,15 @@ fn snapshot_content_sources(source: &ContentSourceSet) -> Vec<PlannedSource> {
             sha256: evidence.sha256,
         })
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn snapshot_content_key(source: &ContentSourceSet) -> Option<PlannedQualificationKey> {
+    Some(PlannedQualificationKey {
+        path: source.key_file.as_ref()?.path.clone(),
+        identity: source.key_evidence.as_ref()?.identity.fingerprint(),
+        size: source.key_evidence.as_ref()?.snapshot.len,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -3793,6 +4507,7 @@ fn verify_content_sources_for_plan(source: &ContentSourceSet) -> Result<(), Oper
         verify_file_evidence(&mut file, expected)
             .map_err(|_| OperationError::new(OperationFailureCode::SourceChanged))?;
     }
+    verify_content_key_evidence(source, || Ok(())).map_err(OperationError::new)?;
     Ok(())
 }
 
@@ -3819,6 +4534,10 @@ fn verify_content_sources_with_checkpoint(
         })?;
         validate_file_route(resolved, None).map_err(|_| OperationFailureCode::StalePlan)?;
     }
+    verify_content_key_evidence(source, || {
+        checkpoint();
+        check_cancelled(session)
+    })?;
     Ok(())
 }
 
@@ -3837,6 +4556,50 @@ fn verify_content_sources_for_execution(
             .map_err(|_| OperationFailureCode::SourceChanged)?;
         validate_file_route(resolved, None).map_err(|_| OperationFailureCode::StalePlan)?;
     }
+    verify_content_key_evidence(source, || {
+        checkpoint();
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+/// Revalidates the plan-bound key file without retaining key contents.
+fn verify_content_key_evidence(
+    source: &ContentSourceSet,
+    mut checkpoint: impl FnMut() -> Result<(), OperationFailureCode>,
+) -> Result<(), OperationFailureCode> {
+    let (key_file, expected) = match (
+        source.profile,
+        source.key_file.as_ref(),
+        source.key_evidence.as_ref(),
+    ) {
+        (MultiContentProfile::ProgramOnly, None, None) => return Ok(()),
+        (MultiContentProfile::RightsFreeBaseApplicationV1, Some(key_file), Some(expected)) => {
+            (key_file, expected)
+        }
+        _ => return Err(OperationFailureCode::KeyFileChanged),
+    };
+    checkpoint()?;
+    validate_file_route(key_file, None).map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    let directory =
+        open_directory(&key_file.parent).map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    if crate::file_identity::handle_identity(&directory) != Some(key_file.parent_identity) {
+        return Err(OperationFailureCode::KeyFileChanged);
+    }
+    let mut file = open_file_at(&directory, &key_file.name)
+        .map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    verify_file_evidence_with_fallible_checkpoint(&mut file, expected, &mut checkpoint).map_err(
+        |error| {
+            if error == OperationFailureCode::Cancelled {
+                error
+            } else {
+                OperationFailureCode::KeyFileChanged
+            }
+        },
+    )?;
+    validate_file_route(key_file, None).map_err(|_| OperationFailureCode::KeyFileChanged)?;
+    checkpoint()?;
     Ok(())
 }
 
@@ -4067,7 +4830,11 @@ fn directory_matches_content_outputs(
 fn plan_multi_content_build_unix(
     request: MultiContentBuildRequest,
 ) -> Result<OperationPlan, OperationError> {
-    let mut source = resolve_content_sources(&request.sources)?;
+    let mut source = resolve_content_sources(
+        &request.sources,
+        request.profile,
+        request.key_file.as_deref(),
+    )?;
     source
         .outputs
         .push(plan_content_output(&source.members, None, None)?);
@@ -4114,6 +4881,15 @@ fn plan_multi_content_build_unix(
                     .as_ref()
                     .is_some_and(|baseline| baseline.identity == evidence.identity)
         })
+        || source.key_file.as_ref().is_some_and(|file| {
+            file.path == destination.path
+                || destination_baseline.as_ref().is_some_and(|baseline| {
+                    source
+                        .key_evidence
+                        .as_ref()
+                        .is_some_and(|evidence| baseline.identity == evidence.identity)
+                })
+        })
     {
         return Err(OperationError::new(OperationFailureCode::UnsafePath));
     }
@@ -4146,6 +4922,9 @@ fn plan_multi_content_build_unix(
         .file_name()
         .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
     if source.files.iter().any(|file| {
+        file.path == environment.destination_lock_path
+            || (file.parent == destination.parent && file.name == lock_name)
+    }) || source.key_file.as_ref().is_some_and(|file| {
         file.path == environment.destination_lock_path
             || (file.parent == destination.parent && file.name == lock_name)
     }) {
@@ -4239,6 +5018,7 @@ fn plan_multi_content_build_unix(
         nscb_version: env!("CARGO_PKG_VERSION"),
         source: planned_source,
         sources,
+        qualification_key: snapshot_content_key(&source),
         content_groups: snapshot_content_groups(&source),
         extraction_manifest: None,
         extraction_container: None,
@@ -4281,7 +5061,11 @@ fn plan_multi_content_build_unix(
 fn plan_multi_content_split_unix(
     request: MultiContentSplitRequest,
 ) -> Result<OperationPlan, OperationError> {
-    let mut source = resolve_content_sources(std::slice::from_ref(&request.source))?;
+    let mut source = resolve_content_sources(
+        std::slice::from_ref(&request.source),
+        request.profile,
+        request.key_file.as_deref(),
+    )?;
     let mut outputs = Vec::new();
     outputs
         .try_reserve_exact(source.groups.len())
@@ -4311,6 +5095,10 @@ fn plan_multi_content_split_unix(
             .files
             .iter()
             .any(|file| file.path.starts_with(&destination.path))
+            || source
+                .key_file
+                .as_ref()
+                .is_some_and(|file| file.path.starts_with(&destination.path))
             || environment.workspace.path.starts_with(&destination.path)
             || source
                 .evidence
@@ -4347,6 +5135,9 @@ fn plan_multi_content_split_unix(
         .file_name()
         .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
     if source.files.iter().any(|file| {
+        file.path == environment.destination_lock_path
+            || (file.parent == destination.parent && file.name == lock_name)
+    }) || source.key_file.as_ref().is_some_and(|file| {
         file.path == environment.destination_lock_path
             || (file.parent == destination.parent && file.name == lock_name)
     }) {
@@ -4457,6 +5248,7 @@ fn plan_multi_content_split_unix(
         nscb_version: env!("CARGO_PKG_VERSION"),
         source: planned_source,
         sources,
+        qualification_key: snapshot_content_key(&source),
         content_groups: snapshot_content_groups(&source),
         extraction_manifest: None,
         extraction_container: None,
@@ -4810,6 +5602,7 @@ fn plan_copy_through_unix_for_output_inner(
             sha256: source_baseline.sha256,
         },
         sources: Vec::new(),
+        qualification_key: None,
         content_groups: Vec::new(),
         extraction_manifest: None,
         extraction_container: None,
@@ -6306,10 +7099,11 @@ fn planned_staged_output(plan: &OperationPlan) -> (u64, Sha256Digest) {
 }
 
 #[cfg(target_os = "macos")]
-fn content_members_match(expected: &[ProgramMember], observed: &[ProgramMember]) -> bool {
+fn content_members_match(expected: &[ContentMember], observed: &[ContentMember]) -> bool {
     expected.len() == observed.len()
         && expected.iter().zip(observed).all(|(expected, observed)| {
             expected.program_id == observed.program_id
+                && expected.role == observed.role
                 && expected.content_index == observed.content_index
                 && expected.size == observed.size
                 && expected.sha256 == observed.sha256
@@ -6320,18 +7114,62 @@ fn content_members_match(expected: &[ProgramMember], observed: &[ProgramMember])
 fn validate_staged_content_package(
     path: &Path,
     expected: &ContentOutputEvidence,
+    source: &ContentSourceSet,
+    session: &OperationSession,
 ) -> Result<(), OperationFailureCode> {
-    let package = crate::multi_content_format::inspect_package(path)
-        .map_err(|_| OperationFailureCode::ValidationFailed)?;
-    if content_members_match(&expected.members, &package.members) {
-        Ok(())
-    } else {
-        Err(OperationFailureCode::ValidationFailed)
+    check_cancelled(session)?;
+    match source.profile {
+        MultiContentProfile::ProgramOnly => {
+            let package = crate::multi_content_format::inspect_package(path)
+                .map_err(|_| OperationFailureCode::ValidationFailed)?;
+            if content_members_match(&expected.members, &package.members) {
+                Ok(())
+            } else {
+                Err(OperationFailureCode::ValidationFailed)
+            }
+        }
+        MultiContentProfile::RightsFreeBaseApplicationV1 => {
+            verify_content_key_evidence(source, || Ok(()))?;
+            let key_path = source
+                .key_file
+                .as_ref()
+                .map(|file| file.path.as_path())
+                .ok_or(OperationFailureCode::KeyFileChanged)?;
+            let staged = path.to_path_buf();
+            let observed = resolve_content_sources_with_cancellation_probe(
+                std::slice::from_ref(&staged),
+                source.profile,
+                Some(key_path),
+                || check_cancelled(session).is_err(),
+            )
+            .map_err(|error| {
+                if error.code() == OperationFailureCode::Cancelled {
+                    OperationFailureCode::Cancelled
+                } else {
+                    OperationFailureCode::ValidationFailed
+                }
+            })?;
+            check_cancelled(session)?;
+            if observed.key_evidence != source.key_evidence {
+                return Err(OperationFailureCode::KeyFileChanged);
+            }
+            verify_content_key_evidence(source, || Ok(()))?;
+            if content_members_match(&expected.members, &observed.members) {
+                Ok(())
+            } else {
+                Err(OperationFailureCode::ValidationFailed)
+            }
+        }
     }
 }
 
 #[cfg(target_os = "macos")]
 fn verify_conversion_key_identity(plan: &OperationPlan) -> Result<(), OperationFailureCode> {
+    if let Some(MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. }) =
+        plan.multi_content.as_ref()
+    {
+        return verify_content_key_evidence(source, || Ok(()));
+    }
     if let Some(extraction) = plan.extraction.as_ref() {
         return extraction::verify_key_identity(extraction);
     }
@@ -8014,6 +8852,7 @@ fn validate_content_output_directory(
     path: &Path,
     directory: &File,
     outputs: &[ContentOutputEvidence],
+    source: &ContentSourceSet,
     session: &OperationSession,
 ) -> Result<OutputDirectoryEvidence, OperationFailureCode> {
     let identity = handle_identity(directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
@@ -8040,7 +8879,7 @@ fn validate_content_output_directory(
         if evidence.snapshot.len != output.length || evidence.sha256 != output.sha256 {
             return Err(OperationFailureCode::ValidationFailed);
         }
-        validate_staged_content_package(&path.join(name), output)?;
+        validate_staged_content_package(&path.join(name), output, source, session)?;
         verify_file_evidence(&mut file, &evidence)
             .map_err(|_| OperationFailureCode::ValidationFailed)?;
     }
@@ -8636,7 +9475,16 @@ where
         return Err(OperationFailureCode::ValidationFailed);
     }
     if let Some(expected) = multi_content_build_output(plan) {
-        validate_staged_content_package(&stage_directory_path.join(&stage_name), expected)?;
+        let source = match plan.multi_content.as_ref() {
+            Some(MultiContentPlan::Build(source)) => source,
+            _ => return Err(OperationFailureCode::StalePlan),
+        };
+        validate_staged_content_package(
+            &stage_directory_path.join(&stage_name),
+            expected,
+            source,
+            session,
+        )?;
     }
     if xci_to_nsp(plan).is_some() {
         validate_xci_to_nsp_package(
@@ -9189,7 +10037,12 @@ fn execute_multi_content_split_unix(
         {
             return Err(OperationFailureCode::ValidationFailed);
         }
-        validate_staged_content_package(&staged_directory_path.join(name), output)?;
+        validate_staged_content_package(
+            &staged_directory_path.join(name),
+            output,
+            source,
+            session,
+        )?;
         verify_file_evidence(&mut staged_file, &staged_evidence)
             .map_err(|_| OperationFailureCode::ValidationFailed)?;
         update_artifact_evidence(
@@ -9205,6 +10058,7 @@ fn execute_multi_content_split_unix(
         &staged_directory_path,
         &staged_directory,
         &source.outputs,
+        source,
         session,
     )?;
     if let Some(artifact) = artifacts
@@ -9244,6 +10098,7 @@ fn execute_multi_content_split_unix(
         &staged_directory_path,
         &current_staged_directory,
         &source.outputs,
+        source,
         session,
     )?;
     if final_staged_evidence != staged_output_evidence {
@@ -9375,6 +10230,7 @@ fn execute_multi_content_split_unix(
         &plan.destination.path,
         &published_directory,
         &source.outputs,
+        source,
         session,
     )
     .map_err(|_| OperationFailureCode::PublicationUncertain)?;
@@ -9548,7 +10404,7 @@ fn check_cancelled(session: &OperationSession) -> Result<(), OperationFailureCod
 
 #[cfg(target_os = "macos")]
 fn write_multi_content_package(
-    members: &[ProgramMember],
+    members: &[ContentMember],
     stage: &mut File,
     session: &OperationSession,
 ) -> Result<(), OperationFailureCode> {
@@ -9558,7 +10414,7 @@ fn write_multi_content_package(
 
 #[cfg(target_os = "macos")]
 fn write_multi_content_package_with_progress(
-    members: &[ProgramMember],
+    members: &[ContentMember],
     stage: &mut File,
     session: &OperationSession,
     completed: &mut u64,
@@ -14249,6 +15105,52 @@ mod tests {
         ))
         .expect("create Control XCI conversion plan");
         (root, destination, workspace, plan)
+    }
+
+    #[test]
+    fn application_group_qualification_observes_cancellation_probe() {
+        let root = tempfile::tempdir().expect("create Application fixture");
+        let fixture = crate::synthetic_nsp_qualification::build_with_program_payload(
+            &vec![0xa5; 0x9000],
+            |_| {},
+        );
+        let source = root.path().join("application.pfs0");
+        let key_file = root.path().join("keys.dat");
+        fs::write(&source, &fixture.package).expect("write Application source");
+        fs::write(&key_file, &fixture.key_file).expect("write Application keys");
+
+        let mut inventory_probe_calls = 0;
+        let inventory =
+            crate::nsp_semantic_qualification::inspect_application_members_with_cancellation_probe(
+                crate::nsp_semantic_qualification::NspSemanticQualificationRequest::new(
+                    source.clone(),
+                    key_file.clone(),
+                ),
+                || {
+                    inventory_probe_calls += 1;
+                    false
+                },
+            )
+            .expect("inspect Application members");
+        assert!(matches!(
+            inventory,
+            crate::nsp_semantic_qualification::NspApplicationMemberInspectionOutcome::Inspected(_)
+        ));
+
+        let cancel_on_call = inventory_probe_calls + 2;
+        let mut observed_probe_calls = 0;
+        let error = resolve_content_sources_with_cancellation_probe(
+            std::slice::from_ref(&source),
+            MultiContentProfile::RightsFreeBaseApplicationV1,
+            Some(&key_file),
+            || {
+                observed_probe_calls += 1;
+                observed_probe_calls >= cancel_on_call
+            },
+        )
+        .expect_err("group qualification observes cancellation");
+        assert_eq!(error.code(), OperationFailureCode::Cancelled);
+        assert_eq!(observed_probe_calls, cancel_on_call);
     }
 
     #[test]

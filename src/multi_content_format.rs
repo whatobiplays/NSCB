@@ -1,4 +1,4 @@
-//! Parses and writes the bounded PFS0 and plaintext Program NCA profile.
+//! Parses and writes bounded PFS0 containers and their supported NCA members.
 //!
 //! Member bytes are hashed while they are read or copied in fixed-size chunks.
 //! Structural parsing does not authenticate the NCA header or the source
@@ -24,39 +24,69 @@ const NCA_PARTITION_FS: u8 = 1;
 const NCA_HASH_NONE: u8 = 1;
 const NCA_CRYPT_NONE: u8 = 1;
 
+/// The role established from one NCA header.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ContentMemberRole {
+    Meta,
+    Program,
+    Control,
+}
+
+impl ContentMemberRole {
+    pub(crate) fn sort_order(self) -> u8 {
+        match self {
+            Self::Meta => 0,
+            Self::Program => 1,
+            Self::Control => 2,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Meta => "meta",
+            Self::Program => "program",
+            Self::Control => "control",
+        }
+    }
+}
+
 /// One NCA member's source span, header identity, and SHA-256 digest.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProgramMember {
+pub(crate) struct ContentMember {
     /// Path of the package or file containing this NCA.
     pub(crate) source_path: PathBuf,
     /// Absolute byte offset of the NCA in its source path.
     pub(crate) source_file_offset: u64,
+    /// Index of the source package in the resolved operation plan.
+    pub(crate) source_index: usize,
     /// Number of bytes in the NCA.
     pub(crate) size: u64,
     /// Program ID read from the NCA header.
     pub(crate) program_id: u64,
     /// Content index read from the NCA header.
     pub(crate) content_index: u32,
+    /// Content role read from the NCA header or semantic inventory.
+    pub(crate) role: ContentMemberRole,
     /// SHA-256 digest of the complete NCA member.
     pub(crate) sha256: Sha256Digest,
 }
 
-/// Members that share one Program ID, ordered by content index.
+/// Members that share one Program ID, ordered by role and content index.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ComponentGroup {
+pub(crate) struct ContentGroup {
     /// Program ID shared by every member in this group.
     pub(crate) program_id: u64,
-    /// Members in ascending content-index order.
-    pub(crate) members: Vec<ProgramMember>,
+    /// Members in deterministic role and content-index order.
+    pub(crate) members: Vec<ContentMember>,
 }
 
 /// Parsed package members in deterministic group and member order.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ProgramPackage {
+pub(crate) struct ContentPackage {
     /// Groups in ascending Program ID order.
-    pub(crate) groups: Vec<ComponentGroup>,
-    /// All members in ascending program ID and content-index order.
-    pub(crate) members: Vec<ProgramMember>,
+    pub(crate) groups: Vec<ContentGroup>,
+    /// All members in ascending program ID, role, and content-index order.
+    pub(crate) members: Vec<ContentMember>,
 }
 
 /// One entry in the metadata portion of a deterministic PFS0 layout.
@@ -80,6 +110,7 @@ pub(crate) struct Pfs0WriteLayout {
 #[cfg(target_os = "macos")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Pfs0SourceMember {
+    pub(crate) source_index: usize,
     pub(crate) name: String,
     pub(crate) source_offset: u64,
     pub(crate) size: u64,
@@ -138,7 +169,7 @@ struct Pfs0Layout {
 /// Every member must be a nonempty plaintext NCA3 Program with exactly one
 /// clear, un-hashed PartitionFS partition containing valid PFS0 framing.
 /// Returned identities come from NCA header bytes, not package filenames.
-pub(crate) fn inspect_package(path: &Path) -> Result<ProgramPackage, FormatError> {
+pub(crate) fn inspect_package(path: &Path) -> Result<ContentPackage, FormatError> {
     let mut file = File::open(path).map_err(|_| FormatError::SourceUnavailable)?;
     let metadata = file
         .metadata()
@@ -207,22 +238,34 @@ pub(crate) fn inspect_package(path: &Path) -> Result<ProgramPackage, FormatError
         let mut partition_reader = FileSpan::new(&mut file, partition_start, partition.size);
         parse_pfs0(&mut partition_reader, partition.size)?;
 
-        if !identities.insert((header.program_id, header.content_index)) {
+        if !identities.insert((
+            header.program_id,
+            ContentMemberRole::Program,
+            header.content_index,
+        )) {
             return Err(FormatError::DuplicateMember);
         }
         let sha256 = hash_file_range(&mut file, source_file_offset, entry.size)?;
-        members.push(ProgramMember {
+        members.push(ContentMember {
             source_path: path.to_path_buf(),
             source_file_offset,
+            source_index: 0,
             size: entry.size,
             program_id: header.program_id,
             content_index: header.content_index,
+            role: crate::multi_content_format::ContentMemberRole::Program,
             sha256,
         });
     }
 
-    members.sort_by_key(|member| (member.program_id, member.content_index));
-    let mut groups: Vec<ComponentGroup> = Vec::new();
+    members.sort_by_key(|member| {
+        (
+            member.program_id,
+            member.role.sort_order(),
+            member.content_index,
+        )
+    });
+    let mut groups: Vec<ContentGroup> = Vec::new();
     groups
         .try_reserve_exact(members.len())
         .map_err(|_| FormatError::ResourceLimit)?;
@@ -242,14 +285,14 @@ pub(crate) fn inspect_package(path: &Path) -> Result<ProgramPackage, FormatError
                 .try_reserve_exact(1)
                 .map_err(|_| FormatError::ResourceLimit)?;
             group_members.push(member.clone());
-            groups.push(ComponentGroup {
+            groups.push(ContentGroup {
                 program_id: member.program_id,
                 members: group_members,
             });
         }
     }
 
-    Ok(ProgramPackage { groups, members })
+    Ok(ContentPackage { groups, members })
 }
 
 /// Writes a new PFS0 with members ordered by identity and names derived from IDs.
@@ -260,18 +303,24 @@ pub(crate) fn inspect_package(path: &Path) -> Result<ProgramPackage, FormatError
 /// original package.
 pub(crate) fn write_pfs0<W: Write>(
     writer: &mut W,
-    members: &[ProgramMember],
+    members: &[ContentMember],
     mut on_chunk: impl FnMut(u64) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     if members.len() > MAX_PFS0_ENTRIES {
         return Err(FormatError::ResourceLimit);
     }
-    let mut ordered: Vec<&ProgramMember> = Vec::new();
+    let mut ordered: Vec<&ContentMember> = Vec::new();
     ordered
         .try_reserve_exact(members.len())
         .map_err(|_| FormatError::ResourceLimit)?;
     ordered.extend(members.iter());
-    ordered.sort_by_key(|member| (member.program_id, member.content_index));
+    ordered.sort_by_key(|member| {
+        (
+            member.program_id,
+            member.role.sort_order(),
+            member.content_index,
+        )
+    });
 
     let mut identities = HashSet::new();
     identities
@@ -289,7 +338,7 @@ pub(crate) fn write_pfs0<W: Write>(
         if member.program_id == 0 || member.program_id == u64::MAX {
             return Err(FormatError::AmbiguousGrouping);
         }
-        if !identities.insert((member.program_id, member.content_index)) {
+        if !identities.insert((member.program_id, member.role, member.content_index)) {
             return Err(FormatError::DuplicateMember);
         }
         member
@@ -297,7 +346,10 @@ pub(crate) fn write_pfs0<W: Write>(
             .checked_add(member.size)
             .ok_or(FormatError::InvalidPackage)?;
 
-        let name = output_name(member.program_id, member.content_index)?;
+        let name = match member.role {
+            ContentMemberRole::Program => output_name(member.program_id, member.content_index)?,
+            role => output_role_name(member.program_id, role, member.content_index)?,
+        };
         layout_members.push((name, member.size));
     }
 
@@ -502,9 +554,27 @@ fn output_name(program_id: u64, content_index: u32) -> Result<String, FormatErro
     Ok(name)
 }
 
+fn output_role_name(
+    program_id: u64,
+    role: ContentMemberRole,
+    content_index: u32,
+) -> Result<String, FormatError> {
+    let mut name = String::new();
+    name.try_reserve_exact(48)
+        .map_err(|_| FormatError::ResourceLimit)?;
+    use fmt::Write as _;
+    write!(
+        &mut name,
+        "{program_id:016X}_{}_{content_index:08X}.nca",
+        role.as_str()
+    )
+    .map_err(|_| FormatError::ResourceLimit)?;
+    Ok(name)
+}
+
 fn copy_member<W: Write>(
     writer: &mut W,
-    member: &ProgramMember,
+    member: &ContentMember,
     on_chunk: &mut impl FnMut(u64) -> Result<(), FormatError>,
 ) -> Result<(), FormatError> {
     let mut source = File::open(&member.source_path).map_err(|_| FormatError::SourceUnavailable)?;
@@ -799,7 +869,7 @@ mod tests {
         );
     }
 
-    use super::{FormatError, ProgramMember, ProgramPackage, inspect_package, write_pfs0};
+    use super::{ContentMember, ContentPackage, FormatError, inspect_package, write_pfs0};
     use crate::sha256::Sha256Digest;
     use std::fs;
     use std::path::Path;
@@ -893,18 +963,20 @@ mod tests {
         fs::write(path, pfs0(files)).expect("write synthetic package");
     }
 
-    fn member(path: &Path, program_id: u64, content_index: u32, bytes: &[u8]) -> ProgramMember {
-        ProgramMember {
+    fn member(path: &Path, program_id: u64, content_index: u32, bytes: &[u8]) -> ContentMember {
+        ContentMember {
             source_path: path.to_path_buf(),
             source_file_offset: 0,
+            source_index: 0,
             size: u64::try_from(bytes.len()).expect("small synthetic NCA"),
             program_id,
             content_index,
+            role: crate::multi_content_format::ContentMemberRole::Program,
             sha256: Sha256Digest::digest(bytes),
         }
     }
 
-    fn package_members(package: &ProgramPackage) -> Vec<(u64, u32)> {
+    fn package_members(package: &ContentPackage) -> Vec<(u64, u32)> {
         package
             .members
             .iter()
@@ -1160,12 +1232,14 @@ mod tests {
         for (program_id, index, bytes) in [(0x20, 2, &first), (0x10, 0, &second), (0x20, 1, &third)]
         {
             let offset = u64::try_from(source_bytes.len()).expect("small source bundle");
-            members.push(ProgramMember {
+            members.push(ContentMember {
                 source_path: source_path.clone(),
                 source_file_offset: offset,
+                source_index: 0,
                 size: u64::try_from(bytes.len()).expect("small NCA"),
                 program_id,
                 content_index: index,
+                role: crate::multi_content_format::ContentMemberRole::Program,
                 sha256: Sha256Digest::digest(bytes),
             });
             source_bytes.extend_from_slice(bytes);
