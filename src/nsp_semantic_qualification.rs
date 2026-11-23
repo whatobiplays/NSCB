@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 const MAX_INPUT_BYTES: u64 = 64 * 1024 * 1024 * 1024;
 const MAX_PFS0_METADATA_BYTES: usize = 1024 * 1024;
 const MAX_PROGRAM_PFS0_ENTRIES: usize = 4096;
+#[cfg(target_os = "macos")]
 const MAX_APPLICATION_CONTENT_MEMBERS: usize = 4096;
 const MAX_WORKING_BUFFER_BYTES: usize = 1024 * 1024;
 const MIN_HASH_BLOCK_BYTES: u32 = 0x200;

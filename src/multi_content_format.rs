@@ -27,20 +27,25 @@ const NCA_CRYPT_NONE: u8 = 1;
 /// The role established from one NCA header.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ContentMemberRole {
+    #[cfg(target_os = "macos")]
     Meta,
     Program,
+    #[cfg(target_os = "macos")]
     Control,
 }
 
 impl ContentMemberRole {
     pub(crate) fn sort_order(self) -> u8 {
         match self {
+            #[cfg(target_os = "macos")]
             Self::Meta => 0,
             Self::Program => 1,
+            #[cfg(target_os = "macos")]
             Self::Control => 2,
         }
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Meta => "meta",
@@ -348,6 +353,7 @@ pub(crate) fn write_pfs0<W: Write>(
 
         let name = match member.role {
             ContentMemberRole::Program => output_name(member.program_id, member.content_index)?,
+            #[cfg(target_os = "macos")]
             role => output_role_name(member.program_id, role, member.content_index)?,
         };
         layout_members.push((name, member.size));
@@ -554,6 +560,7 @@ fn output_name(program_id: u64, content_index: u32) -> Result<String, FormatErro
     Ok(name)
 }
 
+#[cfg(target_os = "macos")]
 fn output_role_name(
     program_id: u64,
     role: ContentMemberRole,
