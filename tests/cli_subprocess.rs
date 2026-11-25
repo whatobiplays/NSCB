@@ -328,7 +328,10 @@ fn normal_executable_treats_an_unknown_long_option_as_a_usage_error() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, b"Usage: nscb probe <path> [--json]\n");
+    assert_eq!(
+        output.stderr,
+        b"Usage: nscb probe <path> [--json]\n       nscb finalize-split-set <canonical-directory> [--json]\n"
+    );
 }
 
 #[test]

@@ -39,6 +39,7 @@ mod program_repack;
 mod provider;
 mod recognition;
 mod sha256;
+pub mod split_finalization;
 mod split_manifest;
 mod split_operation;
 mod split_reader;

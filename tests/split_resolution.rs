@@ -197,6 +197,25 @@ fn missing_store_or_receipt_fails_untrusted() {
 }
 
 #[test]
+fn manifest_consistency_can_be_checked_without_issuing_trust() {
+    let tree = TempTree::new("manifest-consistency");
+    let fixture = SplitFixture::new(&source(4096), 1024);
+    let directory = fixture.write(tree.path(), "Game.nsp");
+
+    Engine::new()
+        .verify_split_manifest_consistency(&directory)
+        .unwrap();
+
+    let error = Engine::new()
+        .resolve_inputs(request(&tree).with_path("Game.nsp"))
+        .unwrap_err();
+    assert_eq!(
+        error.code(),
+        InputResolutionErrorCode::SplitEvidenceUntrusted
+    );
+}
+
+#[test]
 fn manifest_missing_is_distinct_from_untrusted() {
     let tree = TempTree::new("manifest-missing");
     let fixture = SplitFixture::new(&source(2048), 1024);

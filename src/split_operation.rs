@@ -73,9 +73,8 @@ const LEGACY_SPLIT_LOCK_NAME: &str = ".nscb-operation-directory.lock";
 #[cfg(target_os = "macos")]
 const MAX_SPLIT_JOURNAL_BYTES: usize = 32 * 1024 * 1024;
 
-const DEFAULT_SEGMENT_SIZE_BYTES: u64 = 0xFFFF_0000;
-#[cfg(any(target_os = "macos", test))]
-const MAX_SEGMENT_COUNT: usize = 100;
+pub(crate) const DEFAULT_SEGMENT_SIZE_BYTES: u64 = 0xFFFF_0000;
+pub(crate) const MAX_SEGMENT_COUNT: usize = 100;
 
 /// A request to split one explicitly selected regular file into a bundle.
 #[derive(Clone, Debug, Eq, PartialEq)]

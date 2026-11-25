@@ -13,7 +13,7 @@ use crate::input_resolution::{
     SplitQualificationKind, looks_like_split_segment, read_directory,
 };
 use crate::sha256::Sha256Digest;
-use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, parse_manifest};
+use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, SplitManifest, parse_manifest};
 use crate::split_reader::{SegmentOpenError, open_segment_file, revalidate_segment};
 use crate::split_trust::{SourceEvidence, SplitTrustStore, trust_store_error};
 use sha2::{Digest as _, Sha256};
@@ -49,11 +49,92 @@ pub(crate) struct QualifiedSplit {
     pub(crate) qualification: SplitQualification,
 }
 
+/// A Split directory whose bytes agree with its manifest, without a trust claim.
+pub(crate) struct VerifiedSplitDirectory {
+    pub(crate) directory: PathBuf,
+    pub(crate) identity: FileIdentity,
+    pub(crate) source_size: u64,
+    pub(crate) source_sha256: Sha256Digest,
+    pub(crate) segments: Vec<QualifiedSegment>,
+}
+
+/// Controls whether a Split directory may contain entries outside its members.
+#[derive(Clone, Copy)]
+pub(crate) enum SplitInventoryPolicy {
+    /// Preserve resolver behavior for unrelated files and metadata.
+    AllowUnrelatedEntries,
+    /// Require every entry to be a canonical numbered member.
+    RequireExactMembers,
+}
+
+struct SplitManifestCandidate {
+    directory: PathBuf,
+    directory_identity: FileIdentity,
+    sidecar: PathBuf,
+    sidecar_snapshot: FileSnapshot,
+    manifest_sha256: Sha256Digest,
+    manifest: SplitManifest,
+    source: SourceEvidence,
+}
+
 /// Qualifies the canonical Split directory at `directory`.
 pub(crate) fn qualify_directory(
     directory: &Path,
     context: &mut SplitResolutionContext<'_>,
 ) -> Result<QualifiedSplit, InputResolutionError> {
+    let candidate = read_manifest_candidate(directory, context)?;
+    require_receipt(
+        &candidate.manifest_sha256,
+        candidate.source,
+        context.trust_store,
+    )?;
+    let manifest_sha256 = candidate.manifest_sha256;
+    let source = candidate.source;
+    let verified = verify_manifest_candidate(
+        candidate,
+        context,
+        SplitInventoryPolicy::AllowUnrelatedEntries,
+    )?;
+    recheck_receipt(&manifest_sha256, source, context.trust_store)?;
+    if let Some(control) = context.control {
+        control.check_cancelled()?;
+    }
+
+    Ok(QualifiedSplit {
+        segments: verified.segments,
+        manifest_sha256,
+        qualification: SplitQualification {
+            kind: SplitQualificationKind::LocalSplitReceipt,
+            manifest_schema_version: 1,
+            original_size_bytes: verified.source_size,
+            original_sha256: verified.source_sha256,
+        },
+    })
+}
+
+/// Verifies a Split directory without consulting or creating a trust receipt.
+pub(crate) fn verify_split_directory(
+    directory: &Path,
+    inventory_policy: SplitInventoryPolicy,
+) -> Result<VerifiedSplitDirectory, InputResolutionError> {
+    let mut visited_entries = 0;
+    let mut validated_bytes = 0;
+    let mut context = SplitResolutionContext {
+        trust_store: None,
+        control: None,
+        visited_entries: &mut visited_entries,
+        validated_bytes: &mut validated_bytes,
+        max_validated_bytes: u64::MAX,
+        input_index: 0,
+    };
+    let candidate = read_manifest_candidate(directory, &mut context)?;
+    verify_manifest_candidate(candidate, &mut context, inventory_policy)
+}
+
+fn read_manifest_candidate(
+    directory: &Path,
+    context: &mut SplitResolutionContext<'_>,
+) -> Result<SplitManifestCandidate, InputResolutionError> {
     let directory = fs::canonicalize(directory)
         .map_err(|_| error(InputResolutionErrorCode::InputUnavailable))?;
     let directory_metadata =
@@ -84,9 +165,33 @@ pub(crate) fn qualify_directory(
         return Err(error(InputResolutionErrorCode::ResourceLimitExceeded));
     }
 
-    require_receipt(&manifest_sha256, source, context.trust_store)?;
+    Ok(SplitManifestCandidate {
+        directory,
+        directory_identity,
+        sidecar,
+        sidecar_snapshot,
+        manifest_sha256,
+        manifest,
+        source,
+    })
+}
+
+fn verify_manifest_candidate(
+    candidate: SplitManifestCandidate,
+    context: &mut SplitResolutionContext<'_>,
+    inventory_policy: SplitInventoryPolicy,
+) -> Result<VerifiedSplitDirectory, InputResolutionError> {
+    let SplitManifestCandidate {
+        directory,
+        directory_identity,
+        sidecar,
+        sidecar_snapshot,
+        manifest_sha256: _,
+        manifest,
+        source: _,
+    } = candidate;
     let expected_count = manifest.segments.len();
-    let entries = read_split_members(&directory, expected_count, context)?;
+    let entries = read_split_members(&directory, expected_count, context, inventory_policy)?;
 
     if let Some(control) = context.control {
         control.begin_split_input(context.input_index, manifest.source_size);
@@ -167,7 +272,8 @@ pub(crate) fn qualify_directory(
             return Err(error(InputResolutionErrorCode::SplitInputChanged));
         }
     }
-    let rechecked_entries = read_split_members(&directory, expected_count, context)?;
+    let rechecked_entries =
+        read_split_members(&directory, expected_count, context, inventory_policy)?;
     if rechecked_entries != entries {
         return Err(error(InputResolutionErrorCode::SplitInputChanged));
     }
@@ -181,12 +287,15 @@ pub(crate) fn qualify_directory(
     if !final_directory_metadata.is_dir() || path_identity(&directory) != Some(directory_identity) {
         return Err(error(InputResolutionErrorCode::SplitInputChanged));
     }
-    recheck_receipt(&manifest_sha256, source, context.trust_store)?;
     if let Some(control) = context.control {
         control.check_cancelled()?;
     }
 
-    Ok(QualifiedSplit {
+    Ok(VerifiedSplitDirectory {
+        directory,
+        identity: directory_identity,
+        source_size: manifest.source_size,
+        source_sha256: manifest.source_sha256,
         segments: opened
             .into_iter()
             .map(|(_, segment)| QualifiedSegment {
@@ -195,13 +304,6 @@ pub(crate) fn qualify_directory(
                 identity: segment.identity(),
             })
             .collect(),
-        manifest_sha256,
-        qualification: SplitQualification {
-            kind: SplitQualificationKind::LocalSplitReceipt,
-            manifest_schema_version: 1,
-            original_size_bytes: manifest.source_size,
-            original_sha256: manifest.source_sha256,
-        },
     })
 }
 
@@ -261,6 +363,7 @@ fn read_split_members(
     directory: &Path,
     expected_count: usize,
     context: &mut SplitResolutionContext<'_>,
+    inventory_policy: SplitInventoryPolicy,
 ) -> Result<Vec<Option<(PathBuf, u64)>>, InputResolutionError> {
     let entries = read_directory(directory, context.visited_entries)?;
     let mut members: Vec<Option<(PathBuf, u64)>> = vec![None; expected_count];
@@ -287,7 +390,9 @@ fn read_split_members(
                 .metadata()
                 .map_err(|_| error(InputResolutionErrorCode::InputUnavailable))?;
             members[index] = Some((path, metadata.len()));
-        } else if looks_like_split_segment(&path) {
+        } else if matches!(inventory_policy, SplitInventoryPolicy::RequireExactMembers)
+            || looks_like_split_segment(&path)
+        {
             return Err(error(InputResolutionErrorCode::SplitSetIncomplete));
         }
     }

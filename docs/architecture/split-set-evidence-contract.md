@@ -48,6 +48,18 @@ Game.nsp/
 - Relative manifest member identifiers are limited to validated segment basenames, not directory paths. Any path separator, drive prefix, `.`/`..`, Unicode-lookalike number, non-ASCII numeric form, absolute path, duplicate key, or duplicate normalized identity is invalid.
 - Directory expansion collapses the complete set into one logical input at its sorted discovery position. Qualified canonical Split directory candidates may have arbitrary source basenames (for example `backup.zip/`) and must be eligible for bounded discovery independently of the existing *single-file* Nintendo Content extension filter, using precise canonical-segment and sibling-manifest evidence rather than arbitrary recursive directory probing. Independent overlapping selections are duplicate logical identities and fail under the existing resolution rules, preserving explicit argument/list order and prior path normalization.
 
+### FAT32 transfer and archive-attribute finalization
+
+The source-backed producer continues to publish its bundle through the qualified APFS path. Transfer to FAT32 is a separate ordinary filesystem copy step; the producer does not publish directly to FAT32.
+
+The finalizer checks the manifest and every member on the transferred set without consulting or creating a local receipt. It returns no `QualifiedSplit` and grants no transformation eligibility. Its result reports manifest consistency, source-backed completeness, archive-attribute status, and consumer interoperability as separate states.
+
+Finalization requires the production profile: each nonfinal member is exactly `0xFFFF0000` bytes, the final member is nonempty and no larger than that limit, and the set has at most 100 members. The inner directory must contain exactly the canonical numbered members. The finalizer rejects unrelated entries without deleting them. Ordinary resolution keeps its existing tolerance for unrelated entries.
+
+Windows uses `SetFileAttributesW` only after positive FAT32 identification and reads the attributes back through the native API. macOS uses an external or on-device step such as Goldleaf. Linux remains unqualified until a mounted-filesystem path positively identifies FAT32. No production finalizer writes raw volume sectors, changes mount state, or recursively changes unrelated attributes.
+
+The target archive attribute must be read back after finalization. A missing archive bit does not invalidate independently proven byte-stream completeness. Successful manifest verification alone does not establish Horizon compatibility. FAT32 transfer and Horizon consumption require separate qualification.
+
 ## 3. Manifest format
 
 Suggested independent wire identity:
@@ -165,7 +177,7 @@ An output destination conflict uses existing class **4**, cancellation/interrupt
 
 - **Issue #6:** Land additive source-evidence model, receipt interface, manifest parser, qualified canonical resolver, virtual-reader qualification, CLI/Rust error and JSON shape, and synthetic tests backed by trusted fixtures *derived from original unsplit test sources*. Test fixtures are not a production API for certifying imported parts. Do not require Issue #14's user-facing writer to implement or test the resolver.
 - **Issue #9:** Reuse the evidence/publication seam inside immutable Plans, staged publication, and host-managed progress/cancellation/recovery.
-- **Issue #14:** The source-to-Split producer, local receipt issuance, bundle publication, and conflict policy are implemented. Canonical FAT32 archive-attribute interoperability and legacy output layouts remain unqualified; keep legacy layouts opt-in and blocked until independent evidence qualification. Do not silently weaken Issue #14's remaining legacy acceptance work.
+- **Issue #14:** The canonical source-backed Split producer, local receipt issuance, APFS bundle publication, and conflict policy are implemented. FAT32 transfer, archive-attribute finalization, and independent Horizon consumption are separate obligations; host checks do not establish physical interoperability. Legacy `.xcN` and `.nsN` layouts remain unqualified and reserved for a separate scope.
 - Update ADR 0013 with only the explicit distinction between *uncommitted ownership-tracked provisional artifacts* and committed *published user data*, reflecting Decisions 30/32. Preserve all other user-data protections.
 - ADR 0028 is accepted as architecture; do not mark Issue #6 complete merely because the design has been accepted. Production activation requires the [Split-set contract acceptance scenarios](../testing/split-set-contract-acceptance.md) to pass under each supported OS/filesystem profile.
 

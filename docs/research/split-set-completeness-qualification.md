@@ -140,6 +140,8 @@ The original Delegation v3 Split-dependent acceptance criteria remain blocked. T
 
 At the time of the spike, no ADR was proposed at this gate. Accepted ADR 0028 now resolves the architecture decision; this historical recommendation does not itself authorize implementation or alter production behavior.
 
+The later FAT32 interoperability decision retains the source-backed APFS producer and local receipt boundary. It separates ordinary FAT32 transfer, targeted archive-attribute finalization, and Horizon logical-file consumption. Cross-host manifest checking does not create trust, and physical interoperability remains an experiment rather than an assumption. See the [canonical FAT32 qualification protocol](../testing/canonical-fat32-split-qualification.md) for the current support matrix and evidence requirements.
+
 ## Sources reviewed
 
 All source code links below are pinned where a commit exists. The Switchbrew XCI page is a living format reference and should be rechecked during any future implementation.

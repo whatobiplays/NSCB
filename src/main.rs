@@ -25,6 +25,9 @@ fn main() -> ExitCode {
     }
     let mut stdout = std::io::stdout().lock();
     let mut stderr = std::io::stderr().lock();
+    if let Some(code) = cli::run_split_finalization_if_requested(&args, &mut stdout, &mut stderr) {
+        return ExitCode::from(code as u8);
+    }
     if let Some(code) = standalone::run_pre_engine_command(&args, &mut stdout, &mut stderr) {
         return ExitCode::from(code as u8);
     }

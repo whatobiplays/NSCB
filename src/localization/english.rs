@@ -1156,7 +1156,10 @@ mod tests {
 
     #[test]
     fn resource_provides_cli_usage() {
-        assert_eq!(usage(), "Usage: nscb probe <path> [--json]");
+        assert_eq!(
+            usage(),
+            "Usage: nscb probe <path> [--json]\n       nscb finalize-split-set <canonical-directory> [--json]"
+        );
     }
 
     #[test]
