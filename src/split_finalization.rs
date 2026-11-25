@@ -16,9 +16,12 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(windows, test))]
 const ARCHIVE_ATTRIBUTE: u32 = 0x20;
+#[cfg(any(windows, test))]
+const DIRECTORY_ATTRIBUTE: u32 = 0x10;
 
 /// Result of checking the target platform's archive-attribute capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SplitArchiveAttributeStatus {
     /// The native setter wrote and independently read back the archive bit.
     Set,
@@ -57,6 +60,7 @@ impl SplitArchiveAttributeStatus {
 
 /// Failure category for a Split-set finalization attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum SplitFinalizationErrorCode {
     /// The manifest, segment profile, bytes, or exact inventory is invalid.
     InvalidSplitSet,
@@ -298,7 +302,9 @@ fn finalize_with_backend(
     let was_set = before & ARCHIVE_ATTRIBUTE != 0;
     if !was_set {
         ensure_directory_identity(verified, binding)?;
-        let set = backend.set_attributes(&verified.directory, before | ARCHIVE_ATTRIBUTE);
+        // SetFileAttributesW cannot set FILE_ATTRIBUTE_DIRECTORY; the filesystem reports it.
+        let settable_attributes = (before | ARCHIVE_ATTRIBUTE) & !DIRECTORY_ATTRIBUTE;
+        let set = backend.set_attributes(&verified.directory, settable_attributes);
         complete_attribute_call(verified, binding, set)?;
     }
     let after = backend.get_attributes(&verified.directory);
@@ -461,6 +467,7 @@ mod tests {
         replace_directory_on_get: bool,
         replace_directory_on_set: bool,
         set_calls: usize,
+        last_set_attributes: Option<u32>,
     }
 
     impl ArchiveAttributeBackend for FakeBackend {
@@ -487,6 +494,7 @@ mod tests {
             attributes: u32,
         ) -> Result<(), SplitFinalizationError> {
             self.set_calls += 1;
+            self.last_set_attributes = Some(attributes);
             if self.fail_set {
                 if self.replace_directory_on_set {
                     let mut old = directory.to_path_buf();
@@ -501,6 +509,7 @@ mod tests {
             } else {
                 attributes
             };
+            self.attributes |= 0x10;
             if self.replace_directory_on_set {
                 let mut old = directory.to_path_buf();
                 old.set_extension("old");
@@ -597,6 +606,7 @@ mod tests {
             SplitArchiveAttributeStatus::Set
         );
         assert_eq!(backend.attributes, 0x32);
+        assert_eq!(backend.last_set_attributes, Some(0x22));
         assert_eq!(
             finalize_with_backend(&verified, &binding, &mut backend).unwrap(),
             SplitArchiveAttributeStatus::AlreadySet

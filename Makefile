@@ -13,7 +13,7 @@ override CARGO := $(TOOLCHAIN_ENV) $(CARGO_BIN)
 STANDALONE_FEATURES ?= standalone-job-history
 RUST_TEST_THREADS ?= 1
 
-.PHONY: help fmt content-policy test-content-policy test-content-policy-git test-cleanup test-cleanup-git typecheck embedded-boundary check-embedded-tests check-standalone-tests lint test build smoke all clean
+.PHONY: help fmt content-policy test-content-policy test-content-policy-git test-cleanup test-cleanup-git test-split-source typecheck embedded-boundary check-embedded-tests check-standalone-tests lint test build smoke all clean
 
 help:
 	@printf '%s\n' \
@@ -23,6 +23,7 @@ help:
 	  '  make test-content-policy-git Run genuine Git integration tests' \
 	  '  make test-cleanup            Run Git-free disposable cleanup tests' \
 	  '  make test-cleanup-git        Run genuine Git worktree cleanup tests' \
+	  '  make test-split-source       Test the FAT32 qualification source generator' \
 	  '  make typecheck               Type-check all targets and features' \
 	  '  make embedded-boundary       Verify the no-default dependency graph has no SQLite' \
 	  '  make check-embedded-tests   Require tests in the no-default library suite' \
@@ -52,6 +53,9 @@ test-cleanup:
 
 test-cleanup-git:
 	PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_cleanup_git.py'
+
+test-split-source:
+	PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_split_qualification_source.py'
 
 typecheck:
 	$(CARGO) check --locked --all-targets --all-features
@@ -88,7 +92,7 @@ lint:
 	$(CARGO) clippy --locked --all-targets --all-features -- -D warnings
 
 
-test: test-content-policy test-cleanup build check-embedded-tests check-standalone-tests embedded-boundary
+test: test-content-policy test-cleanup test-split-source build check-embedded-tests check-standalone-tests embedded-boundary
 	RUST_TEST_THREADS=$(RUST_TEST_THREADS) $(CARGO) test --locked --lib --no-default-features
 	RUST_TEST_THREADS=$(RUST_TEST_THREADS) $(CARGO) test --locked --features $(STANDALONE_FEATURES)
 

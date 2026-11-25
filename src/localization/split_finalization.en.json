@@ -1,0 +1,4 @@
+{
+  "usage": "Usage: nscb finalize-split-set <canonical-directory> [--json]",
+  "error": "Manifest consistency: {manifest_consistency}\nSource-backed completeness: not established\nConsumer interoperability: not established\nError: {error}"
+}

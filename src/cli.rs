@@ -807,7 +807,44 @@ fn split_finalization_error_document(
 
 #[cfg(test)]
 mod split_finalization_cli_contract_tests {
-    use super::split_finalization_error_document;
+    use super::{run_split_finalization_command, split_finalization_error_document};
+    use std::ffi::OsString;
+
+    #[test]
+    fn finalization_usage_uses_localized_resource() {
+        let args = [OsString::from("finalize-split-set")];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_split_finalization_command(&args, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, super::EXIT_USAGE);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "Usage: nscb finalize-split-set <canonical-directory> [--json]\n"
+        );
+    }
+
+    #[test]
+    fn finalization_input_error_uses_localized_resource() {
+        let directory = tempfile::tempdir().unwrap();
+        let args = [
+            OsString::from("finalize-split-set"),
+            directory.path().as_os_str().to_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_split_finalization_command(&args, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, super::EXIT_INPUT);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "Manifest consistency: not established\nSource-backed completeness: not established\nConsumer interoperability: not established\nError: invalid_split_set\n"
+        );
+    }
 
     #[test]
     fn verified_attribute_failures_keep_manifest_evidence_and_open_claims() {
@@ -908,29 +945,32 @@ pub(crate) fn run_split_finalization_command(
                 | nscb::split_finalization::SplitFinalizationErrorCode::AttributeReadbackFailed => {
                     EXIT_COMPLETED_WITH_ISSUES
                 }
+                _ => EXIT_COMPLETED_WITH_ISSUES,
             };
             if json {
-            let document = split_finalization_error_document(
-                error.code().as_str(),
-                error.manifest_consistency_verified(),
-            );
+                let document = split_finalization_error_document(
+                    error.code().as_str(),
+                    error.manifest_consistency_verified(),
+                );
                 if serde_json::to_writer(&mut *stdout, &document).is_err()
                     || writeln!(stdout).is_err()
                 {
                     return EXIT_INTERNAL;
                 }
-    } else if writeln!(
-        stderr,
-        "manifest consistency: {}\nsource-backed completeness: not established\nconsumer interoperability: not established\nerror: {}",
-        if error.manifest_consistency_verified() {
-            "verified"
-        } else {
-            "not established"
-        },
-        error.code().as_str()
-    )
-    .is_err()
-    {
+            } else if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::split_finalization_error(
+                    if error.manifest_consistency_verified() {
+                        "verified"
+                    } else {
+                        "not established"
+                    },
+                    error.code().as_str(),
+                )
+            )
+            .is_err()
+            {
                 return EXIT_INTERNAL;
             }
             exit
@@ -947,7 +987,8 @@ fn emit_split_finalization_usage(
         emit_error(stdout, "usage_error", EXIT_USAGE)
     } else if writeln!(
         stderr,
-        "usage: nscb finalize-split-set <canonical-directory> [--json]"
+        "{}",
+        crate::localization::english::split_finalization_usage()
     )
     .is_ok()
     {

@@ -45,7 +45,7 @@ The evidence boundary remains the accidental-loss and corruption model in [ADR 0
 | Platform | Finalization path | Evidence boundary |
 | --- | --- | --- |
 | macOS | Keep production on APFS, copy the completed bundle to FAT32, then use Goldleaf on the selected inner directory. The host command reports `external_finalization_required`. | The workflow is documented. The Goldleaf action, FAT32 result, and Horizon readback remain unqualified until the physical procedure passes. |
-| Windows | Identify the mounted filesystem as FAT32, use `SetFileAttributesW` to add the archive bit, and verify with `GetFileAttributesW`. Other filesystems return `unsupported_filesystem`. | The Windows GNU target check passes with the job-history feature enabled. The MSVC check is blocked because the available Xcode compiler lacks the target `stdlib.h`/MSVC runtime headers. Native Windows execution and physical Horizon consumption remain unqualified. |
+| Windows | The native candidate identifies the mounted filesystem as FAT32, adds the archive bit with `SetFileAttributesW`, and verifies it with `GetFileAttributesW`. Other filesystems return `unsupported_filesystem`. | The pinned Rust 1.98.1 Windows GNU check passes when Cargo is given that toolchain's `rustc` explicitly through `RUSTC`. Invoking the Cargo shim without that override reported a missing `core` crate even though the target component is installed. The MSVC check is blocked because the available Xcode compiler lacks the target `stdlib.h`/MSVC runtime headers. The separate native-finalization procedure is prepared but has not run. Windows behavior remains unqualified pending the physical test. |
 | Linux | The mounted-filesystem `FAT_IOCTL_GET_ATTRIBUTES` and `FAT_IOCTL_SET_ATTRIBUTES` API is the candidate for a future qualified path. | The x86_64 GNU target check passes. The AArch64 check is blocked because `aarch64-linux-gnu-gcc` is unavailable for the `ring` build. No Linux attribute backend is claimed; filesystem identification and API behavior remain unqualified, and this slice does not rewrite the Linux publication backend. |
 | Other hosts | No native finalizer is claimed. | Unqualified. |
 | Direct FAT32 publication | Outside the transfer workflow. | Separate qualification obligation. |
@@ -57,23 +57,28 @@ Goldleaf's current Explorer exposes a directory operation for setting or clearin
 - Repository-native `make all` passes on macOS with the pinned Rust toolchain. APFS publication behavior and the existing receipt contract remain in scope for repository regressions.
 - Windows GNU and Linux x86_64 cross-target checks pass with `standalone-job-history`; they are compile evidence only. Windows MSVC and Linux AArch64 limitations are listed in the platform matrix.
 - The finalizer verifies the manifest, exact inner-directory inventory, physical segment hashes, and production segment profile. It does not consult or create a source receipt.
-- The corrected Horizon checker uses the pinned libnx signed-size and Npad APIs and a fixed 64 KiB static read buffer.
-- The Horizon NRO has not been built in this environment. `DEVKITPRO=/opt/devkitpro` is set, but these prerequisites are absent: `/opt/devkitpro/devkitA64/base_rules`, `/opt/devkitpro/libnx/switch_rules`, the AArch64 devkitA64 compiler/binutils (including `aarch64-none-elf-gcc`), `elf2nro`, `/opt/devkitpro/portlibs/switch/include/mbedtls/sha256.h`, and `/opt/devkitpro/portlibs/switch/lib/libmbedcrypto.a`. The Makefile also requires `EXPECTED_SIZE` and `EXPECTED_SHA256`.
-- Physical FAT32 transfer, Goldleaf finalization, independent archive-bit inspection, Horizon readback, and unrelated-attribute preservation are `NOT RUN`. No media or console was accessed.
+- The Horizon checker uses the pinned libnx signed-size and Npad APIs and a fixed 64 KiB static read buffer. Its Makefile follows the official libnx application template for recursive `all` and `clean` targets, C/C++/assembly source discovery, object dependency files, NRO and NACP outputs, and library search paths. It links `-lmbedcrypto -lnx`. A generated `build/qualification_config.h` contains the expected path, size, and digest; the checker object depends on that header, so changing any value rebuilds the object, ELF, and NRO.
+- A GNU Make mock-rules check confirmed that unchanged checker inputs do not rebuild artifacts, while changing the expected path, size, or digest rebuilds the object, ELF, and NRO. This checks the dependency graph only; it is not a Horizon build.
+- The build host is macOS arm64 with Docker 29.9.3. `DEVKITPRO=/opt/devkitpro` and `dkp-pacman` are present, but the Switch packages and files are absent: `devkitA64`, `libnx`, `switch-mbedtls`, `devkitA64/base_rules`, `libnx/switch_rules`, the AArch64 compiler/binutils, `elf2nro`, and the mbedTLS headers and libraries. `dkp-pacman -Q` reports a duplicate `devkitpro-keyring` database entry. No package database repair, package installation, Docker pull, or persistent configuration change was attempted.
+- The supported container option is devkitPro's `devkitpro/devkita64:20260219` image; Docker Hub lists its Linux arm64 image at about 650 MB compressed. Docker is available, but this image is not present locally. Owner authorization is needed to pull it. Confirm `switch-mbedtls` is installed in the image; if it is absent, authorization is also needed to install that portlib and its `switch-zlib` dependency inside the disposable container. The native option is devkitPro pacman with the `switch-dev` group and `switch-mbedtls`; using the current host installation first requires authorization to repair its duplicate package database entry and install the missing packages. No host package or configuration change was made.
+- The Horizon NRO has not been built. The Makefile requires `EXPECTED_SIZE` and `EXPECTED_SHA256` from the source measurement. Physical FAT32 transfer, Goldleaf finalization, independent archive-bit inspection, Horizon readback, Windows native finalization, and unrelated-attribute preservation are `NOT RUN`. No media or console was accessed.
 
-The disposable APFS fixture has been generated and checked. Its 4,294,967,296-byte source and reconstructed stream both hash to `1bdb600eb7d29d0a1013ea5de3707f3416664ca922313166529aec32faccc72b`. The canonical set contains `00` (4,294,901,760 bytes; SHA-256 `af6eadf3a6fb419bab3be5398ed6acd2e4d880dedac720f05eb67701cc6e3a8a`) and `01` (65,536 bytes; SHA-256 `d8f32a3b4c195f65444e342b0c61bdaf114802e84ab7821a1f88e3f66ea15100`). The 526-byte manifest hashes to `b36dce16871bcd8fb9416e01e5ed0a8b58a1ddd16ebdd60959b7a4a8253c05a1`; the isolated local receipt is issued for that manifest. An ordinary `copyfile` transfer to a second APFS directory reproduced the exact two-member inventory and hashes. That simulation is not FAT32 qualification. On macOS, the host finalizer returned exit 8 with `manifest_consistency=verified`, `archive_attribute=external_finalization_required`, `source_backed_completeness=not_established`, and `consumer_interoperability=not_established`. Measurements are recorded in the ignored worktree artifact `target/issue-14-slice-b-qualification/fixture-measurements.json`.
+The earlier repeating-pattern fixture remains historical evidence at `target/issue-14-slice-b-qualification/fixture-measurements.json`; that file was not overwritten. Its 4,294,967,296-byte source and reconstructed stream hash to `1bdb600eb7d29d0a1013ea5de3707f3416664ca922313166529aec32faccc72b`. Its `00` segment is 4,294,901,760 bytes with SHA-256 `af6eadf3a6fb419bab3be5398ed6acd2e4d880dedac720f05eb67701cc6e3a8a`; `01` is 65,536 bytes with SHA-256 `d8f32a3b4c195f65444e342b0c61bdaf114802e84ab7821a1f88e3f66ea15100`. Its 526-byte manifest hashes to `b36dce16871bcd8fb9416e01e5ed0a8b58a1ddd16ebdd60959b7a4a8253c05a1`. The APFS copy simulation matched the inventory and hashes. Its macOS finalizer result was exit 8 with verified manifest consistency and external finalization required. Those measurements predate the offset-dependent generator and do not qualify FAT32.
+
+The fresh offset-dependent fixture is recorded in `target/issue-14-slice-b-qualification-offset-v2/transfer-measurements.json`. Its source and reconstructed stream are 4,294,967,296 bytes with SHA-256 `49d348020480cca3fd51331db42ac1ef3b0377ccdea296f54c629346be78fe94`. Segment `00` is 4,294,901,760 bytes with SHA-256 `7aceda50e41813a6f1ee4e29b214f4f362ee424e88e284fe27fbaeb4b757b33d`; `01` is 65,536 bytes with SHA-256 `eb132cd4f23c648973f9e383c4aff2b1344ad681cd1576076ca7353259fe52ed`. The 526-byte manifest hashes to `17436697a5ecc0c35961bccef815f41bdd7f06a55a8e0b30f39d989bf6f263e3`, and the isolated local receipt is issued for it. The host finalizer exited 8 with manifest consistency verified, archive readback unavailable, external finalization required, and source-backed completeness and consumer interoperability not established. An ordinary `shutil.copyfile` APFS simulation reproduced the exact inventory and hashes. It does not establish FAT32 transfer or Horizon compatibility.
 
 ## Reproducible APFS fixture
 
-The generator creates a deterministic 4 GiB source. Its length is `0x100000000` bytes, just over one production segment. NSCB should produce two physical parts: `00` at `0xFFFF0000` bytes and `01` at `0x10000` bytes.
+The generator creates deterministic 64 KiB blocks from a domain tag and each block's absolute byte offset. Equal offsets repeat; different offsets produce different block digests, including offsets aligned to the block size. The 4 GiB source is `0x100000000` bytes, just over one production segment. NSCB should produce two physical parts: `00` at `0xFFFF0000` bytes and `01` at `0x10000` bytes.
 
-Use a new ignored worktree path under `target/`; do not reuse or remove an existing fixture. Keep the source, bundle, isolated application data, and recorded measurements on APFS.
+Use a new ignored worktree path under `target/`; do not reuse or remove an existing fixture. Keep the source, bundle, isolated application data, and recorded measurements on APFS. The offset-dependent run in this worktree uses `target/issue-14-slice-b-qualification-offset-v2/` and leaves the earlier fixture directory untouched.
 
 ```sh
-mkdir target/issue-14-slice-b-qualification
-mkdir target/issue-14-slice-b-qualification/home
+mkdir target/issue-14-slice-b-qualification-offset-v2
+mkdir target/issue-14-slice-b-qualification-offset-v2/home
 python3 -B scripts/generate_split_qualification_source.py \
-  target/issue-14-slice-b-qualification/qualification-source.nsp
+  target/issue-14-slice-b-qualification-offset-v2/qualification-source.nsp \
+  > target/issue-14-slice-b-qualification-offset-v2/source-generator.json
 ```
 
 Run the ordinary producer against the APFS bundle path. Keep the application data and source receipt inside the disposable fixture root:
@@ -82,12 +87,12 @@ Run the ordinary producer against the APFS bundle path. Keep the application dat
 rustup run 1.98.1 cargo build --locked --release \
   --features standalone-job-history --bin nscb
 
-HOME="$PWD/target/issue-14-slice-b-qualification/home" \
-USERPROFILE="$PWD/target/issue-14-slice-b-qualification/home" \
-XDG_CONFIG_HOME="$PWD/target/issue-14-slice-b-qualification/home/.config" \
+HOME="$PWD/target/issue-14-slice-b-qualification-offset-v2/home" \
+USERPROFILE="$PWD/target/issue-14-slice-b-qualification-offset-v2/home" \
+XDG_CONFIG_HOME="$PWD/target/issue-14-slice-b-qualification-offset-v2/home/.config" \
   target/release/nscb split \
-  "$PWD/target/issue-14-slice-b-qualification/qualification-source.nsp" \
-  "$PWD/target/issue-14-slice-b-qualification/qualification-source.bundle" \
+  "$PWD/target/issue-14-slice-b-qualification-offset-v2/qualification-source.nsp" \
+  "$PWD/target/issue-14-slice-b-qualification-offset-v2/qualification-source.bundle" \
   --json
 ```
 
@@ -211,20 +216,38 @@ Perform these steps only after separate owner authorization for the disposable F
 3. On a host with the required devkitPro toolchain, build the checker with the measured source digest:
 
    ```sh
-   make -C tests/horizon/split_readback \
-     SPLIT_PATH=/nscb-qualification/qualification-source.nsp \
-     EXPECTED_SIZE=4294967296 \
-     EXPECTED_SHA256=1bdb600eb7d29d0a1013ea5de3707f3416664ca922313166529aec32faccc72b
-   shasum -a 256 tests/horizon/split_readback/build/nscb_split_readback.nro
+   docker run --rm --platform linux/arm64 \
+     -v "$PWD:/work" -w /work \
+     devkitpro/devkita64:20260219 \
+     make -C tests/horizon/split_readback \
+       SPLIT_PATH=/nscb-qualification/qualification-source.nsp \
+       EXPECTED_SIZE=4294967296 \
+       EXPECTED_SHA256=49d348020480cca3fd51331db42ac1ef3b0377ccdea296f54c629346be78fe94
+   shasum -a 256 tests/horizon/split_readback/nscb_split_readback.nro
    ```
 
-   Copy the NRO to `/switch/nscb_split_readback.nro` on the FAT32 volume. Record its SHA-256. If the required toolchain is unavailable or the NRO fails to build, stop physical qualification and record that prerequisite as `NOT RUN`.
-4. Safely eject the media from the build host. On Windows, mount it and record the archive-attribute masks for the selected inner directory, an unrelated directory, and an unrelated sentinel file with the read-only procedure below. Record the sentinel's bytes and SHA-256. Safely eject the volume from Windows before inserting it into the console.
+   The official `devkitpro/devkita64:20260219` image supports Linux arm64. Before building, check `switch-mbedtls` with `dkp-pacman -Q switch-mbedtls`; if it is absent, install that portlib in the container. The native package option is `switch-dev` plus `switch-mbedtls`. The command writes `tests/horizon/split_readback/nscb_split_readback.nro`; changing `SPLIT_PATH`, `EXPECTED_SIZE`, or `EXPECTED_SHA256` updates the generated config header and rebuilds the object, ELF, and NRO. Copy the NRO to `/switch/nscb_split_readback.nro` on the FAT32 volume. Record its SHA-256. If the toolchain is unavailable or the NRO fails to build, stop physical qualification and record that prerequisite as `NOT RUN`.
+4. Safely eject the media from the build host. On Windows, mount it and create sibling sentinels on this disposable qualification copy. Keep both outside the canonical Split directory:
+
+   ```powershell
+   $root = 'E:\nscb-qualification'
+   $unrelatedDirectory = Join-Path $root 'unrelated'
+   $sentinelFile = Join-Path $unrelatedDirectory 'sentinel.bin'
+   if (Test-Path -LiteralPath $unrelatedDirectory) {
+       throw "Use a fresh qualification copy; path already exists: $unrelatedDirectory"
+   }
+   New-Item -ItemType Directory -Path $unrelatedDirectory
+   [IO.File]::WriteAllBytes($sentinelFile, [Text.Encoding]::UTF8.GetBytes("NSCB preservation sentinel`n"))
+   attrib +h +r $sentinelFile
+   attrib +h $unrelatedDirectory
+   ```
+
+   Run the read-only attribute inspection below and save its output as the baseline. Record the sentinel file's byte length and SHA-256. Safely eject the volume from Windows before inserting it into the console.
 5. In Goldleaf Explorer, navigate to `/nscb-qualification`, select `qualification-source.nsp`, and choose the selected directory's set-archive-bit action. Confirm the selected path before applying the change. Do not select the outer qualification directory or a recursive operation.
 6. Launch `/switch/nscb_split_readback.nro`. The checker opens `/nscb-qualification/qualification-source.nsp` through Horizon, reads it in bounded chunks, and compares the signed file size and SHA-256. Expected output:
 
    ```text
-   INTEROP_PASS bytes=4294967296 sha256=1bdb600eb7d29d0a1013ea5de3707f3416664ca922313166529aec32faccc72b path=/nscb-qualification/qualification-source.nsp
+   INTEROP_PASS bytes=4294967296 sha256=49d348020480cca3fd51331db42ac1ef3b0377ccdea296f54c629346be78fe94 path=/nscb-qualification/qualification-source.nsp
    HORIZON_READBACK=PASS
    ```
 
@@ -239,7 +262,8 @@ Perform these steps only after separate owner authorization for the disposable F
 Run this in PowerShell on Windows after Goldleaf has exited and the media is mounted. Run it once before the Goldleaf action for the baseline, then again after the Horizon test. Replace the drive letter if needed. The script calls `GetFileAttributesW` and does not change attributes.
 
 ```powershell
-Add-Type -TypeDefinition @'
+if (-not ('Fat32AttributeReader' -as [type])) {
+    Add-Type -TypeDefinition @'
 using System.Runtime.InteropServices;
 
 public static class Fat32AttributeReader
@@ -248,6 +272,7 @@ public static class Fat32AttributeReader
     public static extern uint GetFileAttributesW(string path);
 }
 '@
+}
 
 $paths = @(
     'E:\nscb-qualification\qualification-source.nsp',
@@ -268,12 +293,44 @@ foreach ($path in $paths) {
 }
 ```
 
-Save both outputs. The selected inner directory must show `ArchiveBit = True` after Goldleaf, with all other attribute bits unchanged from baseline. The unrelated directory and sentinel must retain their original masks. This inspection establishes attribute state; the Horizon output establishes consumer interoperability.
+Save both outputs. The selected inner directory must show `ArchiveBit = True` after Goldleaf, with all other attribute bits unchanged from baseline. The unrelated directory and sentinel must retain their original masks, and the sentinel file's bytes and SHA-256 must match the baseline. This inspection establishes attribute state; the Horizon output establishes consumer interoperability.
+
+## Separate Windows native-finalization test
+
+Run this test on a second disposable FAT32 copy. Do not use the Goldleaf copy. Set `FAT32_ROOT` to a new directory such as `E:\nscb-qualification-windows-native` and transfer the bundle there with the ordinary-filesystem recipe. The canonical directory will be `E:\nscb-qualification-windows-native\qualification-source.nsp`.
+
+Create two sentinels beside the canonical directory, then record their hashes and attribute masks. The test checks them again after finalization.
+
+```powershell
+$root = 'E:\nscb-qualification-windows-native'
+$target = Join-Path $root 'qualification-source.nsp'
+$sentinelFile = Join-Path $root 'preservation-sentinel.bin'
+$sentinelDirectory = Join-Path $root 'preservation-sentinel-directory'
+
+[IO.File]::WriteAllBytes($sentinelFile, [Text.Encoding]::UTF8.GetBytes("NSCB attribute sentinel`n"))
+New-Item -ItemType Directory -Path $sentinelDirectory
+attrib +h +r $sentinelFile
+attrib +h $sentinelDirectory
+attrib -a +h $target
+```
+
+The final command clears Archive and sets Hidden on the selected directory. It prepares the test's starting mask; it does not change the directory's contents. Run the test script from the repository root:
+
+```powershell
+.\scripts\qualification\test_split_archive_finalization_windows.ps1 -QualificationRoot $root
+```
+
+The script resolves the actual volume mount path for the qualification root and checks that volume with `GetVolumeInformationW`; it does not infer the filesystem from a drive letter. It calls `SetFileAttributesW` twice on the selected directory, omitting `FILE_ATTRIBUTE_DIRECTORY` because that flag is reported by the filesystem and cannot be set through this API. `GetFileAttributesW` must still return the original mask with `0x20` added after each call. The second readback must match the first. The directory's other flags, both sibling sentinel masks, and the sentinel file hash must remain unchanged. Its JSON output records the volume mount path, selected and sentinel paths, selected-directory masks, both sentinel masks before and after, and sentinel file hashes before and after. Expected result fields include `result=WINDOWS_FINALIZATION_PASS`, `archive_bit_set=true`, `other_selected_attributes_preserved=true`, `idempotent=true`, and all sentinel-preservation fields set to `true`.
+
+Save the complete JSON output and the pre-test masks and sentinel hash. Clear the temporary Hidden flag with `attrib -h $target` if the directory was visible before setup; this leaves Archive set. This procedure tests Windows native finalization only. It does not run Goldleaf or Horizon and does not qualify those paths.
 
 ## Source references
 
-- Microsoft documents [SetFileAttributesW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileattributesw), [GetFileAttributesW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileattributesw), and [GetVolumeInformationW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationw).
+- Microsoft documents [SetFileAttributesW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileattributesw), [GetFileAttributesW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileattributesw), [GetVolumePathNameW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumepathnamew), and [GetVolumeInformationW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getvolumeinformationw).
 - The pinned [libnx filesystem header](https://github.com/switchbrew/libnx/blob/20cbcfd90567f7bf84df7725f27e345e2164fa6b/nx/include/switch/services/fs.h) defines the concatenation-directory behavior and the signed file-size and read APIs used by the checker.
+- The [official libnx application Makefile template](https://github.com/switchbrew/switch-examples/blob/master/templates/application/Makefile) defines the NRO build targets, source discovery, object dependencies, and `LIBDIRS` conventions adapted by the checker. The pinned [libnx switch rules](https://github.com/switchbrew/libnx/blob/20cbcfd90567f7bf84df7725f27e345e2164fa6b/nx/switch_rules) provide the NRO conversion target.
+- devkitPro provides the [devkitPro pacman releases](https://github.com/devkitPro/pacman/releases) and the [official `devkitpro/devkita64` container](https://hub.docker.com/r/devkitpro/devkita64), including a Linux arm64 image.
+- The official [libnx package definition](https://github.com/devkitPro/pacman-packages/blob/master/libnx/PKGBUILD) places libnx in the `switch-dev` group and depends on devkitA64. The official [switch-mbedtls package definition](https://github.com/devkitPro/pacman-packages/blob/master/switch/mbedtls/PKGBUILD) declares its `switch-zlib` dependency.
 - The pinned [libnx HID header](https://github.com/switchbrew/libnx/blob/20cbcfd90567f7bf84df7725f27e345e2164fa6b/nx/include/switch/services/hid.h) defines the Npad styles, state getters, and button masks used to close the checker.
 - Goldleaf's inspected [selected-directory action](https://github.com/XorTroll/Goldleaf/blob/1b94ca0a448abab03219f1cd887fdf481cc7227f/Goldleaf/source/ui/ui_BrowserLayout.cpp#L585-L592) passes one selected path to its [archive-bit setter](https://github.com/XorTroll/Goldleaf/blob/1b94ca0a448abab03219f1cd887fdf481cc7227f/Goldleaf/source/fs/fs_StdExplorer.cpp#L263-L267). This source inspection does not replace the physical test.
 - Linux documents [FAT_IOCTL_GET_ATTRIBUTES and FAT_IOCTL_SET_ATTRIBUTES](https://man7.org/linux/man-pages/man2/ioctl_fat.2.html). API availability does not qualify filesystem identification or Horizon interoperability.

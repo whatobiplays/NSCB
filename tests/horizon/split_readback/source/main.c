@@ -6,6 +6,8 @@
 #include <mbedtls/version.h>
 #include <switch.h>
 
+#include "qualification_config.h"
+
 #ifndef SPLIT_PATH
 #error SPLIT_PATH must name the transferred canonical directory
 #endif

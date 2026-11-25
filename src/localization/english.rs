@@ -129,6 +129,12 @@ struct SplitMessages {
     recovery_bundle: String,
 }
 
+#[derive(Deserialize)]
+struct SplitFinalizationMessages {
+    usage: String,
+    error: String,
+}
+
 fn copy_messages() -> &'static CopyMessages {
     static MESSAGES: OnceLock<CopyMessages> = OnceLock::new();
     MESSAGES.get_or_init(|| {
@@ -142,6 +148,14 @@ fn split_messages() -> &'static SplitMessages {
     MESSAGES.get_or_init(|| {
         serde_json::from_str(include_str!("split.en.json"))
             .expect("bundled English Split localization resource must be valid")
+    })
+}
+
+fn split_finalization_messages() -> &'static SplitFinalizationMessages {
+    static MESSAGES: OnceLock<SplitFinalizationMessages> = OnceLock::new();
+    MESSAGES.get_or_init(|| {
+        serde_json::from_str(include_str!("split_finalization.en.json"))
+            .expect("bundled English Split finalization localization resource must be valid")
     })
 }
 
@@ -446,6 +460,20 @@ pub(crate) fn copy_result(result: &OperationResult) -> String {
 
 pub(crate) fn split_usage() -> &'static str {
     &split_messages().usage
+}
+
+pub(crate) fn split_finalization_usage() -> &'static str {
+    &split_finalization_messages().usage
+}
+
+pub(crate) fn split_finalization_error(manifest_consistency: &str, code: &str) -> String {
+    interpolate(
+        &split_finalization_messages().error,
+        &[
+            ("manifest_consistency", manifest_consistency),
+            ("error", code),
+        ],
+    )
 }
 
 pub(crate) fn split_error_message(code: &str) -> &'static str {
