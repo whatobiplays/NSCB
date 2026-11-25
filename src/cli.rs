@@ -883,6 +883,9 @@ pub(crate) fn run_split_finalization_command(
                 return emit_split_finalization_usage(stdout, stderr, true);
             }
             json = true;
+        } else if argument.to_string_lossy().starts_with('-') {
+            // Prefix a relative path with `./` when its name begins with a dash.
+            return emit_split_finalization_usage(stdout, stderr, json);
         } else if directory.is_none() {
             directory = Some(PathBuf::from(argument));
         } else {
