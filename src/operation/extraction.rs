@@ -830,6 +830,8 @@ pub(super) fn plan(
             profile,
             total_bytes,
         }),
+        #[cfg(target_os = "macos")]
+        program_repack: None,
     })
 }
 
@@ -1497,7 +1499,7 @@ pub(super) fn execute_unix(
         .as_deref()
         .ok_or(OperationFailureCode::StalePlan)?;
     let stage_directory_path = plan.workspace.path.join(stage_directory_name);
-    let stage_directory = super::create_private_stage_directory(
+    let (stage_directory, _stage_directory_identity) = super::create_private_stage_directory(
         &workspace_directory,
         &plan.workspace.path,
         stage_directory_name,
@@ -2182,7 +2184,10 @@ fn split_parent_and_leaf(path: &str) -> Result<(&str, &str), OperationFailureCod
 }
 
 #[cfg(target_os = "macos")]
-fn open_relative_directory(root: &File, relative: &str) -> Result<File, OperationFailureCode> {
+pub(super) fn open_relative_directory(
+    root: &File,
+    relative: &str,
+) -> Result<File, OperationFailureCode> {
     let mut current = root
         .try_clone()
         .map_err(|_| OperationFailureCode::ValidationFailed)?;
@@ -2269,69 +2274,73 @@ fn validate_bundle_tree(
             super::check_cancelled(session)?;
         }
         let directory = open_relative_directory(bundle, &relative_directory)?;
-        visit_directory_entries(&directory, |name, is_directory| {
-            if let Some(session) = session {
-                super::check_cancelled(session)?;
-            }
-            let leaf = name
-                .to_str()
-                .ok_or(OperationFailureCode::ValidationFailed)?;
-            let relative = if relative_directory.is_empty() {
-                copy_path_component(leaf)?
-            } else {
-                prefixed_path(&relative_directory, leaf)?
-            };
-            if is_directory {
-                if expected_directories
+        visit_directory_entries(
+            &directory,
+            OperationFailureCode::ValidationFailed,
+            |name, is_directory| {
+                if let Some(session) = session {
+                    super::check_cancelled(session)?;
+                }
+                let leaf = name
+                    .to_str()
+                    .ok_or(OperationFailureCode::ValidationFailed)?;
+                let relative = if relative_directory.is_empty() {
+                    copy_path_component(leaf)?
+                } else {
+                    prefixed_path(&relative_directory, leaf)?
+                };
+                if is_directory {
+                    if expected_directories
+                        .binary_search_by(|expected| expected.as_bytes().cmp(relative.as_bytes()))
+                        .is_err()
+                    {
+                        return Err(OperationFailureCode::ValidationFailed);
+                    }
+                    actual_directories
+                        .try_reserve(1)
+                        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+                    pending_directories
+                        .try_reserve(1)
+                        .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+                    actual_directories.push(relative.clone());
+                    pending_directories.push(relative);
+                    return Ok(());
+                }
+
+                if expected_files
                     .binary_search_by(|expected| expected.as_bytes().cmp(relative.as_bytes()))
                     .is_err()
                 {
                     return Err(OperationFailureCode::ValidationFailed);
                 }
-                actual_directories
+                actual_files
                     .try_reserve(1)
                     .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-                pending_directories
-                    .try_reserve(1)
-                    .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-                actual_directories.push(relative.clone());
-                pending_directories.push(relative);
-                return Ok(());
-            }
-
-            if expected_files
-                .binary_search_by(|expected| expected.as_bytes().cmp(relative.as_bytes()))
-                .is_err()
-            {
-                return Err(OperationFailureCode::ValidationFailed);
-            }
-            actual_files
-                .try_reserve(1)
-                .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-            actual_files.push(relative.clone());
-            if relative == "manifest.json" {
-                validate_regular_file_at(&directory, name, |manifest_file| {
-                    validate_manifest_file(manifest_file, manifest_bytes)
-                })
-            } else {
-                let payload_path = relative
-                    .strip_prefix("content/")
-                    .ok_or(OperationFailureCode::ValidationFailed)?;
-                let selected_index = extraction
-                    .selected_files
-                    .binary_search_by(|selected| {
-                        selected
-                            .relative_path
-                            .as_bytes()
-                            .cmp(payload_path.as_bytes())
+                actual_files.push(relative.clone());
+                if relative == "manifest.json" {
+                    validate_regular_file_at(&directory, name, |manifest_file| {
+                        validate_manifest_file(manifest_file, manifest_bytes)
                     })
-                    .map_err(|_| OperationFailureCode::ValidationFailed)?;
-                let expected = &extraction.selected_files[selected_index];
-                validate_regular_file_at(&directory, name, |file| {
-                    validate_payload_file(file, expected, session)
-                })
-            }
-        })?;
+                } else {
+                    let payload_path = relative
+                        .strip_prefix("content/")
+                        .ok_or(OperationFailureCode::ValidationFailed)?;
+                    let selected_index = extraction
+                        .selected_files
+                        .binary_search_by(|selected| {
+                            selected
+                                .relative_path
+                                .as_bytes()
+                                .cmp(payload_path.as_bytes())
+                        })
+                        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+                    let expected = &extraction.selected_files[selected_index];
+                    validate_regular_file_at(&directory, name, |file| {
+                        validate_payload_file(file, expected, session)
+                    })
+                }
+            },
+        )?;
     }
 
     actual_directories.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
@@ -2343,7 +2352,7 @@ fn validate_bundle_tree(
 }
 
 #[cfg(target_os = "macos")]
-fn validate_regular_file_at(
+pub(super) fn validate_regular_file_at(
     parent: &File,
     name: &std::ffi::OsStr,
     validate_contents: impl FnOnce(&mut File) -> Result<(), OperationFailureCode>,
@@ -2442,7 +2451,7 @@ fn validate_payload_file(
 }
 
 #[cfg(target_os = "macos")]
-fn prefixed_path(prefix: &str, suffix: &str) -> Result<String, OperationFailureCode> {
+pub(super) fn prefixed_path(prefix: &str, suffix: &str) -> Result<String, OperationFailureCode> {
     let length = prefix
         .len()
         .checked_add(1)
@@ -2459,7 +2468,7 @@ fn prefixed_path(prefix: &str, suffix: &str) -> Result<String, OperationFailureC
 }
 
 #[cfg(target_os = "macos")]
-fn copy_path_component(component: &str) -> Result<String, OperationFailureCode> {
+pub(super) fn copy_path_component(component: &str) -> Result<String, OperationFailureCode> {
     let mut result = String::new();
     result
         .try_reserve_exact(component.len())
@@ -2482,16 +2491,24 @@ impl Drop for DirectoryStream {
 }
 
 #[cfg(target_os = "macos")]
-fn visit_directory_entries(
+pub(super) fn visit_directory_entries(
     directory: &File,
+    unsupported_entry_code: OperationFailureCode,
     mut visit: impl FnMut(&std::ffi::OsStr, bool) -> Result<(), OperationFailureCode>,
 ) -> Result<(), OperationFailureCode> {
     use std::ffi::CStr;
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
 
-    // SAFETY: directory is open; dup creates the descriptor owned by fdopendir.
-    let duplicate = unsafe { libc::dup(directory.as_raw_fd()) };
+    // SAFETY: `.` is a fixed NUL-terminated name relative to an open directory.
+    // Opening it creates an independent directory offset for fdopendir.
+    let duplicate = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        )
+    };
     if duplicate < 0 {
         return Err(OperationFailureCode::ValidationFailed);
     }
@@ -2546,7 +2563,7 @@ fn visit_directory_entries(
         } else if entry_type == libc::S_IFREG {
             false
         } else {
-            return Err(OperationFailureCode::ValidationFailed);
+            return Err(unsupported_entry_code);
         };
         visit(std::ffi::OsStr::from_bytes(bytes), is_directory)?;
     }

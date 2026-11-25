@@ -7,6 +7,8 @@
 //!
 #[cfg(any(target_os = "macos", test))]
 mod extraction;
+#[cfg(target_os = "macos")]
+mod program_repack_operation;
 
 #[cfg(target_os = "macos")]
 use crate::file_identity::path_identity;
@@ -331,6 +333,42 @@ impl MultiContentBuildRequest {
     }
 }
 
+/// Rebuilds one Program NCA from a complete standalone extraction manifest
+/// and writes it as the only member of a PFS0.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepackRequest {
+    manifest: PathBuf,
+    destination: PathBuf,
+    workspace: PathBuf,
+    key_file: PathBuf,
+    conflict_policy: ConflictPolicy,
+}
+
+impl RepackRequest {
+    /// Creates a request for a complete Program manifest and header-key file.
+    pub fn new(
+        manifest: impl Into<PathBuf>,
+        destination: impl Into<PathBuf>,
+        workspace: impl Into<PathBuf>,
+        key_file: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            manifest: manifest.into(),
+            destination: destination.into(),
+            workspace: workspace.into(),
+            key_file: key_file.into(),
+            conflict_policy: ConflictPolicy::Fail,
+        }
+    }
+
+    /// Sets the conflict policy for an existing PFS0 destination.
+    #[must_use]
+    pub fn with_conflict_policy(mut self, policy: ConflictPolicy) -> Self {
+        self.conflict_policy = policy;
+        self
+    }
+}
+
 /// Describes a request to split supported PFS0 members into component packages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultiContentSplitRequest {
@@ -419,6 +457,8 @@ pub enum OperationOutcome {
     Split,
     /// A validated Program NCA tree and manifest were published as one directory.
     Extracted,
+    /// One rebuilt Program NCA was published inside a PFS0 container.
+    Repacked,
     /// A qualified secure-partition member set was published as an NSP.
     Converted,
     /// A qualified NSP was compressed into a standard NSZ artifact.
@@ -450,6 +490,8 @@ pub enum OperationKind {
     NszToNsp,
     /// Reconstruction of a rights-free base Application XCZ as an XCI.
     XczToXci,
+    /// Reconstruction of one complete standalone Program manifest as a PFS0.
+    Repack,
 }
 
 /// A stable category for planning, execution, and publication failures.
@@ -467,6 +509,18 @@ pub enum OperationFailureCode {
     DuplicateContentMember,
     /// A package contains malformed or insufficiently validated content bytes.
     InvalidContentPackage,
+    /// The standalone repack manifest is malformed.
+    InvalidRepackManifest,
+    /// The destination does not match the format required by the operation.
+    InvalidDestination,
+    /// The manifest does not select the supported standalone Program profile.
+    UnsupportedRepackProfile,
+    /// The manifest declares a selected rather than complete Program tree.
+    IncompleteRepackManifest,
+    /// A payload listed by the complete manifest is missing.
+    MissingRepackPayload,
+    /// A payload no longer matches the evidence captured by planning.
+    RepackPayloadChanged,
     /// The requested NSP-to-NSZ compression level is outside the supported range.
     InvalidCompressionLevel,
     /// A package uses a content profile that this operation does not support.
@@ -560,6 +614,12 @@ impl OperationFailureCode {
             Self::DuplicateInput => "duplicate_input",
             Self::DuplicateContentMember => "duplicate_content_member",
             Self::InvalidContentPackage => "invalid_content_package",
+            Self::InvalidRepackManifest => "invalid_repack_manifest",
+            Self::InvalidDestination => "invalid_destination",
+            Self::UnsupportedRepackProfile => "unsupported_repack_profile",
+            Self::IncompleteRepackManifest => "incomplete_repack_manifest",
+            Self::MissingRepackPayload => "missing_repack_payload",
+            Self::RepackPayloadChanged => "repack_payload_changed",
             Self::InvalidCompressionLevel => "invalid_compression_level",
             Self::UnsupportedContentProfile => "unsupported_content_profile",
             Self::AmbiguousContentGrouping => "ambiguous_content_grouping",
@@ -1576,6 +1636,8 @@ pub struct OperationPlan {
     xcz_to_xci: Option<XczToXciPlan>,
     #[cfg(target_os = "macos")]
     extraction: Option<extraction::ExtractionOperationPlan>,
+    #[cfg(target_os = "macos")]
+    program_repack: Option<Arc<program_repack_operation::ProgramRepackOperationPlan>>,
 }
 
 impl OperationPlan {
@@ -2661,6 +2723,22 @@ pub(crate) fn plan_extraction(
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         extraction::plan(request, cancellation)
+    }
+}
+
+/// Plans reconstruction of one complete standalone Program bundle as a PFS0.
+pub(crate) fn plan_repack(request: RepackRequest) -> Result<OperationPlan, OperationError> {
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        let _ = request;
+        Err(OperationError::new(
+            OperationFailureCode::UnsupportedCapability,
+        ))
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        program_repack_operation::plan(request)
     }
 }
 
@@ -4676,7 +4754,7 @@ fn directory_manifest(path: &Path, directory: &File) -> Result<Sha256Digest, Ope
     let identity = handle_identity(directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
     let mut digest = Sha256::new();
     let mut count = 0_usize;
-    hash_directory_contents(path, directory, 0, &mut count, &mut digest)?;
+    hash_directory_contents(directory, 0, &mut count, &mut digest)?;
     if path_identity(path) != Some(identity) {
         return Err(OperationFailureCode::DestinationChanged);
     }
@@ -4685,7 +4763,6 @@ fn directory_manifest(path: &Path, directory: &File) -> Result<Sha256Digest, Ope
 
 #[cfg(target_os = "macos")]
 fn hash_directory_contents(
-    path: &Path,
     directory: &File,
     depth: usize,
     count: &mut usize,
@@ -4698,32 +4775,31 @@ fn hash_directory_contents(
     }
     let identity = handle_identity(directory).ok_or(OperationFailureCode::UnsupportedCapability)?;
     let mut entries = Vec::new();
-    for entry in fs::read_dir(path).map_err(|_| OperationFailureCode::DestinationChanged)? {
-        let entry = entry.map_err(|_| OperationFailureCode::DestinationChanged)?;
-        entries
-            .try_reserve(1)
-            .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
-        entries.push((entry.file_name(), entry.path()));
-        *count = count
-            .checked_add(1)
-            .ok_or(OperationFailureCode::ResourceLimitExceeded)?;
-        if *count > MAX_DIRECTORY_ENTRIES {
-            return Err(OperationFailureCode::ResourceLimitExceeded);
-        }
-    }
+    extraction::visit_directory_entries(
+        directory,
+        OperationFailureCode::UnsafePath,
+        |name, is_directory| {
+            entries
+                .try_reserve(1)
+                .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
+            entries.push((name.to_os_string(), is_directory));
+            *count = count
+                .checked_add(1)
+                .ok_or(OperationFailureCode::ResourceLimitExceeded)?;
+            if *count > MAX_DIRECTORY_ENTRIES {
+                return Err(OperationFailureCode::ResourceLimitExceeded);
+            }
+            Ok(())
+        },
+    )?;
     entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
-    for (name, entry_path) in entries {
+    for (name, is_directory) in entries {
         let name_bytes = name.as_bytes();
         let name_length = u64::try_from(name_bytes.len())
             .map_err(|_| OperationFailureCode::ResourceLimitExceeded)?;
         digest.update(name_length.to_le_bytes());
         digest.update(name_bytes);
-        let metadata = fs::symlink_metadata(&entry_path)
-            .map_err(|_| OperationFailureCode::DestinationChanged)?;
-        if metadata.file_type().is_symlink() {
-            return Err(OperationFailureCode::UnsafePath);
-        }
-        if metadata.is_dir() {
+        if is_directory {
             digest.update(*b"D");
             let child = open_directory_at(directory, &name)
                 .map_err(|_| OperationFailureCode::DestinationChanged)?;
@@ -4731,7 +4807,7 @@ fn hash_directory_contents(
                 handle_identity(&child).ok_or(OperationFailureCode::UnsupportedCapability)?;
             digest.update(child_identity.device().to_le_bytes());
             digest.update(child_identity.inode().to_le_bytes());
-            hash_directory_contents(&entry_path, &child, depth + 1, count, digest)?;
+            hash_directory_contents(&child, depth + 1, count, digest)?;
             if open_directory_at(directory, &name)
                 .ok()
                 .and_then(|observed| handle_identity(&observed))
@@ -4739,7 +4815,7 @@ fn hash_directory_contents(
             {
                 return Err(OperationFailureCode::DestinationChanged);
             }
-        } else if metadata.is_file() {
+        } else {
             digest.update(*b"F");
             let mut file = open_file_at(directory, &name)
                 .map_err(|_| OperationFailureCode::DestinationChanged)?;
@@ -4756,11 +4832,9 @@ fn hash_directory_contents(
             {
                 return Err(OperationFailureCode::DestinationChanged);
             }
-        } else {
-            return Err(OperationFailureCode::UnsafePath);
         }
     }
-    if handle_identity(directory) != Some(identity) || path_identity(path) != Some(identity) {
+    if handle_identity(directory) != Some(identity) {
         return Err(OperationFailureCode::DestinationChanged);
     }
     Ok(())
@@ -5059,6 +5133,7 @@ fn plan_multi_content_build_unix(
         nsp_nsz: None,
         xcz_to_xci: None,
         extraction: None,
+        program_repack: None,
     })
 }
 
@@ -5293,6 +5368,7 @@ fn plan_multi_content_split_unix(
         nsp_nsz: None,
         xcz_to_xci: None,
         extraction: None,
+        program_repack: None,
     })
 }
 
@@ -5648,6 +5724,8 @@ fn plan_copy_through_unix_for_output_inner(
         xcz_to_xci: None,
         #[cfg(target_os = "macos")]
         extraction: None,
+        #[cfg(target_os = "macos")]
+        program_repack: None,
     })
 }
 
@@ -6764,19 +6842,24 @@ where
     H: FnMut(ExecutionCheckpoint),
 {
     let mut milestones = vec![OperationMilestone::Planned];
-    let total_bytes =
-        plan.xci_to_nsp
-            .as_ref()
-            .map(|conversion| conversion.output_length)
-            .or_else(|| {
-                plan.multi_content
-                    .as_ref()
-                    .map(|multi_content| match multi_content {
-                        MultiContentPlan::Build(source)
-                        | MultiContentPlan::Split { source, .. } => source.total_member_bytes,
-                    })
-            })
-            .unwrap_or(plan.source_baseline.snapshot.len);
+    let total_bytes = plan
+        .program_repack
+        .as_ref()
+        .map(|repack| repack.progress_total)
+        .or_else(|| {
+            plan.xci_to_nsp
+                .as_ref()
+                .map(|conversion| conversion.output_length)
+                .or_else(|| {
+                    plan.multi_content
+                        .as_ref()
+                        .map(|multi_content| match multi_content {
+                            MultiContentPlan::Build(source)
+                            | MultiContentPlan::Split { source, .. } => source.total_member_bytes,
+                        })
+                })
+        })
+        .unwrap_or(plan.source_baseline.snapshot.len);
     let admission = session.admit_with_cancellation(cancellation, Some(total_bytes));
     let mut admission = match admission {
         Ok(admission) => admission,
@@ -6994,7 +7077,9 @@ fn check_storage_capacity(
     } else {
         None
     };
-    let (staged_length, private_spool_length) = if let Some(conversion) = &plan.xci_to_nsp {
+    let (staged_length, private_spool_length) = if let Some(repack) = &plan.program_repack {
+        (repack.output_length, repack.nca_length)
+    } else if let Some(conversion) = &plan.xci_to_nsp {
         (conversion.output_length, 0)
     } else if let Some(conversion) = xcz_to_xci(plan) {
         (conversion.output_length, conversion.spool_bytes)
@@ -7089,7 +7174,9 @@ fn xcz_to_xci(plan: &OperationPlan) -> Option<&XczToXciPlan> {
 
 #[cfg(target_os = "macos")]
 fn planned_staged_output(plan: &OperationPlan) -> (u64, Sha256Digest) {
-    if let Some(conversion) = xci_to_nsp(plan) {
+    if let Some(repack) = plan.program_repack.as_ref() {
+        (repack.output_length, repack.output_sha256)
+    } else if let Some(conversion) = xci_to_nsp(plan) {
         (conversion.output_length, conversion.output_sha256)
     } else if let Some(conversion) = xcz_to_xci(plan) {
         (conversion.output_length, conversion.output_sha256)
@@ -7177,6 +7264,9 @@ fn verify_conversion_key_identity(plan: &OperationPlan) -> Result<(), OperationF
     }
     if let Some(extraction) = plan.extraction.as_ref() {
         return extraction::verify_key_identity(extraction);
+    }
+    if let Some(repack) = plan.program_repack.as_ref() {
+        return program_repack_operation::verify_key_identity(repack);
     }
     if let Some(conversion) = xci_to_xcz(plan) {
         validate_file_route(&conversion.key_file, None)
@@ -7672,7 +7762,7 @@ fn write_nsp_nsz_package(
     Ok(layout.length)
 }
 
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[cfg(target_os = "macos")]
 fn record_private_spool_evidence(
     file: &mut File,
     identity: FileIdentity,
@@ -9093,7 +9183,8 @@ where
         && nsp_nsz(plan).is_none()
         && (multi_content_build_output(plan).is_some()
             || xci_to_nsp(plan).is_some()
-            || xcz_to_xci(plan).is_some())
+            || xcz_to_xci(plan).is_some()
+            || plan.program_repack.is_some())
     {
         verify_source_entry(plan, &source_directory)?;
         validate_plan_routes(
@@ -9131,6 +9222,19 @@ where
                 plan,
                 session,
                 checkpoint,
+            )?;
+            verify_source_entry(plan, &source_directory)?;
+            verify_destination_entry(
+                &destination_directory,
+                &plan.destination.name,
+                expected_destination,
+            )?;
+        }
+        if let Some(repack) = plan.program_repack.as_ref() {
+            program_repack_operation::validate_existing_package(
+                &mut current_destination,
+                repack,
+                session,
             )?;
             verify_source_entry(plan, &source_directory)?;
             verify_destination_entry(
@@ -9278,7 +9382,7 @@ where
         .as_deref()
         .ok_or(OperationFailureCode::StalePlan)?;
     let stage_directory_path = plan.workspace.path.join(stage_directory_name);
-    let stage_directory = create_private_stage_directory(
+    let (stage_directory, stage_directory_identity) = create_private_stage_directory(
         &workspace_directory,
         &plan.workspace.path,
         stage_directory_name,
@@ -9294,7 +9398,17 @@ where
         cleanup_artifact_retained,
     )?;
     let stage_name = stage_file_name.to_os_string();
-    let produced = if let Some(conversion) = xci_to_nsp(plan) {
+    let produced = if let Some(repack) = plan.program_repack.as_ref() {
+        program_repack_operation::execute(
+            repack,
+            &stage_directory,
+            stage_directory_identity,
+            &mut stage_file,
+            session,
+            artifacts,
+            cleanup_artifact_retained,
+        )
+    } else if let Some(conversion) = xci_to_nsp(plan) {
         verify_conversion_key_identity(plan)?;
         check_cancelled(session)?;
         let mut completed = 0_u64;
@@ -9460,6 +9574,7 @@ where
         && xci_to_xcz(plan).is_none()
         && xcz_to_xci(plan).is_none()
         && nsp_nsz(plan).is_none()
+        && plan.program_repack.is_none()
         && !files_equal_with_checkpoint(
             source_file,
             &mut stage_file,
@@ -9717,6 +9832,8 @@ where
         })
     } else if xci_to_xcz(plan).is_some() && result == OperationOutcome::Copied {
         Ok(OperationOutcome::Compressed)
+    } else if plan.program_repack.is_some() && result == OperationOutcome::Copied {
+        Ok(OperationOutcome::Repacked)
     } else if multi_content_build_output(plan).is_some() && result == OperationOutcome::Copied {
         Ok(OperationOutcome::Built)
     } else {
@@ -9987,7 +10104,7 @@ fn execute_multi_content_split_unix(
         .as_deref()
         .ok_or(OperationFailureCode::StalePlan)?;
     let stage_directory_path = plan.workspace.path.join(stage_directory_name);
-    let stage_directory = create_private_stage_directory(
+    let (stage_directory, _) = create_private_stage_directory(
         &workspace_directory,
         &plan.workspace.path,
         stage_directory_name,
@@ -9995,7 +10112,7 @@ fn execute_multi_content_split_unix(
         cleanup_artifact_retained,
     )?;
     let staged_directory_path = stage_directory_path.join(staged_directory_name);
-    let staged_directory = create_private_stage_directory(
+    let (staged_directory, _staged_directory_identity) = create_private_stage_directory(
         &stage_directory,
         &stage_directory_path,
         staged_directory_name,
@@ -10754,7 +10871,7 @@ fn create_private_stage_directory(
     name: &OsStr,
     artifacts: &mut Vec<OwnedArtifact>,
     cleanup_artifact_retained: &mut bool,
-) -> Result<File, OperationFailureCode> {
+) -> Result<(File, FileIdentity), OperationFailureCode> {
     let parent_handle = parent
         .try_clone()
         .map_err(|_| OperationFailureCode::WriteFailed)?;
@@ -10815,7 +10932,10 @@ fn create_private_stage_directory(
         *cleanup_artifact_retained = true;
         return Err(OperationFailureCode::UnsupportedCapability);
     }
-    Ok(directory)
+    Ok((
+        directory,
+        identity.ok_or(OperationFailureCode::UnsupportedCapability)?,
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -11206,22 +11326,22 @@ fn retain_late_destination_competitors(
                 artifacts,
                 cleanup_artifact_retained,
             ) {
-                Ok(directory) => {
-                    private_directory = Some((directory_name, directory));
+                Ok((directory, identity)) => {
+                    private_directory = Some((directory_name, directory, identity));
                     break;
                 }
                 Err(OperationFailureCode::StalePlan) => continue,
                 Err(_) => return Err(OperationFailureCode::PublicationUncertain),
             }
         }
-        let Some((private_directory_name, private_directory)) = private_directory else {
+        let Some((private_directory_name, private_directory, private_directory_identity)) =
+            private_directory
+        else {
             return Err(OperationFailureCode::PublicationUncertain);
         };
         *cleanup_artifact_retained = true;
         let private_directory_index = artifacts.len() - 1;
         let private_directory_path = parent_path.join(&private_directory_name);
-        let private_directory_identity = handle_identity(&private_directory)
-            .ok_or(OperationFailureCode::PublicationUncertain)?;
         if open_directory_at(&parent_directory, &private_directory_name)
             .ok()
             .as_ref()
@@ -11862,6 +11982,7 @@ fn validate_promotion_operands(
 fn revalidate_before_promotion(
     validation: &PromotionValidation<'_>,
     source_directory: &File,
+    session: &OperationSession,
     checkpoint: &mut dyn FnMut(ExecutionCheckpoint),
 ) -> Result<(), OperationFailureCode> {
     let plan = validation.plan;
@@ -11884,7 +12005,7 @@ fn revalidate_before_promotion(
         workspace_runtime_identity,
         Some(destination_parent_identity),
     )?;
-    verify_source_entry_with_checkpoint(plan, source_directory, || {
+    verify_source_entry_with_checkpoint(plan, source_directory, Some(session), || {
         checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
     })?;
     ensure_destination_baseline_with_checkpoint(plan, destination_directory, || {
@@ -12366,7 +12487,7 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
     .map_err(|_| OperationFailureCode::ValidationFailed)?;
     checkpoint(ExecutionCheckpoint::AfterFinalDestinationValidation);
     check_cancelled(session)?;
-    verify_source_entry_with_checkpoint(plan, source_directory, || {
+    verify_source_entry_with_checkpoint(plan, source_directory, Some(session), || {
         checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
     })?;
     checkpoint(ExecutionCheckpoint::AfterFinalSourceValidation);
@@ -12391,7 +12512,7 @@ fn publish_new(context: PublicationContext<'_>) -> Result<OperationOutcome, Oper
         stage_identity,
         staged,
     };
-    revalidate_before_promotion(&promotion, source_directory, checkpoint)?;
+    revalidate_before_promotion(&promotion, source_directory, session, checkpoint)?;
     if !session
         .begin_promotion()
         .map_err(|_| OperationFailureCode::SessionUnavailable)?
@@ -12568,7 +12689,7 @@ fn publish_replacement(
     .map_err(|_| OperationFailureCode::ValidationFailed)?;
     checkpoint(ExecutionCheckpoint::AfterFinalDestinationValidation);
     check_cancelled(session)?;
-    verify_source_entry_with_checkpoint(plan, source_directory, || {
+    verify_source_entry_with_checkpoint(plan, source_directory, Some(session), || {
         checkpoint(ExecutionCheckpoint::FinalValidationHashChunk);
     })?;
     checkpoint(ExecutionCheckpoint::AfterFinalSourceValidation);
@@ -12593,7 +12714,7 @@ fn publish_replacement(
         stage_identity,
         staged,
     };
-    revalidate_before_promotion(&promotion, source_directory, checkpoint)?;
+    revalidate_before_promotion(&promotion, source_directory, session, checkpoint)?;
     if !session
         .begin_promotion()
         .map_err(|_| OperationFailureCode::SessionUnavailable)?
@@ -12866,15 +12987,19 @@ fn verify_source_entry(
     plan: &OperationPlan,
     source_directory: &File,
 ) -> Result<(), OperationFailureCode> {
-    verify_source_entry_with_checkpoint(plan, source_directory, || {})
+    verify_source_entry_with_checkpoint(plan, source_directory, None, || {})
 }
 
 #[cfg(target_os = "macos")]
 fn verify_source_entry_with_checkpoint(
     plan: &OperationPlan,
     source_directory: &File,
+    session: Option<&OperationSession>,
     mut checkpoint: impl FnMut(),
 ) -> Result<(), OperationFailureCode> {
+    if let Some(repack) = plan.program_repack.as_ref() {
+        return program_repack_operation::verify_repack_inputs(repack, session);
+    }
     if let Some(multi_content) = plan.multi_content.as_ref() {
         let source = match multi_content {
             MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. } => source,
@@ -12895,8 +13020,16 @@ fn verify_source_entry_during_execution_with_checkpoint(
     session: &OperationSession,
     checkpoint: impl FnMut(),
 ) -> Result<(), OperationFailureCode> {
+    if let Some(repack) = plan.program_repack.as_ref() {
+        return program_repack_operation::verify_repack_inputs(repack, Some(session));
+    }
     let Some(multi_content) = plan.multi_content.as_ref() else {
-        return verify_source_entry_with_checkpoint(plan, source_directory, checkpoint);
+        return verify_source_entry_with_checkpoint(
+            plan,
+            source_directory,
+            Some(session),
+            checkpoint,
+        );
     };
     let source = match multi_content {
         MultiContentPlan::Build(source) | MultiContentPlan::Split { source, .. } => source,

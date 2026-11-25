@@ -124,6 +124,20 @@ fn decrypt_header(block: &mut [u8; HEADER_SIZE], key: &[u8; 32]) {
     xts.decrypt_area(&mut block[0x400..], 0x200, 2, nintendo_tweak);
 }
 
+/// Encrypts one NCA3 header block with the supplied AES-XTS header key.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn encrypt_header_block(
+    mut block: [u8; HEADER_SIZE],
+    key: &[u8; 32],
+) -> [u8; HEADER_SIZE] {
+    let first = Aes128::new(GenericArray::from_slice(&key[..0x10]));
+    let second = Aes128::new(GenericArray::from_slice(&key[0x10..]));
+    let xts = Xts128::new(first, second);
+    xts.encrypt_area(&mut block[..0x400], 0x200, 0, nintendo_tweak);
+    xts.encrypt_area(&mut block[0x400..], 0x200, 2, nintendo_tweak);
+    block
+}
+
 fn nintendo_tweak(index: u128) -> [u8; 16] {
     index.to_be_bytes()
 }
@@ -551,6 +565,23 @@ mod tests {
         xts.encrypt_area(&mut block[..0x400], 0x200, 0, |index| index.to_be_bytes());
         xts.encrypt_area(&mut block[0x400..], 0x200, 2, |index| index.to_be_bytes());
         block
+    }
+
+    #[test]
+    fn encrypted_header_writer_round_trips_through_the_supported_reader() {
+        let plaintext = fixture(&[(0xc00, 0x200, 1, 1, 1, false)], 0xe00);
+        let encrypted = super::encrypt_header_block(plaintext, &KEY);
+        assert_ne!(encrypted, plaintext);
+
+        let mut contents = vec![0_u8; 0xe00];
+        contents[..encrypted.len()].copy_from_slice(&encrypted);
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&contents).unwrap();
+
+        assert_eq!(
+            super::read_header_block(file.as_file_mut(), contents.len() as u64, &KEY).unwrap(),
+            plaintext
+        );
     }
 
     #[test]

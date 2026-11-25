@@ -77,6 +77,22 @@ impl SyntheticExtractionFixture {
         Self::write(built.nca, built.keys_file, expected_files)
     }
 
+    /// Adds a payload to the synthetic Program NCA and updates the extraction expectations.
+    #[allow(dead_code)]
+    pub fn with_program_file(mut self, path: String, bytes: Vec<u8>) -> Self {
+        let mut files =
+            read_pfs0(&self.source_bytes[PARTITION_OFFSET..PARTITION_OFFSET + PARTITION_SIZE]);
+        files.push((path.clone(), bytes.clone()));
+        replace_first_partition(&mut self.source_bytes, &files);
+        fs::write(&self.source, &self.source_bytes).expect("write updated synthetic NCA");
+        self.expected_files.push(ExpectedFile {
+            partition_index: 0,
+            path,
+            bytes,
+        });
+        self
+    }
+
     /// Builds a valid empty PartitionFs followed by one populated partition.
     pub fn empty_first_partition() -> Self {
         let mut built = build_nca(Spec {

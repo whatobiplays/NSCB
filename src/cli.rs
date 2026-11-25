@@ -902,6 +902,7 @@ fn run_with_control(
     if args.first().is_some_and(|argument| {
         argument == OsStr::new("multi-content-build")
             || argument == OsStr::new("multi-content-split")
+            || argument == OsStr::new("repack")
             || argument == OsStr::new("xci-to-nsp")
             || argument == OsStr::new("xci-to-xcz")
             || argument == OsStr::new("xcz-to-xci")
@@ -1036,6 +1037,16 @@ enum MultiContentInvocation {
         json: bool,
         jsonl: bool,
     },
+    /// Rebuilds a complete standalone Program manifest into a PFS0 with one Program NCA.
+    Repack {
+        manifest: PathBuf,
+        destination: PathBuf,
+        workspace: PathBuf,
+        key_file: PathBuf,
+        conflict_policy: ConflictPolicy,
+        json: bool,
+        jsonl: bool,
+    },
     XciToNsp {
         source: PathBuf,
         destination: PathBuf,
@@ -1110,6 +1121,7 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
     let command = args.first().and_then(|value| value.to_str()).ok_or(())?;
     let is_build = command == "multi-content-build";
     let is_split = command == "multi-content-split";
+    let is_repack = command == "repack";
     let is_xci_to_nsp = command == "xci-to-nsp";
     let is_xci_to_xcz = command == "xci-to-xcz";
     let is_xcz_to_xci = command == "xcz-to-xci";
@@ -1118,11 +1130,12 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
     let is_nsz_to_nsp = command == "nsz-to-nsp";
     let is_nsp_nsz = is_nsp_to_nsz || is_nsz_to_nsp;
     let is_compression = is_nsp_to_nsz || is_xci_to_xcz;
-    if !is_build && !is_split && !is_xci_xcz_conversion && !is_nsp_nsz {
+    if !is_build && !is_split && !is_repack && !is_xci_xcz_conversion && !is_nsp_nsz {
         return Err(());
     }
 
     let mut sources = Vec::new();
+    let mut manifest = None;
     let mut destination = None;
     let mut destination_directory = None;
     let mut key_file = None;
@@ -1140,8 +1153,9 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
         let option = args[index].to_str().ok_or(())?;
         index += 1;
         match option {
-            "--source" | "--output" | "--output-directory" | "--workspace" | "--keys"
-            | "--profile" | "--conflict-policy" | "--preset" | "--level" => {
+            "--source" | "--manifest" | "--output" | "--output-directory" | "--workspace"
+            | "--keys" | "--key-file" | "--profile" | "--conflict-policy" | "--preset"
+            | "--level" => {
                 let value = args.get(index).ok_or(())?;
                 if value.is_empty() {
                     return Err(());
@@ -1149,8 +1163,11 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                 index += 1;
                 match option {
                     "--source" => sources.push(PathBuf::from(value)),
+                    "--manifest" if is_repack && manifest.is_none() => {
+                        manifest = Some(PathBuf::from(value));
+                    }
                     "--output"
-                        if (is_build || is_xci_xcz_conversion || is_nsp_nsz)
+                        if (is_build || is_repack || is_xci_xcz_conversion || is_nsp_nsz)
                             && destination.is_none() =>
                     {
                         destination = Some(PathBuf::from(value));
@@ -1162,6 +1179,9 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
                         if (is_build || is_split || is_xci_xcz_conversion || is_nsp_nsz)
                             && key_file.is_none() =>
                     {
+                        key_file = Some(PathBuf::from(value));
+                    }
+                    "--key-file" if is_repack && key_file.is_none() => {
                         key_file = Some(PathBuf::from(value));
                     }
                     "--profile" if (is_build || is_split) && !profile_seen => {
@@ -1243,6 +1263,19 @@ fn parse_multi_content_invocation(args: &[OsString]) -> Result<MultiContentInvoc
             workspace,
             profile,
             key_file,
+            conflict_policy,
+            json,
+            jsonl,
+        })
+    } else if is_repack {
+        if !sources.is_empty() || destination_directory.is_some() || profile_seen {
+            return Err(());
+        }
+        Ok(MultiContentInvocation::Repack {
+            manifest: manifest.ok_or(())?,
+            destination: destination.ok_or(())?,
+            workspace,
+            key_file: key_file.ok_or(())?,
             conflict_policy,
             json,
             jsonl,
@@ -1650,6 +1683,25 @@ fn run_multi_content_command(
                 "multi_content.job_result",
             )
         }
+        MultiContentInvocation::Repack {
+            manifest,
+            destination,
+            workspace,
+            key_file,
+            conflict_policy,
+            json,
+            jsonl,
+        } => (
+            engine.plan_repack(
+                nscb::RepackRequest::new(manifest, destination, workspace, key_file)
+                    .with_conflict_policy(conflict_policy),
+            ),
+            json,
+            jsonl,
+            "repack",
+            "Program",
+            "repack.job_result",
+        ),
         MultiContentInvocation::XciToNsp {
             source,
             destination,
@@ -1842,6 +1894,7 @@ fn run_multi_content_command(
     } else if result.state() == JobState::Succeeded {
         let outcome = match result.outcome() {
             Some(nscb::OperationOutcome::Built) => "built",
+            Some(nscb::OperationOutcome::Repacked) => "completed",
             Some(nscb::OperationOutcome::Split) => "split",
             Some(nscb::OperationOutcome::Converted) => "converted",
             Some(nscb::OperationOutcome::Compressed) => "compressed",
@@ -1881,6 +1934,11 @@ fn run_multi_content_command(
 
 fn multi_content_usage(args: &[OsString]) -> &'static str {
     if args
+        .first()
+        .is_some_and(|value| value == OsStr::new("repack"))
+    {
+        "usage: repack --manifest FILE --output PFS0 --workspace DIR --key-file FILE [--conflict-policy fail|replace|skip] [--json|--jsonl]"
+    } else if args
         .first()
         .is_some_and(|value| value == OsStr::new("multi-content-build"))
     {

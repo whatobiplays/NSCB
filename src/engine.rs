@@ -8,7 +8,7 @@ use crate::operation::{
     CopyBatchCheckpointError, CopyBatchExecution, CopyBatchItemCheckpoint, CopyBatchPlan,
     CopyBatchRequest, CopyBatchResult, CopyBatchSession, CopyThroughRequest,
     MultiContentBuildRequest, MultiContentSplitRequest, OperationError, OperationFailureCode,
-    OperationPlan, OperationResult, OperationSession,
+    OperationPlan, OperationResult, OperationSession, RepackRequest,
 };
 use crate::pfs0;
 use crate::split_operation::{SplitPlan, SplitRequest};
@@ -93,6 +93,18 @@ impl Engine {
         cancellation: CancellationHandle,
     ) -> Result<OperationPlan, OperationError> {
         crate::operation::plan_extraction(request, cancellation)
+    }
+
+    /// Plans a deterministic PFS0 containing one rebuilt Program NCA.
+    ///
+    /// The input must be a complete standalone Program manifest with its
+    /// payload tree beside the manifest.
+    /// Execution checks supported NCA structure and the enclosing PFS0. This
+    /// does not qualify the output as an NSP.
+    ///
+    /// Execution requires native macOS arm64 with writable local APFS.
+    pub fn plan_repack(&self, request: RepackRequest) -> Result<OperationPlan, OperationError> {
+        crate::operation::plan_repack(request)
     }
 
     /// Resolves a rights-free base Application XCI into a planned NSP output.

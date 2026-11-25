@@ -372,6 +372,38 @@ fn application_profile_build_requires_two_logical_groups() {
 }
 
 #[test]
+fn program_only_build_still_requires_two_distinct_program_id_groups() {
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let source = root.path().join("one-program-group.pfs0");
+    let destination = root.path().join("combined.pfs0");
+    fs::write(
+        &source,
+        pfs0(&[(
+            "arbitrary-name.bin",
+            program_nca(FIRST_PROGRAM_ID, 0, b"single group"),
+        )]),
+    )
+    .expect("single-group source package");
+
+    let error = match Engine::new().plan_multi_content_build(MultiContentBuildRequest::new(
+        vec![source],
+        &destination,
+        &workspace,
+    )) {
+        Err(error) => error,
+        Ok(_) => panic!("Program-only Build must keep its two-group minimum"),
+    };
+
+    assert_eq!(
+        error.code(),
+        OperationFailureCode::InsufficientContentEvidence
+    );
+    assert!(!destination.exists());
+}
+
+#[test]
 fn application_profile_split_accepts_one_complete_group() {
     let root = tempfile::tempdir().expect("temporary root");
     let workspace = root.path().join("workspace");
@@ -920,6 +952,45 @@ fn split_conflict_policies_preserve_or_recover_existing_directory_data() {
     assert_eq!(
         fs::read(displaced.path().join("preserve.txt")).expect("displaced data retained"),
         b"recover on replace"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn split_rejects_symlink_in_existing_destination_with_unsafe_path() {
+    use std::os::unix::fs::symlink;
+
+    let root = tempfile::tempdir().expect("temporary root");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace");
+    let source = root.path().join("combined.pfs0");
+    fs::write(
+        &source,
+        pfs0(&[
+            ("first.nca", program_nca(FIRST_PROGRAM_ID, 0, b"first")),
+            ("second.nca", program_nca(SECOND_PROGRAM_ID, 0, b"second")),
+        ]),
+    )
+    .expect("combined package");
+    let destination = root.path().join("symlink-output");
+    fs::create_dir(&destination).expect("destination directory");
+    let outside = root.path().join("outside.txt");
+    fs::write(&outside, b"preserve target").expect("outside target");
+    symlink(&outside, destination.join("external-link")).expect("destination symlink");
+
+    let error = Engine::new()
+        .plan_multi_content_split(MultiContentSplitRequest::new(
+            &source,
+            &destination,
+            &workspace,
+        ))
+        .err()
+        .expect("symlinked destination entry must be rejected");
+
+    assert_eq!(error.code(), OperationFailureCode::UnsafePath);
+    assert_eq!(
+        fs::read(&outside).expect("outside target remains"),
+        b"preserve target"
     );
 }
 
