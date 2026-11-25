@@ -24,9 +24,12 @@ mod process;
 #[path = "support/synthetic_extraction.rs"]
 mod synthetic_extraction;
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use nscb::{ConflictPolicy, Engine, OperationSession, RepackRequest};
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use serde_json::Value;
 use std::ffi::OsString;
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 use std::path::Path;
 use std::process::Output;
 
@@ -37,10 +40,12 @@ fn run(args: &[OsString]) -> Output {
         .expect("launch nscb executable")
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn document(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("one JSON document on stdout")
 }
 
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn path_arg(path: &Path) -> OsString {
     path.as_os_str().to_owned()
 }
