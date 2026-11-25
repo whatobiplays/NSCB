@@ -4,6 +4,7 @@
 use crate::inspection::{NativeNcaFileSpan, NativeNcaInventory};
 use crate::inspection::{NcaContentType, ProgramId};
 use serde::{Serialize, Serializer};
+#[cfg(any(target_os = "macos", test))]
 use std::collections::HashMap;
 #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
 use std::collections::HashSet;
@@ -440,8 +441,10 @@ pub(crate) enum ExtractionValidationError {
     /// A selected path or bundle component violates the portable naming policy.
     UnsupportedPath,
     /// A selected path aliases another source file or directory.
+    #[cfg(any(target_os = "macos", test))]
     PathCollision,
     /// A published tree exceeds an existing inspection resource limit.
+    #[cfg(any(target_os = "macos", test))]
     ResourceLimitExceeded,
 }
 
@@ -862,6 +865,7 @@ fn copy_string(value: &str) -> Result<String, ExtractionValidationError> {
 }
 
 /// Validates one selected relative path using the portable published-name policy.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn validate_selected_relative_path(path: &str) -> Result<(), ExtractionValidationError> {
     if path.is_empty() {
         return Err(ExtractionValidationError::UnsupportedPath);
@@ -918,6 +922,7 @@ fn is_reserved_device_name(component: &str) -> bool {
 
 /// Rejects source aliases that could change the meaning of selected paths on a
 /// case-insensitive filesystem or after Windows trailing-dot/space handling.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn validate_selected_path_aliases(
     selected_files: &[String],
     selected_directories: &[String],
@@ -949,6 +954,7 @@ pub(crate) fn validate_selected_path_aliases(
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn selected_paths_by_key(
     paths: &[String],
     allow_exact_duplicates: bool,
@@ -970,6 +976,7 @@ fn selected_paths_by_key(
     Ok(canonical)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn source_paths_by_key(
     paths: &[String],
 ) -> Result<HashMap<String, Option<&str>>, ExtractionValidationError> {
@@ -996,6 +1003,7 @@ fn source_paths_by_key(
     Ok(canonical)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn comparison_key(path: &str) -> Result<String, ExtractionValidationError> {
     let mut key = String::new();
     key.try_reserve(path.len())

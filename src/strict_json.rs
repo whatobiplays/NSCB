@@ -84,6 +84,7 @@ pub(crate) fn parse_bounded(
 }
 
 /// Parses a manifest while counting its records and PFS0 names as they arrive.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn parse_program_manifest_bounded(
     bytes: &[u8],
     limits: ParseLimits,
@@ -92,6 +93,7 @@ pub(crate) fn parse_program_manifest_bounded(
     parse_with_limits(bytes, limits, Some(manifest_limits))
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn parse_with_limits(
     bytes: &[u8],
     limits: ParseLimits,
@@ -310,6 +312,7 @@ struct StrictJsonValueSeed<'a> {
 #[derive(Clone, Copy)]
 enum ValueContext {
     Generic,
+    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     ManifestRoot,
     ManifestSource,
     ManifestPartitions,

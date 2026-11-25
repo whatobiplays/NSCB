@@ -125,6 +125,7 @@ fn decrypt_header(block: &mut [u8; HEADER_SIZE], key: &[u8; 32]) {
 }
 
 /// Encrypts one NCA3 header block with the supplied AES-XTS header key.
+#[cfg(any(target_os = "macos", test))]
 pub(crate) fn encrypt_header_block(
     mut block: [u8; HEADER_SIZE],
     key: &[u8; 32],
