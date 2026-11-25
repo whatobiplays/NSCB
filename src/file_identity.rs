@@ -94,6 +94,29 @@ pub(crate) fn handle_identity(file: &File) -> Option<FileIdentity> {
         .and_then(|metadata| file_identity(&metadata))
 }
 
+/// Opens a directory handle that callers can retain while checking its path identity.
+#[cfg(unix)]
+pub(crate) fn open_directory_handle(path: &Path) -> Option<File> {
+    File::open(path).ok()
+}
+
+/// Opens a Windows directory handle with the required directory access flag.
+#[cfg(windows)]
+pub(crate) fn open_directory_handle(path: &Path) -> Option<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    // FILE_FLAG_BACKUP_SEMANTICS permits opening directories.
+    options.custom_flags(0x0200_0000);
+    options.open(path).ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn open_directory_handle(_path: &Path) -> Option<File> {
+    None
+}
+
 /// Returns the stable identity for an opened Windows file handle.
 #[cfg(windows)]
 pub(crate) fn handle_identity(file: &File) -> Option<FileIdentity> {

@@ -5,14 +5,14 @@
 //! source trust receipt. A successful check does not establish source-backed
 //! completeness or Horizon consumer interoperability.
 
-use crate::file_identity::path_identity;
+use crate::file_identity::{FileIdentity, handle_identity, open_directory_handle, path_identity};
 use crate::split_operation::{DEFAULT_SEGMENT_SIZE_BYTES, MAX_SEGMENT_COUNT};
 use crate::split_resolution::{
     SplitInventoryPolicy, VerifiedSplitDirectory, verify_split_directory,
 };
 use std::fmt;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 
 #[cfg(any(windows, test))]
 const ARCHIVE_ATTRIBUTE: u32 = 0x20;
@@ -87,12 +87,25 @@ impl SplitFinalizationErrorCode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SplitFinalizationError {
     code: SplitFinalizationErrorCode,
+    manifest_consistency_verified: bool,
 }
 
 impl SplitFinalizationError {
     /// Returns the failure category without exposing host paths or OS details.
     pub const fn code(self) -> SplitFinalizationErrorCode {
         self.code
+    }
+
+    /// Reports whether manifest consistency was established before this failure.
+    pub const fn manifest_consistency_verified(self) -> bool {
+        self.manifest_consistency_verified
+    }
+
+    fn with_manifest_consistency_verified(self) -> Self {
+        Self {
+            manifest_consistency_verified: true,
+            ..self
+        }
     }
 }
 
@@ -113,43 +126,75 @@ impl std::error::Error for SplitFinalizationError {}
 pub fn finalize_split_directory(
     directory: impl AsRef<Path>,
 ) -> Result<SplitArchiveAttributeStatus, SplitFinalizationError> {
-    reject_selected_alias(directory.as_ref())?;
+    let binding = SelectedDirectoryBinding::open(directory.as_ref())?;
     let verified = verify_split_directory(
-        directory.as_ref(),
+        &binding.selected_path,
         SplitInventoryPolicy::RequireExactMembers,
     )
     .map_err(|_| error(SplitFinalizationErrorCode::InvalidSplitSet))?;
+    if verified.identity != binding.identity {
+        return Err(error(SplitFinalizationErrorCode::DestinationChanged));
+    }
     let sizes = verified
         .segments
         .iter()
         .map(|segment| segment.size)
         .collect::<Vec<_>>();
     if !valid_segment_profile(&sizes, DEFAULT_SEGMENT_SIZE_BYTES, MAX_SEGMENT_COUNT) {
-        return Err(error(SplitFinalizationErrorCode::InvalidSplitSet));
+        return Err(
+            error(SplitFinalizationErrorCode::InvalidSplitSet).with_manifest_consistency_verified()
+        );
     }
 
     #[cfg(windows)]
     {
         let mut backend = WindowsArchiveAttributeBackend;
-        finalize_with_backend(&verified, &mut backend)
+        finalize_with_backend(&verified, &binding, &mut backend)
     }
 
     #[cfg(target_os = "macos")]
     {
-        ensure_directory_identity(&verified)?;
+        ensure_directory_identity(&verified, &binding)?;
         Ok(SplitArchiveAttributeStatus::ExternalFinalizationRequired)
     }
 
     #[cfg(target_os = "linux")]
     {
-        ensure_directory_identity(&verified)?;
+        ensure_directory_identity(&verified, &binding)?;
         Ok(SplitArchiveAttributeStatus::UnqualifiedPlatform)
     }
 
     #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
-        ensure_directory_identity(&verified)?;
+        ensure_directory_identity(&verified, &binding)?;
         Ok(SplitArchiveAttributeStatus::UnqualifiedPlatform)
+    }
+}
+
+struct SelectedDirectoryBinding {
+    selected_path: PathBuf,
+    handle: File,
+    identity: FileIdentity,
+}
+
+impl SelectedDirectoryBinding {
+    fn open(selected_path: &Path) -> Result<Self, SplitFinalizationError> {
+        reject_selected_alias(selected_path)?;
+        let handle = open_directory_handle(selected_path)
+            .ok_or_else(|| error(SplitFinalizationErrorCode::InvalidSplitSet))?;
+        if !handle.metadata().is_ok_and(|metadata| metadata.is_dir()) {
+            return Err(error(SplitFinalizationErrorCode::InvalidSplitSet));
+        }
+        let identity = handle_identity(&handle)
+            .ok_or_else(|| error(SplitFinalizationErrorCode::InvalidSplitSet))?;
+        if path_identity(selected_path) != Some(identity) {
+            return Err(error(SplitFinalizationErrorCode::DestinationChanged));
+        }
+        Ok(Self {
+            selected_path: selected_path.to_path_buf(),
+            handle,
+            identity,
+        })
     }
 }
 
@@ -187,13 +232,42 @@ fn valid_segment_profile(sizes: &[u64], segment_limit: u64, max_segments: usize)
 
 fn ensure_directory_identity(
     verified: &VerifiedSplitDirectory,
+    binding: &SelectedDirectoryBinding,
 ) -> Result<(), SplitFinalizationError> {
-    let metadata = fs::symlink_metadata(&verified.directory)
-        .map_err(|_| error(SplitFinalizationErrorCode::DestinationChanged))?;
-    if !metadata.is_dir() || path_identity(&verified.directory) != Some(verified.identity) {
-        return Err(error(SplitFinalizationErrorCode::DestinationChanged));
+    if binding.identity != verified.identity
+        || handle_identity(&binding.handle) != Some(binding.identity)
+        || !path_matches_directory_identity(&binding.selected_path, binding.identity)
+        || !path_matches_directory_identity(&verified.directory, binding.identity)
+    {
+        return Err(error(SplitFinalizationErrorCode::DestinationChanged)
+            .with_manifest_consistency_verified());
     }
     Ok(())
+}
+
+fn path_matches_directory_identity(path: &Path, identity: FileIdentity) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_REPARSE_POINT, GetFileAttributesW, INVALID_FILE_ATTRIBUTES,
+        };
+
+        let path = wide_path(path);
+        // SAFETY: `path` is a nul-terminated UTF-16 path buffer.
+        let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+        if attributes == INVALID_FILE_ATTRIBUTES || attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return false;
+        }
+    }
+
+    path_identity(path) == Some(identity)
 }
 
 #[cfg(any(windows, test))]
@@ -210,29 +284,44 @@ trait ArchiveAttributeBackend {
 #[cfg(any(windows, test))]
 fn finalize_with_backend(
     verified: &VerifiedSplitDirectory,
+    binding: &SelectedDirectoryBinding,
     backend: &mut impl ArchiveAttributeBackend,
 ) -> Result<SplitArchiveAttributeStatus, SplitFinalizationError> {
-    if !backend.is_fat32(&verified.directory) {
+    ensure_directory_identity(verified, binding)?;
+    let is_fat32 = backend.is_fat32(&verified.directory);
+    ensure_directory_identity(verified, binding)?;
+    if !is_fat32 {
         return Ok(SplitArchiveAttributeStatus::UnsupportedFilesystem);
     }
-    ensure_directory_identity(verified)?;
-    let before = backend.get_attributes(&verified.directory)?;
+    let before = backend.get_attributes(&verified.directory);
+    let before = complete_attribute_call(verified, binding, before)?;
     let was_set = before & ARCHIVE_ATTRIBUTE != 0;
     if !was_set {
-        ensure_directory_identity(verified)?;
-        backend.set_attributes(&verified.directory, before | ARCHIVE_ATTRIBUTE)?;
+        ensure_directory_identity(verified, binding)?;
+        let set = backend.set_attributes(&verified.directory, before | ARCHIVE_ATTRIBUTE);
+        complete_attribute_call(verified, binding, set)?;
     }
-    ensure_directory_identity(verified)?;
-    let after = backend.get_attributes(&verified.directory)?;
-    ensure_directory_identity(verified)?;
+    let after = backend.get_attributes(&verified.directory);
+    let after = complete_attribute_call(verified, binding, after)?;
     if after & ARCHIVE_ATTRIBUTE == 0 || (before ^ after) & !ARCHIVE_ATTRIBUTE != 0 {
-        return Err(error(SplitFinalizationErrorCode::AttributeReadbackFailed));
+        return Err(error(SplitFinalizationErrorCode::AttributeReadbackFailed)
+            .with_manifest_consistency_verified());
     }
     Ok(if was_set {
         SplitArchiveAttributeStatus::AlreadySet
     } else {
         SplitArchiveAttributeStatus::Set
     })
+}
+
+#[cfg(any(windows, test))]
+fn complete_attribute_call<T>(
+    verified: &VerifiedSplitDirectory,
+    binding: &SelectedDirectoryBinding,
+    result: Result<T, SplitFinalizationError>,
+) -> Result<T, SplitFinalizationError> {
+    ensure_directory_identity(verified, binding)?;
+    result.map_err(SplitFinalizationError::with_manifest_consistency_verified)
 }
 
 #[cfg(windows)]
@@ -315,7 +404,10 @@ fn wide_path(path: &Path) -> Vec<u16> {
 }
 
 fn error(code: SplitFinalizationErrorCode) -> SplitFinalizationError {
-    SplitFinalizationError { code }
+    SplitFinalizationError {
+        code,
+        manifest_consistency_verified: false,
+    }
 }
 
 #[cfg(test)]
@@ -366,6 +458,7 @@ mod tests {
         fail_get: bool,
         fail_set: bool,
         omit_archive_on_set: bool,
+        replace_directory_on_get: bool,
         replace_directory_on_set: bool,
         set_calls: usize,
     }
@@ -375,7 +468,13 @@ mod tests {
             self.supported
         }
 
-        fn get_attributes(&mut self, _: &Path) -> Result<u32, SplitFinalizationError> {
+        fn get_attributes(&mut self, directory: &Path) -> Result<u32, SplitFinalizationError> {
+            if self.replace_directory_on_get {
+                let mut old = directory.to_path_buf();
+                old.set_extension("old");
+                fs::rename(directory, old).unwrap();
+                fs::create_dir(directory).unwrap();
+            }
             if self.fail_get {
                 return Err(error(SplitFinalizationErrorCode::AttributeReadFailed));
             }
@@ -389,6 +488,12 @@ mod tests {
         ) -> Result<(), SplitFinalizationError> {
             self.set_calls += 1;
             if self.fail_set {
+                if self.replace_directory_on_set {
+                    let mut old = directory.to_path_buf();
+                    old.set_extension("old");
+                    fs::rename(directory, old).unwrap();
+                    fs::create_dir(directory).unwrap();
+                }
                 return Err(error(SplitFinalizationErrorCode::AttributeSetFailed));
             }
             self.attributes = if self.omit_archive_on_set {
@@ -480,6 +585,7 @@ mod tests {
     fn archive_bit_is_added_idempotently_and_other_attributes_are_preserved() {
         let directory = TestDirectory::new();
         let verified = directory.verified();
+        let binding = SelectedDirectoryBinding::open(&directory.0).unwrap();
         let mut backend = FakeBackend {
             supported: true,
             attributes: 0x12,
@@ -487,12 +593,12 @@ mod tests {
         };
 
         assert_eq!(
-            finalize_with_backend(&verified, &mut backend).unwrap(),
+            finalize_with_backend(&verified, &binding, &mut backend).unwrap(),
             SplitArchiveAttributeStatus::Set
         );
         assert_eq!(backend.attributes, 0x32);
         assert_eq!(
-            finalize_with_backend(&verified, &mut backend).unwrap(),
+            finalize_with_backend(&verified, &binding, &mut backend).unwrap(),
             SplitArchiveAttributeStatus::AlreadySet
         );
         assert_eq!(backend.set_calls, 1);
@@ -502,13 +608,14 @@ mod tests {
     fn unsupported_filesystem_is_left_untouched() {
         let directory = TestDirectory::new();
         let verified = directory.verified();
+        let binding = SelectedDirectoryBinding::open(&directory.0).unwrap();
         let mut backend = FakeBackend {
             attributes: 0x12,
             ..FakeBackend::default()
         };
 
         assert_eq!(
-            finalize_with_backend(&verified, &mut backend).unwrap(),
+            finalize_with_backend(&verified, &binding, &mut backend).unwrap(),
             SplitArchiveAttributeStatus::UnsupportedFilesystem
         );
         assert_eq!(backend.attributes, 0x12);
@@ -519,18 +626,28 @@ mod tests {
     fn setter_and_readback_failures_are_not_reported_as_success() {
         let directory = TestDirectory::new();
         let verified = directory.verified();
+        let binding = SelectedDirectoryBinding::open(&directory.0).unwrap();
+        let mut read_failure = FakeBackend {
+            supported: true,
+            fail_get: true,
+            ..FakeBackend::default()
+        };
+        let error = finalize_with_backend(&verified, &binding, &mut read_failure).unwrap_err();
+        assert_eq!(
+            error.code(),
+            SplitFinalizationErrorCode::AttributeReadFailed
+        );
+        assert!(error.manifest_consistency_verified());
+
         let mut setter_failure = FakeBackend {
             supported: true,
             attributes: 0x10,
             fail_set: true,
             ..FakeBackend::default()
         };
-        assert_eq!(
-            finalize_with_backend(&verified, &mut setter_failure)
-                .unwrap_err()
-                .code(),
-            SplitFinalizationErrorCode::AttributeSetFailed
-        );
+        let error = finalize_with_backend(&verified, &binding, &mut setter_failure).unwrap_err();
+        assert_eq!(error.code(), SplitFinalizationErrorCode::AttributeSetFailed);
+        assert!(error.manifest_consistency_verified());
 
         let mut readback_failure = FakeBackend {
             supported: true,
@@ -538,18 +655,73 @@ mod tests {
             omit_archive_on_set: true,
             ..FakeBackend::default()
         };
+        let error = finalize_with_backend(&verified, &binding, &mut readback_failure).unwrap_err();
         assert_eq!(
-            finalize_with_backend(&verified, &mut readback_failure)
-                .unwrap_err()
-                .code(),
+            error.code(),
             SplitFinalizationErrorCode::AttributeReadbackFailed
         );
+        assert!(error.manifest_consistency_verified());
+    }
+
+    #[test]
+    fn attribute_failures_report_observed_displacement_with_manifest_evidence() {
+        let read_directory = TestDirectory::new();
+        let read_verified = read_directory.verified();
+        let read_binding = SelectedDirectoryBinding::open(&read_directory.0).unwrap();
+        let mut read_backend = FakeBackend {
+            supported: true,
+            fail_get: true,
+            replace_directory_on_get: true,
+            ..FakeBackend::default()
+        };
+        let read_error =
+            finalize_with_backend(&read_verified, &read_binding, &mut read_backend).unwrap_err();
+        assert_eq!(
+            read_error.code(),
+            SplitFinalizationErrorCode::DestinationChanged
+        );
+        assert!(read_error.manifest_consistency_verified());
+
+        let set_directory = TestDirectory::new();
+        let set_verified = set_directory.verified();
+        let set_binding = SelectedDirectoryBinding::open(&set_directory.0).unwrap();
+        let mut set_backend = FakeBackend {
+            supported: true,
+            attributes: 0x10,
+            fail_set: true,
+            replace_directory_on_set: true,
+            ..FakeBackend::default()
+        };
+        let set_error =
+            finalize_with_backend(&set_verified, &set_binding, &mut set_backend).unwrap_err();
+        assert_eq!(
+            set_error.code(),
+            SplitFinalizationErrorCode::DestinationChanged
+        );
+        assert!(set_error.manifest_consistency_verified());
+    }
+
+    #[test]
+    fn selected_directory_binding_detects_displacement_after_open() {
+        let directory = TestDirectory::new();
+        let binding = SelectedDirectoryBinding::open(&directory.0).unwrap();
+        let verified = directory.verified();
+        let mut old = directory.0.clone();
+        old.set_extension("old");
+        fs::rename(&directory.0, &old).unwrap();
+        fs::create_dir(&directory.0).unwrap();
+
+        let error = ensure_directory_identity(&verified, &binding).unwrap_err();
+
+        assert_eq!(error.code(), SplitFinalizationErrorCode::DestinationChanged);
+        assert!(error.manifest_consistency_verified());
     }
 
     #[test]
     fn directory_identity_is_checked_before_mutation_and_after_readback() {
         let directory = TestDirectory::new();
         let verified = directory.verified();
+        let binding = SelectedDirectoryBinding::open(&directory.0).unwrap();
         let mut before = directory.0.clone();
         before.set_extension("old");
         fs::rename(&directory.0, &before).unwrap();
@@ -560,7 +732,7 @@ mod tests {
             ..FakeBackend::default()
         };
         assert_eq!(
-            finalize_with_backend(&verified, &mut backend)
+            finalize_with_backend(&verified, &binding, &mut backend)
                 .unwrap_err()
                 .code(),
             SplitFinalizationErrorCode::DestinationChanged
@@ -569,6 +741,7 @@ mod tests {
 
         let after = TestDirectory::new();
         let verified_after = after.verified();
+        let binding_after = SelectedDirectoryBinding::open(&after.0).unwrap();
         let mut backend_after = FakeBackend {
             supported: true,
             attributes: 0x10,
@@ -576,7 +749,7 @@ mod tests {
             ..FakeBackend::default()
         };
         assert_eq!(
-            finalize_with_backend(&verified_after, &mut backend_after)
+            finalize_with_backend(&verified_after, &binding_after, &mut backend_after)
                 .unwrap_err()
                 .code(),
             SplitFinalizationErrorCode::DestinationChanged
@@ -587,13 +760,16 @@ mod tests {
     fn directory_identity_check_rejects_a_replaced_directory() {
         let directory = TestDirectory::new();
         let verified = directory.verified();
+        let binding = SelectedDirectoryBinding::open(&directory.0).unwrap();
         let mut old = directory.0.clone();
         old.set_extension("old");
         fs::rename(&directory.0, old).unwrap();
         fs::create_dir(&directory.0).unwrap();
 
         assert_eq!(
-            ensure_directory_identity(&verified).unwrap_err().code(),
+            ensure_directory_identity(&verified, &binding)
+                .unwrap_err()
+                .code(),
             SplitFinalizationErrorCode::DestinationChanged
         );
     }

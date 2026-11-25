@@ -14,11 +14,11 @@ ifeq ($(strip $(EXPECTED_SHA256)),)
 $(error set EXPECTED_SHA256 to the source SHA-256)
 endif
 
+include $(DEVKITPRO)/libnx/switch_rules
+
 CFLAGS += -Wall -Wextra \
 	-DSPLIT_PATH=\"$(SPLIT_PATH)\" \
 	-DEXPECTED_SIZE=$(EXPECTED_SIZE)ULL \
 	-DEXPECTED_SHA256=\"$(EXPECTED_SHA256)\" \
-	-I$(DEVKITPRO)/portlibs/switch/include
-LIBS += -L$(DEVKITPRO)/portlibs/switch/lib -lmbedcrypto
-
-include $(DEVKITPRO)/libnx/switch_rules
+	-I$(PORTLIBS)/include
+LIBS += -L$(PORTLIBS)/lib -lmbedcrypto

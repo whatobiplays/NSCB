@@ -785,6 +785,54 @@ pub(crate) fn run_split_finalization_if_requested(
         .then(|| run_split_finalization_command(args, stdout, stderr))
 }
 
+fn split_finalization_error_document(
+    code: &str,
+    manifest_consistency_verified: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "kind": "split_finalization.error",
+        "error": {
+            "code": code,
+            "manifest_consistency": if manifest_consistency_verified {
+                "verified"
+            } else {
+                "not_established"
+            },
+            "source_backed_completeness": "not_established",
+            "consumer_interoperability": "not_established"
+        }
+    })
+}
+
+#[cfg(test)]
+mod split_finalization_cli_contract_tests {
+    use super::split_finalization_error_document;
+
+    #[test]
+    fn verified_attribute_failures_keep_manifest_evidence_and_open_claims() {
+        for code in [
+            "attribute_read_failed",
+            "attribute_set_failed",
+            "attribute_readback_failed",
+        ] {
+            let document = split_finalization_error_document(code, true);
+
+            assert_eq!(document["kind"], "split_finalization.error");
+            assert_eq!(document["error"]["code"], code);
+            assert_eq!(document["error"]["manifest_consistency"], "verified");
+            assert_eq!(
+                document["error"]["source_backed_completeness"],
+                "not_established"
+            );
+            assert_eq!(
+                document["error"]["consumer_interoperability"],
+                "not_established"
+            );
+        }
+    }
+}
+
 pub(crate) fn run_split_finalization_command(
     args: &[OsString],
     stdout: &mut dyn Write,
@@ -862,17 +910,27 @@ pub(crate) fn run_split_finalization_command(
                 }
             };
             if json {
-                let document = serde_json::json!({
-                    "schema_version": 1,
-                    "kind": "split_finalization.error",
-                    "error": { "code": error.code().as_str() }
-                });
+            let document = split_finalization_error_document(
+                error.code().as_str(),
+                error.manifest_consistency_verified(),
+            );
                 if serde_json::to_writer(&mut *stdout, &document).is_err()
                     || writeln!(stdout).is_err()
                 {
                     return EXIT_INTERNAL;
                 }
-            } else if writeln!(stderr, "error: {}", error.code().as_str()).is_err() {
+    } else if writeln!(
+        stderr,
+        "manifest consistency: {}\nsource-backed completeness: not established\nconsumer interoperability: not established\nerror: {}",
+        if error.manifest_consistency_verified() {
+            "verified"
+        } else {
+            "not established"
+        },
+        error.code().as_str()
+    )
+    .is_err()
+    {
                 return EXIT_INTERNAL;
             }
             exit
