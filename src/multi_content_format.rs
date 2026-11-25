@@ -550,7 +550,7 @@ fn validate_output_name(name: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn output_name(program_id: u64, content_index: u32) -> Result<String, FormatError> {
+pub(crate) fn output_name(program_id: u64, content_index: u32) -> Result<String, FormatError> {
     let mut name = String::new();
     name.try_reserve_exact(29)
         .map_err(|_| FormatError::ResourceLimit)?;

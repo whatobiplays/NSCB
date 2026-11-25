@@ -145,6 +145,35 @@ Engine and CLI passed extraction tests on native macOS arm64 with writable
 local APFS and rights-free synthetic keyed fixtures. Other operating systems
 and filesystem types remain unqualified.
 
+## Program repacking
+
+`nscb repack` rebuilds a Program NCA from a complete standalone extraction
+manifest and the current files in the adjacent `content/` tree. It writes a
+deterministic `.pfs0` with exactly one member. The member name follows the
+canonical Program naming format, `{program_id:016X}_{content_index:08X}.nca`,
+using the identity recorded in the manifest:
+
+```text
+nscb repack --manifest <FILE> --output <PFS0> --workspace <DIR> \
+    --key-file <FILE> [--conflict-policy fail|replace|skip] [--json|--jsonl]
+```
+
+The manifest must describe a complete standalone
+`nca3_program_partition_fs` extraction. NSCB rebuilds the NCA from the
+manifest and current payloads, checks the NCA against its supported structural
+and integrity rules, then independently checks the one-member PFS0 before
+publication. If the available metadata or key cannot produce a structurally
+valid NCA, the operation fails without publishing a package.
+
+This PFS0 is not automatically a valid NSP. It has no Meta NCA or CNMT and is
+not qualified as an NSP, Nintendo-authentic content, Full-verified content, or
+installable content. The API uses `RepackRequest` and
+`Engine::plan_repack`. Repacking has a dedicated single-member profile;
+multi-content Build keeps its existing requirement for at least two distinct
+Program ID groups. This slice does not write a standalone `.nca` file. See
+[Program PFS0 repacking](docs/architecture/program-pfs0-repacking.md) for the
+manifest, validation, and qualification contract.
+
 ## Content verification
 
 The read-only `Engine::verify` operation returns typed per-check evidence for a

@@ -34,6 +34,7 @@ mod nsp_semantic_qualification;
 mod operation;
 mod partition_fs;
 mod pfs0;
+mod program_repack;
 mod provider;
 mod recognition;
 mod sha256;
@@ -61,6 +62,16 @@ static QUALIFICATION_TEST_ALLOCATOR: test_allocator::TestAllocator = test_alloca
 #[path = "../tests/support/synthetic_verification.rs"]
 #[allow(dead_code)]
 mod test_synthetic_verification;
+
+#[cfg(test)]
+pub(crate) mod support {
+    pub(crate) use crate::test_synthetic_verification as synthetic_verification;
+}
+
+#[cfg(all(test, target_os = "macos", target_arch = "aarch64"))]
+#[path = "../tests/support/synthetic_extraction.rs"]
+#[allow(dead_code)]
+mod test_synthetic_extraction;
 
 #[cfg(test)]
 #[path = "../tests/support/synthetic_nsp_qualification.rs"]
@@ -111,7 +122,7 @@ pub use operation::{
     OperationKind, OperationMilestone, OperationOutcome, OperationPlan, OperationPlanSnapshot,
     OperationResult, OperationSession, OperationSessionPhase, OperationSessionSnapshot,
     OperationSessionStatus, PlannedArtifact, PlannedContentGroup, PlannedContentMember,
-    PlannedEffect, PlannedSource, StagingStrategy,
+    PlannedEffect, PlannedSource, RepackRequest, StagingStrategy,
 };
 pub use split_operation::{
     SplitBundleBaseline, SplitOutputPaths, SplitPlan, SplitPlanSnapshot, SplitReceiptCommitState,
