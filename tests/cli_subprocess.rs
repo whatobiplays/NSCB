@@ -82,6 +82,50 @@ fn no_argument_non_tty_reports_usage_after_loading_synthetic_configuration() {
 }
 
 #[test]
+fn split_finalization_cli_error_preserves_unestablished_evidence_fields() {
+    let root = tempfile::tempdir().expect("create finalization CLI fixture");
+    let directory = root.path().join("Game.nsp");
+    fs::create_dir(&directory).unwrap();
+
+    let output = isolated_command()
+        .args(["finalize-split-set"])
+        .arg(&directory)
+        .arg("--json")
+        .output()
+        .expect("run Split finalization CLI");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stderr.is_empty());
+    let document: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(document["kind"], "split_finalization.error");
+    assert_eq!(document["error"]["code"], "invalid_split_set");
+    assert_eq!(document["error"]["manifest_consistency"], "not_established");
+    assert_eq!(
+        document["error"]["source_backed_completeness"],
+        "not_established"
+    );
+    assert_eq!(
+        document["error"]["consumer_interoperability"],
+        "not_established"
+    );
+}
+
+#[test]
+fn split_finalization_cli_treats_an_unknown_option_as_a_usage_error() {
+    let output = isolated_command()
+        .args(["finalize-split-set", "--bogus"])
+        .output()
+        .expect("run Split finalization CLI with an unknown option");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"Usage: nscb finalize-split-set <canonical-directory> [--json]\n"
+    );
+}
+
+#[test]
 fn normal_executable_probes_pfs0_without_keys_and_matches_the_public_facade() {
     let bytes = valid_container_probe_fixture();
     let input = TempInput::new(&bytes);
@@ -328,7 +372,10 @@ fn normal_executable_treats_an_unknown_long_option_as_a_usage_error() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, b"Usage: nscb probe <path> [--json]\n");
+    assert_eq!(
+        output.stderr,
+        b"Usage: nscb probe <path> [--json]\n       nscb finalize-split-set <canonical-directory> [--json]\n"
+    );
 }
 
 #[test]

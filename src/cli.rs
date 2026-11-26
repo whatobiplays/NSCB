@@ -26,6 +26,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::AtomicBool;
 
 const EXIT_SUCCESS: i32 = 0;
@@ -774,6 +775,232 @@ pub(crate) fn run(
     }
 }
 
+pub(crate) fn run_split_finalization_if_requested(
+    args: &[OsString],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Option<i32> {
+    args.first()
+        .is_some_and(|argument| argument == OsStr::new("finalize-split-set"))
+        .then(|| run_split_finalization_command(args, stdout, stderr))
+}
+
+fn split_finalization_error_document(
+    code: &str,
+    manifest_consistency_verified: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "kind": "split_finalization.error",
+        "error": {
+            "code": code,
+            "manifest_consistency": if manifest_consistency_verified {
+                "verified"
+            } else {
+                "not_established"
+            },
+            "source_backed_completeness": "not_established",
+            "consumer_interoperability": "not_established"
+        }
+    })
+}
+
+#[cfg(test)]
+mod split_finalization_cli_contract_tests {
+    use super::{run_split_finalization_command, split_finalization_error_document};
+    use std::ffi::OsString;
+
+    #[test]
+    fn finalization_usage_uses_localized_resource() {
+        let args = [OsString::from("finalize-split-set")];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_split_finalization_command(&args, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, super::EXIT_USAGE);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "Usage: nscb finalize-split-set <canonical-directory> [--json]\n"
+        );
+    }
+
+    #[test]
+    fn finalization_input_error_uses_localized_resource() {
+        let directory = tempfile::tempdir().unwrap();
+        let args = [
+            OsString::from("finalize-split-set"),
+            directory.path().as_os_str().to_owned(),
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_split_finalization_command(&args, &mut stdout, &mut stderr);
+
+        assert_eq!(exit, super::EXIT_INPUT);
+        assert!(stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(stderr).unwrap(),
+            "Manifest consistency: not established\nSource-backed completeness: not established\nConsumer interoperability: not established\nError: invalid_split_set\n"
+        );
+    }
+
+    #[test]
+    fn verified_attribute_failures_keep_manifest_evidence_and_open_claims() {
+        for code in [
+            "attribute_read_failed",
+            "attribute_set_failed",
+            "attribute_readback_failed",
+        ] {
+            let document = split_finalization_error_document(code, true);
+
+            assert_eq!(document["kind"], "split_finalization.error");
+            assert_eq!(document["error"]["code"], code);
+            assert_eq!(document["error"]["manifest_consistency"], "verified");
+            assert_eq!(
+                document["error"]["source_backed_completeness"],
+                "not_established"
+            );
+            assert_eq!(
+                document["error"]["consumer_interoperability"],
+                "not_established"
+            );
+        }
+    }
+}
+
+pub(crate) fn run_split_finalization_command(
+    args: &[OsString],
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> i32 {
+    let mut directory = None;
+    let mut json = false;
+    for argument in args.iter().skip(1) {
+        if argument == OsStr::new("--json") {
+            if json {
+                return emit_split_finalization_usage(stdout, stderr, true);
+            }
+            json = true;
+        } else if argument.to_string_lossy().starts_with('-') {
+            // Prefix a relative path with `./` when its name begins with a dash.
+            return emit_split_finalization_usage(stdout, stderr, json);
+        } else if directory.is_none() {
+            directory = Some(PathBuf::from(argument));
+        } else {
+            return emit_split_finalization_usage(stdout, stderr, json);
+        }
+    }
+    let Some(directory) = directory else {
+        return emit_split_finalization_usage(stdout, stderr, json);
+    };
+
+    match nscb::split_finalization::finalize_split_directory(directory) {
+        Ok(status) => {
+            let finalized = matches!(
+                status,
+                nscb::split_finalization::SplitArchiveAttributeStatus::Set
+                    | nscb::split_finalization::SplitArchiveAttributeStatus::AlreadySet
+            );
+            if json {
+                let document = serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "split_finalization.result",
+                    "result": {
+                        "manifest_consistency": "verified",
+                        "source_backed_completeness": "not_established",
+                        "archive_attribute": status.as_str(),
+                        "archive_attribute_readback": if finalized { "verified" } else { "not_available" },
+                        "platform_capability": status.platform_capability(),
+                        "consumer_interoperability": "not_established"
+                    }
+                });
+                if serde_json::to_writer(&mut *stdout, &document).is_err()
+                    || writeln!(stdout).is_err()
+                {
+                    return EXIT_INTERNAL;
+                }
+            } else if writeln!(
+                stdout,
+                "manifest consistency: verified\nsource-backed completeness: not established\narchive attribute: {}\nplatform capability: {}\nconsumer interoperability: not established",
+                status.as_str(),
+                status.platform_capability()
+            )
+            .is_err()
+            {
+                return EXIT_INTERNAL;
+            }
+            if finalized {
+                EXIT_SUCCESS
+            } else {
+                EXIT_COMPLETED_WITH_ISSUES
+            }
+        }
+        Err(error) => {
+            let exit = match error.code() {
+                nscb::split_finalization::SplitFinalizationErrorCode::InvalidSplitSet
+                | nscb::split_finalization::SplitFinalizationErrorCode::DestinationChanged => {
+                    EXIT_INPUT
+                }
+                nscb::split_finalization::SplitFinalizationErrorCode::AttributeReadFailed
+                | nscb::split_finalization::SplitFinalizationErrorCode::AttributeSetFailed
+                | nscb::split_finalization::SplitFinalizationErrorCode::AttributeReadbackFailed => {
+                    EXIT_COMPLETED_WITH_ISSUES
+                }
+                _ => EXIT_COMPLETED_WITH_ISSUES,
+            };
+            if json {
+                let document = split_finalization_error_document(
+                    error.code().as_str(),
+                    error.manifest_consistency_verified(),
+                );
+                if serde_json::to_writer(&mut *stdout, &document).is_err()
+                    || writeln!(stdout).is_err()
+                {
+                    return EXIT_INTERNAL;
+                }
+            } else if writeln!(
+                stderr,
+                "{}",
+                crate::localization::english::split_finalization_error(
+                    if error.manifest_consistency_verified() {
+                        "verified"
+                    } else {
+                        "not established"
+                    },
+                    error.code().as_str(),
+                )
+            )
+            .is_err()
+            {
+                return EXIT_INTERNAL;
+            }
+            exit
+        }
+    }
+}
+
+fn emit_split_finalization_usage(
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    json: bool,
+) -> i32 {
+    if json {
+        emit_error(stdout, "usage_error", EXIT_USAGE)
+    } else if writeln!(
+        stderr,
+        "{}",
+        crate::localization::english::split_finalization_usage()
+    )
+    .is_ok()
+    {
+        EXIT_USAGE
+    } else {
+        EXIT_INTERNAL
+    }
+}
+
 pub(crate) fn run_with_standalone_config(
     args: &[OsString],
     engine: &Engine,
@@ -856,6 +1083,9 @@ fn run_with_control(
     stderr: &mut dyn Write,
     #[cfg(target_os = "macos")] reporting: Option<&ReportingControl>,
 ) -> i32 {
+    if let Some(exit) = run_split_finalization_if_requested(args, stdout, stderr) {
+        return exit;
+    }
     if args
         .first()
         .is_some_and(|argument| argument == OsStr::new("extract"))

@@ -108,6 +108,49 @@ fn qualified_split_json_is_additive_and_keeps_schema_version_one() {
 }
 
 #[test]
+fn split_finalization_reports_each_evidence_state_without_a_receipt() {
+    let tree = TempTree::new("finalization-status");
+    let fixture = SplitFixture::new(&source(2048), 4096);
+    fixture.write(&tree.0, "Game.nsp");
+
+    let output = run(
+        &["finalize-split-set", "Game.nsp", "--json"],
+        &tree.0,
+        &tree.state(),
+    );
+    let document = json_error(&output);
+    assert_eq!(document["schema_version"], 1);
+    assert_eq!(document["kind"], "split_finalization.result");
+    assert_eq!(document["result"]["manifest_consistency"], "verified");
+    assert_eq!(
+        document["result"]["source_backed_completeness"],
+        "not_established"
+    );
+    assert_eq!(
+        document["result"]["consumer_interoperability"],
+        "not_established"
+    );
+    assert!(matches!(
+        document["result"]["archive_attribute"].as_str(),
+        Some(
+            "set"
+                | "already_set"
+                | "external_finalization_required"
+                | "unsupported_filesystem"
+                | "unqualified_platform"
+        )
+    ));
+    assert_eq!(
+        output.status.code() == Some(0),
+        matches!(
+            document["result"]["archive_attribute"].as_str(),
+            Some("set" | "already_set")
+        )
+    );
+    assert!(!tree.state().join("split-trust").exists());
+}
+
+#[test]
 fn ordinary_resolution_ignores_a_relative_state_directory() {
     let tree = TempTree::new("ordinary-relative");
     fs::write(tree.0.join("ordinary.bin"), b"ordinary").unwrap();

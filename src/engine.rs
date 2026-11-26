@@ -46,6 +46,22 @@ impl Engine {
         Self
     }
 
+    /// Checks that a Split directory matches the lengths and digests in its adjacent manifest.
+    ///
+    /// The check does not consult or create a local trust receipt. Success
+    /// establishes manifest consistency only; source-backed completeness and
+    /// consumer interoperability remain unverified.
+    pub fn verify_split_manifest_consistency(
+        &self,
+        directory: impl AsRef<Path>,
+    ) -> Result<(), crate::input_resolution::InputResolutionError> {
+        crate::split_resolution::verify_split_directory(
+            directory.as_ref(),
+            crate::split_resolution::SplitInventoryPolicy::AllowUnrelatedEntries,
+        )
+        .map(|_| ())
+    }
+
     /// Resolves a copy-through request into an immutable, inspectable plan.
     ///
     /// Planning reads the source and destination state but does not modify
