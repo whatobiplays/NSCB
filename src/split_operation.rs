@@ -7671,7 +7671,9 @@ fn journal_layout(record: &JournalRecord) -> Option<SplitLayout> {
         1 if record.layout.is_none() && record.segment_names.is_empty() => {
             Some(SplitLayout::Canonical)
         }
-        2 => record.layout,
+        2 => record
+            .layout
+            .filter(|layout| *layout != SplitLayout::Canonical),
         _ => None,
     }
 }
@@ -8333,8 +8335,23 @@ mod producer_tests {
         let root_path = fs::canonicalize(root.path()).unwrap();
         let fixture = crate::test_synthetic_xci::valid();
         let compressed_xci = crate::test_synthetic_xci::with_compressed_secure_member();
+        let mut malformed_first_xci = compressed_xci.image.clone();
+        let first_compressed_member = compressed_xci.secure_entries[0];
+        malformed_first_xci[first_compressed_member.data_offset + 0x4008
+            ..first_compressed_member.data_offset + 0x4010]
+            .fill(0);
+        let compressed_second_xci =
+            crate::test_synthetic_xci::with_compressed_second_secure_member();
+        let mut malformed_second_xci = compressed_second_xci.image.clone();
+        let second_compressed_member = compressed_second_xci.secure_entries[1];
+        malformed_second_xci[second_compressed_member.data_offset + 0x4008
+            ..second_compressed_member.data_offset + 0x4010]
+            .fill(0);
         let ncz = synthetic_ncz_member();
+        let mut malformed_ncz = ncz.clone();
+        malformed_ncz[0x4008..0x4010].fill(0);
         let compressed_pfs0 = pfs0_with_one_member("content.ncz", &ncz);
+        let malformed_compressed_pfs0 = pfs0_with_one_member("content.ncz", &malformed_ncz);
         let standalone_nca = crate::synthetic_nsp_qualification::valid().program_nca;
         let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
         let engine = Engine::new();
@@ -8346,7 +8363,22 @@ mod producer_tests {
                 compressed_xci.image,
                 SplitLayout::LegacyXc,
             ),
+            (
+                "malformed-first-ncz.xci",
+                malformed_first_xci,
+                SplitLayout::LegacyXc,
+            ),
+            (
+                "malformed-second-ncz.xci",
+                malformed_second_xci,
+                SplitLayout::LegacyXc,
+            ),
             ("compressed.nsp", compressed_pfs0, SplitLayout::LegacyNs),
+            (
+                "malformed-ncz.nsp",
+                malformed_compressed_pfs0,
+                SplitLayout::LegacyNs,
+            ),
             ("standalone.nca", standalone_nca, SplitLayout::LegacyNs),
             ("standalone.ncz", ncz, SplitLayout::LegacyNs),
             (
@@ -8399,9 +8431,16 @@ mod producer_tests {
             cleanup_parent_identity: None,
         };
 
-        record.layout = Some(SplitLayout::Canonical);
+        record.layout = None;
         record.segment_names.clear();
+        record.version = 1;
         assert!(super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+        record.version = 2;
+        record.layout = Some(SplitLayout::Canonical);
+        assert!(!super::journal_segment_names_are_valid(
             &record,
             OsStr::new("game.nsp")
         ));
@@ -9069,6 +9108,108 @@ mod producer_tests {
     }
 
     #[test]
+    fn legacy_layouts_round_trip_exact_bytes_through_segmented_and_virtual_readers() {
+        let cases = [
+            (
+                SplitLayout::LegacyXc,
+                "game.xci",
+                crate::test_synthetic_xci::valid().image,
+            ),
+            (
+                SplitLayout::LegacyNs,
+                "game.nsp",
+                pfs0_with_one_member("payload.bin", b"legacy virtual reader payload"),
+            ),
+        ];
+
+        for (layout, source_name, source_bytes) in cases {
+            let member_count_cases = [
+                (false, source_bytes.len() as u64 + 1),
+                (true, source_bytes.len().div_ceil(3) as u64),
+            ];
+            for (multipart, segment_size) in member_count_cases {
+                let root = tempfile::tempdir().unwrap();
+                let source = root.path().join(source_name);
+                let bundle = root.path().join(format!("{source_name}.split"));
+                let state_path = root.path().join("state").join("split-trust");
+                fs::write(&source, &source_bytes).unwrap();
+                let trust = LocalSplitTrustStore::new(state_path);
+                let plan = plan_split_for_tests(
+                    SplitRequest::new(&source, &bundle).with_layout(layout),
+                    &trust,
+                    segment_size,
+                    None,
+                )
+                .unwrap();
+                let result = Engine::new().execute_split(plan, &OperationSession::new());
+                assert_eq!(result.outcome(), Some(OperationOutcome::SplitCreated));
+                assert_eq!(
+                    result.split_receipt_commit_state(),
+                    Some(SplitReceiptCommitState::ConfirmedCommitted)
+                );
+                let output = result.split_output_paths().unwrap();
+                let first_member = match layout {
+                    SplitLayout::LegacyXc => "game.xc0",
+                    SplitLayout::LegacyNs => "game.ns0",
+                    SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+                };
+                assert_eq!(
+                    resolve_bytes(&bundle, output.canonical_directory(), &trust),
+                    source_bytes
+                );
+
+                let member = output.canonical_directory().join(first_member);
+                let resolved = Engine::new()
+                    .resolve_inputs_with(
+                        InputResolutionRequest::new(&bundle).with_path(&member),
+                        InputResolutionCapabilities::new().with_split_trust_store(&trust),
+                    )
+                    .unwrap();
+                let opened = resolved.inputs[0]
+                    .segments
+                    .iter()
+                    .map(|segment| open_segment_file(&segment.path, segment.size).unwrap())
+                    .collect();
+                let mut reader = SegmentedFileReader::from_segments(opened).unwrap();
+                let mut reconstructed = Vec::new();
+                reader.read_to_end(&mut reconstructed).unwrap();
+                assert_eq!(reconstructed, source_bytes);
+
+                if multipart {
+                    let start = segment_size.saturating_sub(2) as usize;
+                    let end = (start + 7).min(source_bytes.len());
+                    reader.seek(SeekFrom::Start(start as u64)).unwrap();
+                    let mut crossing = vec![0; end - start];
+                    reader.read_exact(&mut crossing).unwrap();
+                    assert_eq!(crossing, source_bytes[start..end]);
+                }
+
+                let journal_path = fs::read_dir(bundle.parent().unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "journal")
+                    })
+                    .expect("completed transaction journal");
+                let journal = fs::read_to_string(journal_path).unwrap();
+                for line in journal.lines() {
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(record["version"], 2);
+                    assert_eq!(
+                        record["layout"],
+                        match layout {
+                            SplitLayout::LegacyXc => "legacy_xc",
+                            SplitLayout::LegacyNs => "legacy_ns",
+                            SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn real_multipart_writer_resolver_and_virtual_reader_round_trip() {
         let root = tempfile::tempdir().unwrap();
         let source_bytes = b"abcdefghij";
@@ -9136,6 +9277,9 @@ mod producer_tests {
             })
             .expect("completed transaction journal");
         let journal = fs::read_to_string(journal_path).unwrap();
+        assert!(journal.lines().all(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["version"] == 1
+        }));
         let phases = journal
             .lines()
             .map(|line| {
@@ -11329,6 +11473,69 @@ mod producer_tests {
     }
 
     #[test]
+    fn legacy_layouts_reject_nonidentical_replacement_without_mutating_bundle() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            replacement_bytes,
+            segment_size,
+            first_member,
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let created = Engine::new().execute_split(plan, &OperationSession::new());
+            assert_eq!(created.outcome(), Some(OperationOutcome::SplitCreated));
+
+            let manifest_path = bundle.join(format!("{source_name}.nscb-split.json"));
+            let manifest_before = fs::read(&manifest_path).unwrap();
+            let manifest_digest = crate::Sha256Digest::digest(&manifest_before);
+            assert_eq!(
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes),
+                manifest_digest
+            );
+            assert!(trust.lookup(&manifest_digest).unwrap().is_some());
+
+            fs::write(&source, &replacement_bytes).unwrap();
+            let error = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle)
+                    .with_layout(layout)
+                    .with_conflict_policy(crate::ConflictPolicy::Replace),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code(),
+                OperationFailureCode::SplitReplacementUnsupported,
+                "{layout:?}"
+            );
+            assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+            assert_eq!(
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes),
+                manifest_digest
+            );
+            assert!(trust.lookup(&manifest_digest).unwrap().is_some());
+        }
+    }
+
+    #[test]
     fn replace_rejects_an_occupied_file_destination_as_unsupported() {
         let root = tempfile::tempdir().unwrap();
         let (source, bundle, state_path) = setup(root.path(), b"old source bytes");
@@ -11669,67 +11876,61 @@ mod producer_tests {
         );
     }
 
-    #[test]
-    fn interrupted_legacy_create_recovers_and_publishes_declared_members() {
-        let root = tempfile::tempdir().unwrap();
-        let output_parent = root.path().join("output");
-        fs::create_dir(&output_parent).unwrap();
-        let source = root.path().join("game.nsp");
-        let source_bytes = pfs0_with_one_member("payload.bin", b"legacy recovery payload");
-        fs::write(&source, &source_bytes).unwrap();
-        let bundle = output_parent.join("game.nsp.split");
-        let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
-        seed_cleanup_lease_state(&trust);
+    struct LegacyRecoveryCase {
+        layout: SplitLayout,
+        source_name: &'static str,
+        source_bytes: Vec<u8>,
+        replacement_bytes: Vec<u8>,
+        segment_size: u64,
+        first_member: &'static str,
+    }
 
-        let interrupted = plan_split_for_tests(
-            SplitRequest::new(&source, &bundle).with_layout(SplitLayout::LegacyNs),
-            &trust,
-            16,
-            Some(SplitTestFailpoint::SimulatedInterruptionAfterPublication),
-        )
-        .unwrap();
-        let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
-        assert_eq!(
-            interruption.failure().map(|failure| failure.code()),
-            Some(OperationFailureCode::PublicationUncertain)
-        );
+    fn legacy_recovery_cases() -> [LegacyRecoveryCase; 2] {
+        let original_nsp = pfs0_with_one_member("payload.bin", b"original legacy payload");
+        let replacement_nsp = pfs0_with_one_member("payload.bin", b"replacement payload");
+        let original_xci = crate::test_synthetic_xci::valid().image;
+        let mut replacement_xci_fixture = crate::test_synthetic_xci::valid();
+        let replacement_program = replacement_xci_fixture.secure_entries[1];
+        replacement_xci_fixture.image[replacement_program.data_offset + 0x404] = 5;
+        let replacement_xci = replacement_xci_fixture.image;
+        let xci_segment_size = original_xci.len().div_ceil(4) as u64;
 
-        let retry = plan_split_for_tests(
-            SplitRequest::new(&source, &bundle).with_layout(SplitLayout::LegacyNs),
-            &trust,
-            16,
-            None,
-        )
-        .unwrap();
-        let recovery_result = Engine::new().execute_split(retry, &OperationSession::new());
-        assert_eq!(
-            recovery_result.failure().map(|failure| failure.code()),
-            Some(OperationFailureCode::DestinationChanged)
-        );
-        assert!(!bundle.exists());
+        [
+            LegacyRecoveryCase {
+                layout: SplitLayout::LegacyNs,
+                source_name: "game.nsp",
+                source_bytes: original_nsp,
+                replacement_bytes: replacement_nsp,
+                segment_size: 16,
+                first_member: "game.ns0",
+            },
+            LegacyRecoveryCase {
+                layout: SplitLayout::LegacyXc,
+                source_name: "game.xci",
+                source_bytes: original_xci,
+                replacement_bytes: replacement_xci,
+                segment_size: xci_segment_size,
+                first_member: "game.xc0",
+            },
+        ]
+    }
 
-        let retry = plan_split_for_tests(
-            SplitRequest::new(&source, &bundle).with_layout(SplitLayout::LegacyNs),
-            &trust,
-            16,
-            None,
-        )
-        .unwrap();
-        let result = Engine::new().execute_split(retry, &OperationSession::new());
-
-        assert_eq!(result.outcome(), Some(OperationOutcome::SplitCreated));
-        assert_eq!(
-            result.split_receipt_commit_state(),
-            Some(SplitReceiptCommitState::ConfirmedCommitted)
-        );
-        let split_directory = bundle.join("game.nsp");
-        assert!(split_directory.join("game.ns0").is_file());
+    fn assert_legacy_artifact_bytes(
+        artifact_root: &Path,
+        source_name: &str,
+        first_member: &str,
+        source_bytes: &[u8],
+    ) -> super::Sha256Digest {
+        let split_directory = artifact_root.join(source_name);
+        assert!(split_directory.is_dir());
+        assert!(split_directory.join(first_member).is_file());
         assert!(!split_directory.join("00").exists());
-        let manifest: serde_json::Value =
-            serde_json::from_slice(&fs::read(bundle.join("game.nsp.nscb-split.json")).unwrap())
-                .unwrap();
+
+        let manifest_bytes =
+            fs::read(artifact_root.join(format!("{source_name}.nscb-split.json"))).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
         assert_eq!(manifest["schema_version"], 2);
-        assert_eq!(manifest["segments"][0]["name"], "game.ns0");
+        assert_eq!(manifest["segments"][0]["name"], first_member);
         let reconstructed = manifest["segments"]
             .as_array()
             .unwrap()
@@ -11739,71 +11940,434 @@ mod producer_tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(reconstructed, source_bytes);
+        super::Sha256Digest::digest(&manifest_bytes)
+    }
+
+    #[test]
+    fn interrupted_legacy_create_recovers_and_publishes_declared_members() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            seed_cleanup_lease_state(&trust);
+
+            let interrupted = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::SimulatedInterruptionAfterPublication),
+            )
+            .unwrap();
+            let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
+            assert_eq!(
+                interruption.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let recovery_result = Engine::new().execute_split(retry, &OperationSession::new());
+            assert_eq!(
+                recovery_result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::DestinationChanged)
+            );
+            assert!(!bundle.exists());
+
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let result = Engine::new().execute_split(retry, &OperationSession::new());
+
+            assert_eq!(result.outcome(), Some(OperationOutcome::SplitCreated));
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::ConfirmedCommitted)
+            );
+            let split_directory = bundle.join(source_name);
+            assert!(split_directory.join(first_member).is_file());
+            assert!(!split_directory.join("00").exists());
+            let manifest_bytes =
+                fs::read(bundle.join(format!("{source_name}.nscb-split.json"))).unwrap();
+            let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+            assert_eq!(manifest["schema_version"], 2);
+            assert_eq!(manifest["segments"][0]["name"], first_member);
+            let reconstructed = manifest["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|segment| {
+                    fs::read(split_directory.join(segment["name"].as_str().unwrap())).unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reconstructed, source_bytes);
+        }
     }
 
     #[test]
     fn committed_legacy_journal_recovers_with_manifest_member_names() {
-        let root = tempfile::tempdir().unwrap();
-        let output_parent = root.path().join("output");
-        fs::create_dir(&output_parent).unwrap();
-        let source = root.path().join("game.nsp");
-        let original_source = pfs0_with_one_member("payload.bin", b"original legacy payload");
-        fs::write(&source, &original_source).unwrap();
-        let bundle = output_parent.join("game.nsp.split");
-        let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes: original_source,
+            replacement_bytes: replacement_source,
+            segment_size,
+            first_member,
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &original_source).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
 
-        let interrupted = plan_split_for_tests(
-            SplitRequest::new(&source, &bundle).with_layout(SplitLayout::LegacyNs),
-            &trust,
-            16,
-            Some(SplitTestFailpoint::SimulatedInterruptionAfterReceiptCommitted),
-        )
-        .unwrap();
-        let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
-        assert_eq!(
-            interruption.failure().map(|failure| failure.code()),
-            Some(OperationFailureCode::PublicationUncertain)
-        );
-        assert_eq!(
-            interruption.split_receipt_commit_state(),
-            Some(SplitReceiptCommitState::ConfirmedCommitted)
-        );
-
-        let replacement_source = pfs0_with_one_member("payload.bin", b"replacement payload");
-        fs::write(&source, replacement_source).unwrap();
-        let retry = plan_split_for_tests(
-            SplitRequest::new(&source, &bundle).with_layout(SplitLayout::LegacyNs),
-            &trust,
-            16,
-            None,
-        )
-        .unwrap();
-        let result = Engine::new().execute_split(retry, &OperationSession::new());
-        assert_eq!(
-            result.failure().map(|failure| failure.code()),
-            Some(OperationFailureCode::DestinationConflict)
-        );
-
-        let journal_path = fs::read_dir(&output_parent)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .find(|path| path.extension() == Some(OsStr::new("journal")))
+            let interrupted = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::SimulatedInterruptionAfterReceiptCommitted),
+            )
             .unwrap();
-        let journal = fs::read(journal_path).unwrap();
-        let last_record = journal
-            .split(|byte| *byte == b'\n')
-            .rev()
-            .find(|line| !line.is_empty())
+            let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
+            assert_eq!(
+                interruption.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                interruption.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::ConfirmedCommitted)
+            );
+
+            fs::write(&source, replacement_source).unwrap();
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
             .unwrap();
-        let record: serde_json::Value = serde_json::from_slice(last_record).unwrap();
-        assert_eq!(record["version"], 2);
-        assert_eq!(record["layout"], "legacy_ns");
-        assert_eq!(record["phase"], "completed");
-        assert_eq!(record["segment_names"][0], "game.ns0");
-        assert_eq!(
-            fs::read(bundle.join("game.nsp").join("game.ns0")).unwrap(),
-            &original_source[..16]
-        );
+            let result = Engine::new().execute_split(retry, &OperationSession::new());
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::DestinationConflict)
+            );
+
+            let journal_path = fs::read_dir(&output_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension() == Some(OsStr::new("journal")))
+                .unwrap();
+            let journal = fs::read(journal_path).unwrap();
+            let last_record = journal
+                .split(|byte| *byte == b'\n')
+                .rev()
+                .find(|line| !line.is_empty())
+                .unwrap();
+            let record: serde_json::Value = serde_json::from_slice(last_record).unwrap();
+            assert_eq!(record["version"], 2);
+            assert_eq!(
+                record["layout"],
+                match layout {
+                    SplitLayout::LegacyXc => "legacy_xc",
+                    SplitLayout::LegacyNs => "legacy_ns",
+                    SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+                }
+            );
+            assert_eq!(record["phase"], "completed");
+            assert_eq!(record["segment_names"][0], first_member);
+            assert_eq!(
+                fs::read(bundle.join(source_name).join(first_member)).unwrap(),
+                &original_source[..segment_size as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_cancellation_before_publication_retains_unpublished_artifacts_without_receipt() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::CancelDuringStagedVerification),
+            )
+            .unwrap();
+
+            let result = Engine::new().execute_split(plan, &OperationSession::new());
+
+            assert_eq!(result.state(), crate::JobState::Cancelled);
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::Cancelled)
+            );
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(result.cleanup_artifact_retained());
+            assert!(!bundle.exists());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            let recovery = result
+                .split_output_paths()
+                .unwrap()
+                .recovery_bundle_directory()
+                .unwrap();
+            assert!(recovery.is_dir());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(recovery, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_promotion_failure_retains_staged_members_without_receipt() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::FailureAtPromotion),
+            )
+            .unwrap();
+
+            let result = Engine::new().execute_split(plan, &OperationSession::new());
+
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationFailed)
+            );
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(result.cleanup_artifact_retained());
+            assert!(!bundle.exists());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            let recovery = result
+                .split_output_paths()
+                .unwrap()
+                .recovery_bundle_directory()
+                .unwrap();
+            assert!(recovery.is_dir());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(recovery, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_receipt_commit_uncertainty_retains_published_members_for_both_layouts() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let inner = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            inner
+                .issue(SplitTrustReceipt::new(
+                    super::Sha256Digest::digest(b"unrelated manifest"),
+                    1,
+                    super::Sha256Digest::digest(b"unrelated source"),
+                ))
+                .unwrap();
+            let trust = NoCleanupLeaseWriter { inner };
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::FailureBeforeReceiptCommit),
+            )
+            .unwrap();
+
+            let result = Engine::new().execute_split(plan, &OperationSession::new());
+
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(result.cleanup_artifact_retained());
+            assert!(bundle.is_dir());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            let recovery = result
+                .split_output_paths()
+                .unwrap()
+                .recovery_bundle_directory()
+                .unwrap();
+            assert_eq!(recovery, bundle.canonicalize().unwrap());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(recovery, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_recovery_rejects_journal_layout_member_mismatch_without_mutation() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            let interrupted = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::SimulatedInterruptionAfterPublication),
+            )
+            .unwrap();
+            let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
+            assert_eq!(
+                interruption.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                interruption.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::NotAttempted)
+            );
+            assert!(bundle.is_dir());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+
+            let journal_path = fs::read_dir(&output_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "journal")
+                })
+                .expect("incomplete transaction journal");
+            let journal_before = fs::read(&journal_path).unwrap();
+            let mismatched_layout = match layout {
+                SplitLayout::LegacyXc => "legacy_ns",
+                SplitLayout::LegacyNs => "legacy_xc",
+                SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+            };
+            let mut mismatched_journal = Vec::new();
+            for line in journal_before
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                let mut record: serde_json::Value = serde_json::from_slice(line).unwrap();
+                record["layout"] = serde_json::Value::String(mismatched_layout.to_owned());
+                serde_json::to_writer(&mut mismatched_journal, &record).unwrap();
+                mismatched_journal.push(b'\n');
+            }
+            fs::write(&journal_path, &mismatched_journal).unwrap();
+            let mismatch_bytes = fs::read(&journal_path).unwrap();
+            assert_ne!(mismatch_bytes, journal_before);
+            let last_record = mismatch_bytes
+                .split(|byte| *byte == b'\n')
+                .rev()
+                .find(|line| !line.is_empty())
+                .unwrap();
+            let mismatched_record: serde_json::Value = serde_json::from_slice(last_record).unwrap();
+            assert_eq!(mismatched_record["layout"], mismatched_layout);
+            assert_eq!(mismatched_record["segment_names"][0], first_member);
+
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let recovery = Engine::new().execute_split(retry, &OperationSession::new());
+
+            assert_eq!(
+                recovery.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                recovery.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(recovery.cleanup_artifact_retained());
+            assert!(bundle.is_dir());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            assert_eq!(fs::read(&journal_path).unwrap(), mismatch_bytes);
+            assert_eq!(
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes),
+                manifest_digest
+            );
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
     }
 
     #[test]

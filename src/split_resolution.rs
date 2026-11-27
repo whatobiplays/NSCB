@@ -194,6 +194,23 @@ fn verify_manifest_candidate(
         source: _,
     } = candidate;
     let layout = manifest.layout;
+    // Version 2 legacy member stems must match the inner directory basename's file stem.
+    // Check this relationship before opening any members.
+    if manifest.schema_version == 2 && !layout.is_canonical() {
+        let directory_stem = directory
+            .file_name()
+            .and_then(|basename| Path::new(basename).file_stem())
+            .ok_or_else(|| error(InputResolutionErrorCode::SplitManifestInvalid))?;
+        let member_stem = manifest
+            .segments
+            .first()
+            .and_then(|segment| Path::new(&segment.name).file_stem())
+            .ok_or_else(|| error(InputResolutionErrorCode::SplitManifestInvalid))?;
+        if directory_stem != member_stem {
+            return Err(error(InputResolutionErrorCode::SplitManifestInvalid));
+        }
+    }
+
     let expected_names = manifest
         .segments
         .iter()

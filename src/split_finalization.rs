@@ -607,48 +607,60 @@ mod tests {
 
     #[test]
     fn legacy_verified_split_is_rejected_before_backend_calls() {
-        let directory = TestDirectory::new();
-        let split_directory = directory.0.join("game.nsp");
-        fs::create_dir(&split_directory).unwrap();
-        let payload = b"legacy split payload";
-        fs::write(split_directory.join("game.xc0"), payload).unwrap();
-        let digest = crate::Sha256Digest::digest(payload).to_hex();
-        let manifest = serde_json::json!({
-            "schema_version": 2,
-            "kind": "nscb.split_manifest",
-            "required_features": [],
-            "layout": "legacy_xc",
-            "source": {
-                "size_bytes": payload.len(),
-                "sha256": digest.clone(),
-            },
-            "segments": [{
-                "name": "game.xc0",
-                "size_bytes": payload.len(),
-                "sha256": digest,
-            }],
-        });
-        let sidecar = crate::split_resolution::sidecar_path(&split_directory).unwrap();
-        fs::write(sidecar, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
-        let verified = crate::split_resolution::verify_split_directory(
-            &split_directory,
-            crate::split_resolution::SplitInventoryPolicy::RequireExactMembers,
-        )
-        .unwrap();
-        let binding = SelectedDirectoryBinding::open(&split_directory).unwrap();
-        let mut backend = FakeBackend {
-            supported: true,
-            ..FakeBackend::default()
-        };
+        for (directory_name, layout, member_name) in [
+            ("game.xci", "legacy_xc", "game.xc0"),
+            ("game.nsp", "legacy_ns", "game.ns0"),
+        ] {
+            let directory = TestDirectory::new();
+            let split_directory = directory.0.join(directory_name);
+            fs::create_dir(&split_directory).unwrap();
+            let payload = b"legacy split payload";
+            fs::write(split_directory.join(member_name), payload).unwrap();
+            let digest = crate::Sha256Digest::digest(payload).to_hex();
+            let manifest = serde_json::json!({
+                "schema_version": 2,
+                "kind": "nscb.split_manifest",
+                "required_features": [],
+                "layout": layout,
+                "source": {
+                    "size_bytes": payload.len(),
+                    "sha256": digest.clone(),
+                },
+                "segments": [{
+                    "name": member_name,
+                    "size_bytes": payload.len(),
+                    "sha256": digest,
+                }],
+            });
+            let sidecar = crate::split_resolution::sidecar_path(&split_directory).unwrap();
+            let sidecar_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+            fs::write(&sidecar, &sidecar_bytes).unwrap();
+            let verified = crate::split_resolution::verify_split_directory(
+                &split_directory,
+                crate::split_resolution::SplitInventoryPolicy::RequireExactMembers,
+            )
+            .unwrap();
+            let binding = SelectedDirectoryBinding::open(&split_directory).unwrap();
+            let mut backend = FakeBackend {
+                supported: true,
+                ..FakeBackend::default()
+            };
 
-        let result = finalize_with_backend(&verified, &binding, &mut backend);
+            let result = finalize_with_backend(&verified, &binding, &mut backend);
 
-        assert!(matches!(
-            result,
-            Err(error) if error.code() == SplitFinalizationErrorCode::InvalidSplitSet
-        ));
-        assert_eq!(backend.is_fat32_calls, 0);
-        assert_eq!(backend.set_calls, 0);
+            assert!(matches!(
+                result,
+                Err(error) if error.code() == SplitFinalizationErrorCode::InvalidSplitSet
+            ));
+            assert_eq!(backend.is_fat32_calls, 0, "{layout}");
+            assert_eq!(backend.set_calls, 0, "{layout}");
+            assert_eq!(
+                fs::read(split_directory.join(member_name)).unwrap(),
+                payload,
+                "{layout}"
+            );
+            assert_eq!(fs::read(sidecar).unwrap(), sidecar_bytes, "{layout}");
+        }
     }
 
     #[test]

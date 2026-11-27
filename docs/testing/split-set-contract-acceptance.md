@@ -147,14 +147,114 @@ Qualify the inventory through the public `OperationResult` accessors. Cover succ
 - FAT32 transfer, targeted archive-attribute finalization, and independent Horizon consumption remain separate obligations. The [canonical FAT32 qualification protocol](canonical-fat32-split-qualification.md) contains the PAC/TAC mapping and physical test procedure. Physical FAT32 and Horizon evidence remains `NOT RUN` until separately authorized and successfully completed.
 - At the time this contract was written, legacy `.xcN` and `.nsN` compatibility remained separate from canonical qualification. Issue #14 Slice C covers that compatibility work.
 
-### Issue #14 Slice C execution record (2026-11-26)
+### Issue #14 Slice C PAC/TAC matrix
+
+The PAC identifiers come from the approved Slice C plan. The canonical FAT32 protocol has a separate matrix with overlapping numbers; the `TAC-C` prefix identifies Slice C technical checks.
+
+| PAC | Product acceptance criterion | Technical evidence | Current disposition |
+| --- | --- | --- | --- |
+| PAC-1 | Both legacy layouts are explicitly selectable; canonical remains the default. | TAC-C1 | PASS in host tests. |
+| PAC-2 | Legacy member names, order, and size bounds are deterministic. | TAC-C2 | PASS in host tests. |
+| PAC-3 | Qualified legacy sets reconstruct the original bytes exactly. | TAC-C4, TAC-C5 | PASS in host tests for both layouts. |
+| PAC-4 | Partial, corrupted, ambiguous, and untrusted sets fail closed. | TAC-C3, TAC-C6 | PASS in synthetic host tests. |
+| PAC-5 | Publication, cancellation, replacement, and interruption preserve the approved safety guarantees. | TAC-C7, TAC-C8 | PASS for the tested host boundaries; see TAC-C8 for replacement limits. |
+| PAC-6 | The pinned legacy consumer emits reconstructed bytes that match the synthetic source digest. | TAC-C10 | **UNPROVEN; hard closeout blocker.** |
+| PAC-7 | Existing canonical behavior remains unchanged. | TAC-C1, TAC-C9 | PASS in host tests. |
+
+| TAC | Measurable check and evidence | Candidate result |
+| --- | --- | --- |
+| TAC-C1 — Selection and defaults | `src/cli.rs::split_cli_tests` checks the canonical default, both `--layout` values, and duplicate or invalid options. `tests/split_operation.rs::split_layout_is_canonical_by_default_and_selectable` and `legacy_ns_split_publishes_expected_names_and_v2_manifest` check the public API and emitted layout. | PASS; the CLI suite has 4 passing tests, and `make all` passes. |
+| TAC-C2 — V2 naming and bounds | `split_operation::producer_tests::legacy_plan_uses_recognized_bytes_and_source_basename_rules`, `split_manifest::tests::deterministic_legacy_writer_emits_v2_names_and_layout`, `legacy_writer_enforces_its_ten_segment_limit`, `accepts_version_two_legacy_xc_with_unpadded_names_through_index_99`, and `split_operation::tests::legacy_layouts_allow_ten_segments_and_reject_eleven` cover basename-derived names, numeric ordering, the 10-member writer cap, and the 100-member parser bound. | PASS; the 100-member resolver case also selects member index 99 for both layouts. |
+| TAC-C3 — Operation-specific eligibility | `legacy_plan_accepts_xci_with_unsupported_nested_nca_profile_without_ncz` and `legacy_plan_rejects_wrong_family_compression_and_unknown_sources` cover XCI/PFS0 eligibility. The rejection test checks valid NCZ evidence and malformed NCZ headers in the first and second XCI secure members and in PFS0. The earlier strict-inspector fixture failed because its HFS0 hash was stale; it did not show that NCZ evidence escaped recognition. No global recognition change or strict conversion-profile gate was added. | PASS; the focused eligibility regression and `make all` pass. |
+| TAC-C4 — V2 stem and relocation rules | `tests/input_resolution.rs::mismatched_v2_legacy_stem_is_rejected_before_members_are_consumed` rejects a stem mismatch for both layouts before opening members. `trusted_legacy_resolver_accepts_one_hundred_members_after_outer_bundle_relocation` resolves the directory and member index 99 after moving each intact outer bundle. The canonical-v1 directory and sidecar rename test remains separate. | PASS. |
+| TAC-C5 — Exact byte-stream reads | `split_operation::producer_tests::legacy_layouts_round_trip_exact_bytes_through_segmented_and_virtual_readers` reads one-part and multipart XCI/PFS0 sources back byte-for-byte and seeks across a multipart boundary for both layouts. Resolver tests also select both the member and directory. | PASS. |
+| TAC-C6 — Resolver fail-closed evidence | `legacy_v2_incomplete_corrupt_and_competing_members_fail_closed_for_both_layouts` checks missing and modified members and an unlisted `.xcN` or `.nsN` competitor. `absent_and_revoked_legacy_v2_receipts_fail_closed_for_both_layouts` checks absent and revoked trust. `unmanifested_legacy_member_fails_closed` and the stem-mismatch test cover unsupported and inconsistent representations; inherited tests cover identity, alias, traversal, mutation, and digest failures. | PASS in host tests. |
+| TAC-C7 — Layout-specific publication and recovery | `interrupted_legacy_create_recovers_and_publishes_declared_members` and `committed_legacy_journal_recovers_with_manifest_member_names` exercise interrupted and committed recovery for LegacyXc and LegacyNs. | PASS. |
+| TAC-C8 — Layout-specific failure injection, replacement, and finalization | `legacy_cancellation_before_publication_retains_unpublished_artifacts_without_receipt`, `legacy_promotion_failure_retains_staged_members_without_receipt`, `legacy_receipt_commit_uncertainty_retains_published_members_for_both_layouts`, and `legacy_recovery_rejects_journal_layout_member_mismatch_without_mutation` inject failures for both layouts. `legacy_layouts_reject_nonidentical_replacement_without_mutating_bundle` verifies that replacement is refused without changing either legacy bundle or its receipt. `legacy_verified_split_is_rejected_before_backend_calls` covers finalization rejection for both layouts. | PASS for the approved boundary; nonidentical replacement remains unsupported. |
+| TAC-C9 — Canonical compatibility | Canonical-v1 manifest golden tests, the canonical default, `real_multipart_writer_resolver_and_virtual_reader_round_trip`'s journal-v1 assertion, and `trusted_canonical_v1_split_remains_valid_after_directory_rename` cover the existing format and rename behavior. `journal_segment_names_follow_layout_specific_rules` accepts metadata-free v1 canonical journals and rejects v2 records that declare canonical layout. | PASS; new canonical transactions still emit journal v1. |
+| TAC-C10 — Pinned consumer | Qualify the pinned NSC_BUILDER v0.99 `--joinfile` path in Windows Sandbox with synthetic `.xcN` and `.nsN` fixtures. A pass requires consumer-emitted output bytes whose length and SHA-256 match the source. Source inspection and harness reconstruction are partial evidence. | **UNPROVEN.** No Windows command or consumer output was produced. See the PAC-6 Sandbox record. |
+| TAC-C11 — Candidate validation and review | Repository validation, changed-production-line coverage, local Cubic, independent full-diff and correction-delta reviews, and PR CI must all identify the same candidate. | Host validation is recorded below. Final review and PR-head CI remain required; PAC-6 stays separate. |
+
+### Journal-version compatibility ruling
+
+There is no demonstrated compatibility requirement for accepting canonical version-2 journals. The canonical producer introduced in `4f305f084d7c95b797c633a6af0ccf6943a6208c` writes version 1. The legacy-layout change in `bccf264ef0d2b621e409d634929e7d09b059218a` keeps canonical journals at version 1 and uses version 2 for explicit legacy layout and member names. PR #93 head `c43cae9cd6adeac9a48fae36b34d5c4b203a9683` widened the reader's version-2 gate but added no canonical version-2 writer; the PR remains an unmerged draft. Repository history contains no published canonical version-2 writer or tag.
+
+The journal contract remains version 1 for canonical records with implicit layout and version 2 for legacy records with explicit layout and exact member names. `JournalRecord::new` still emits version 1 for canonical transactions and version 2 for legacy transactions. Recovery rejects version 2 when it declares the canonical layout. A canonical-v2 writer or released consumer would provide new evidence for reconsidering this rule; none has been identified.
+
+### Issue #14 Slice C execution record (2026-11-27)
 
 Implementation uses clean baseline `836b1388a1abc811f3b1589004c6733ea7e0f086` in worktree `/Users/daniel/.codex/worktrees/issue-14-legacy-split-layouts/NSCB`, branch `codex/issue-14-legacy-split-layouts`.
 
-Host regression coverage exercises both legacy writer layouts, schema-v2 member selection through the resolver, fail-closed behavior without a manifest, and recovery from interrupted publication and receipt commit. It also confirms that an unsupported nested NCA profile does not block LegacyXc when the complete XCI scan finds no NCZ member, while an XCI containing a valid NCZ member is rejected. The strict conversion inspector rejected the diagnostic fixture because changing its Program NCA byte left the enclosing HFS0 digest stale; this does not establish an NCZ detection failure. The focused `split_operation` suite and legacy-filtered `split_resolution` tests passed. The full resolver suite passed before the final direct-member regression was added. A combined run of both suites failed `sidecar_replacement_during_hashing_fails_closed`; an isolated rerun passed after 276 seconds. The cause of the combined-run failure is not established. These host tests do not qualify the external consumer or clear PAC-6.
+The full local `make all` run on 2026-11-27 passed with 37 test-result groups: 2,205 passed, 0 failed, and 8 ignored. `cargo fmt --all -- --check` and `git diff --check` also passed. The content-policy check passed after this record was added.
+
+LLVM 23.1.6 line coverage came from isolated executions of `journal_segment_names_follow_layout_specific_rules`, `mismatched_v2_legacy_stem_is_rejected_before_members_are_consumed`, `trusted_legacy_resolver_accepts_one_hundred_members_after_outer_bundle_relocation`, and `trusted_canonical_v1_split_remains_valid_after_directory_rename`. Of 17 executable lines added to production code, 15 were covered (88.2%). The two uncovered lines are `ok_or_else` fallbacks for a missing directory basename and an empty segment list. The production candidate reader canonicalizes the directory, and the manifest parser rejects empty segment lists before this function runs, so supported callers cannot reach those fallback paths. The v2 match and mismatch, canonical-v1 rename, and journal-v1/v2 decisions were exercised. This host coverage does not establish Windows consumer compatibility or PAC-6.
 
 The task follows development-process release `2026.11.25`, revision `8e391636cb50f9bfe6e8def2d0f54eeb65d1d157`. The owner-dispatched qualification is [run 45612390118](https://github.com/danielbyon/development-process/actions/runs/45612390118), attempt 1, owner ID `327737`. The approved release context and bundle are artifacts `15020776261` and `15021765219`. The owner verified the release manifest, frozen context, and three provenance sidecars; their artifact and payload digests match the immutable release assets. This task needs no new pin or repeat qualification. NSC_BUILDER v0.99 is pinned separately at `92690c0137f520b6ee4d6c20b6f5abe8a3ce5738`.
 
 GPT Repo MCP does not currently enroll this worktree. Its read-only root listing showed the primary checkout at `/Users/daniel/Projects/NSCB`, and the current-work-session lookup found no session. Codex client connection settings and MCP server lifecycle remain unchanged. Work proceeds manually under owner approval. CodeGraph and TokenSave are initialized for this branch, and Serena is active in the worktree.
 
-PAC-6 remains a hard closeout gate. At pinned NSC_BUILDER v0.99 commit `92690c0137f520b6ee4d6c20b6f5abe8a3ce5738`, `py/ztools/squirrel.py --joinfile` is the consumer's byte-emitting path, and `JOINER.bat` invokes it. An isolated attempt used Python 3.10.22 on macOS 27.2 with a 9,499-byte synthetic source split into `synthetic.xc0` and `synthetic.xc1` at byte 1,731. The source SHA-256 was `b52469a9581c4d15f20420a015a763396a215f86b350a64296f933e8550fe36e`. The command exited 1 with `ModuleNotFoundError: No module named 'Crypto'`; it wrote no output, so there is no consumer digest to compare. No dependency was installed. The README specifies Windows, and the joiner also assumes Windows drive-path behavior. This attempt does not pass PAC-6. A pass requires bytes emitted by the actual v0.99 consumer with a digest matching the original source. Harness concatenation and reimplemented readers do not count. PAC-6 remains unproven and needs separate owner disposition before closeout.
+PAC-6 requires output bytes produced by the pinned NSC_BUILDER v0.99 consumer and a matching source length and SHA-256. At commit `92690c0137f520b6ee4d6c20b6f5abe8a3ce5738`, `py/ztools/squirrel.py --joinfile` contains the join path, and `py/ztools/JOINER.bat` invokes it before a later rename step. Source inspection shows that the script derives `.xci` from `.xc0` and `.nsp` from `.ns0`, finds sibling parts in the same directory, sorts them, and copies their bytes in buffered reads. This is a compatibility hypothesis until the pinned consumer emits and verifies output.
+
+An earlier isolated attempt used Python 3.10.22 on macOS 27.2 with a 9,499-byte synthetic source split into `synthetic.xc0` and `synthetic.xc1` at byte 1,731. The source SHA-256 was `b52469a9581c4d15f20420a015a763396a215f86b350a64296f933e8550fe36e`. It exited with `ModuleNotFoundError: No module named 'Crypto'`; the literal command was not retained, and no output was written. No dependency was installed. The upstream README specifies Windows, and the joiner assumes Windows drive-path behavior. This attempt does not satisfy PAC-6.
+
+### PAC-6 Windows Sandbox follow-up (2026-11-27)
+
+**Status: UNPROVEN.** The owner designated OBIGAMING as the Windows 11 qualification host. Codex lists an `NSCB OBIGAMING` remote project, confirming that a host connection exists, but this task has no remote shell. The local CUA surface is macOS (`noWindowsAvailable`), and this Mac's SSH lookup could not resolve OBIGAMING. No command ran on the host. Its Windows edition and build, virtualization state, Sandbox feature, available disk space, and usable command channel remain unverified. No Windows feature or machine setting was changed, and no reboot was requested.
+
+Microsoft lists Windows Pro, Enterprise, Pro Education/SE, and Education as supported editions; Windows Home is unsupported. The installation guide requires enabled hardware virtualization, at least 4 GB RAM, two CPU cores, and 1 GB of free disk space, and recommends 8 GB RAM. The proposed production-size test needs about 16 GB free to retain its input and output for the `0xFFFF0000`-byte segment profile and working space. Enabling the optional feature requires an administrator and can require a restart. See Microsoft's [Windows Sandbox overview and edition table](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/) and [installation guide](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-install).
+
+The pinned source tree has no dependency lockfile or requirements file. A static import scan of 60 Python modules reachable from `squirrel.py` found candidate external imports including `Crypto`, `PIL`, `bs4`, `chardet`, `colorama`, `googletrans`, `pykakasi`, `requests`, `tqdm`, `ujson`, `urllib3`, `win32api`, `win32con`, and `zstandard`. The scan includes code paths not proven to run during `--joinfile`, so it is not a resolved dependency list. The pinned `File_chunk2.py` directly imports `Crypto.Cipher.AES`, `PIL.Image`, and `tqdm`; the earlier attempt confirms that its bare Python 3.10.22 environment lacked `Crypto`. Package versions and wheel hashes remain unresolved. No offline wheelhouse was prepared or installed.
+
+Proposed host folders are `C:\NSCB-PAC6\input` and `C:\NSCB-PAC6\output`. The read-only input folder would hold a pinned source export without `.git`, a Python 3.10.22 installer, a version- and hash-verified offline wheelhouse, and deterministic synthetic-fixture scripts. The writable output folder would hold only consumer output and result logs. Neither folder should contain repository credentials, personal files, Nintendo key material, or production data.
+
+Proposed `.wsb` configuration:
+
+```xml
+<Configuration>
+  <vGPU>Disable</vGPU>
+  <Networking>Disable</Networking>
+  <AudioInput>Disable</AudioInput>
+  <VideoInput>Disable</VideoInput>
+  <PrinterRedirection>Disable</PrinterRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\NSCB-PAC6\input</HostFolder>
+      <SandboxFolder>C:\PAC6\input</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+    <MappedFolder>
+      <HostFolder>C:\NSCB-PAC6\output</HostFolder>
+      <SandboxFolder>C:\PAC6\output</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+</Configuration>
+```
+
+Only the pinned input and a dedicated output folder are mapped. Networking and clipboard redirection are disabled. Writes to the output mapping persist on the host after the Sandbox closes, so keep that directory dedicated to this qualification. The settings follow Microsoft's [Sandbox configuration guide](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file). No `.wsb` file was launched.
+
+Proposed procedure:
+
+1. Run this read-only PowerShell preflight on OBIGAMING and save its output:
+   ```powershell
+   Get-ComputerInfo | Select-Object CsName, WindowsProductName, WindowsVersion, OsBuildNumber, CsTotalPhysicalMemory
+   Get-CimInstance Win32_Processor | Select-Object Name, NumberOfCores, VirtualizationFirmwareEnabled
+   Get-CimInstance Win32_ComputerSystem | Select-Object Model, HypervisorPresent
+   Get-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM | Select-Object FeatureName, State
+   Get-PSDrive -Name C | Select-Object Used, Free
+   Get-Command WindowsSandbox.exe, wsb -ErrorAction SilentlyContinue | Select-Object Name, Source
+   Get-AppxPackage -Name WindowsSandbox | Select-Object Name, Version
+   ```
+   The Windows 11 24H2 Sandbox CLI can start and connect to a Sandbox. Its `exec` command requires an active user session and does not return process output, so scripts must write logs and digest results to the mapped output folder. See Microsoft's [Sandbox CLI reference](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-cli).
+
+2. If Windows Sandbox is already enabled, launch the proposed `.wsb` file through a usable remote desktop session. Inside the Sandbox, install Python and the verified wheelhouse without network access. Copy the pinned source tree to Sandbox-local writable storage before running it because `squirrel.py` creates a database directory at startup.
+
+3. Run the fixture generator inside the Sandbox to create synthetic `.xc0`–`.xc9` and `.ns0`–`.ns9` sets under `C:\PAC6\work\fixtures`. Record each source length and SHA-256. Invoke the pinned script from the Sandbox-local source copy, writing output to the mapped results folder and bypassing `JOINER.bat`'s later rename step:
+   ```powershell
+   C:\PAC6\python\python.exe C:\PAC6\work\NSC_BUILDER_v0.99\py\ztools\squirrel.py --joinfile C:\PAC6\work\fixtures\small-xc\synthetic.xc0 --ofolder C:\PAC6\output\small-xc --buffer 65536
+   C:\PAC6\python\python.exe C:\PAC6\work\NSC_BUILDER_v0.99\py\ztools\squirrel.py --joinfile C:\PAC6\work\fixtures\small-ns\synthetic.ns0 --ofolder C:\PAC6\output\small-ns --buffer 65536
+   ```
+   The expected outputs are `synthetic.xci` and `synthetic.nsp`. A standard-library verifier should record output length and SHA-256 beside each source result. Repeat with production-size parts, including a nonempty terminal member, only after confirming sufficient host space. Preserve the consumer-emitted bytes and comparison logs in the mapped output folder. NSCB's resolver support through index 99 does not establish consumer support for those indexes.
+
+The Codex project registry lists the OBIGAMING remote NSCB project, but this task cannot invoke commands in that session. The host preflight and PAC-6 run therefore remain pending. The owner can attach a command-capable remote shell to this task or run the read-only preflight and return its output. If Sandbox is not enabled, enabling it, changing virtualization settings, using administrator privileges, or rebooting requires separate owner authorization. PAC-6 remains UNPROVEN until the pinned consumer's output length and SHA-256 match the synthetic source.

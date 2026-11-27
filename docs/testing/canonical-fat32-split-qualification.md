@@ -15,6 +15,8 @@ The evidence boundary remains the accidental-loss and corruption model in [ADR 0
 
 ## PAC and TAC mapping
 
+The PAC/TAC identifiers in this document belong to the canonical FAT32 qualification protocol. Slice C has a separate legacy-layout PAC matrix in [the Split acceptance record](split-set-contract-acceptance.md). In particular, this document's PAC-6 records platform-support boundaries; Slice C PAC-6 is the pinned NSC_BUILDER consumer round trip and remains unproven.
+
 | PAC | Requirement | TACs | Acceptance evidence |
 | --- | --- | --- | --- |
 | PAC-1 | Produce a complete, deterministic, FAT32-compatible canonical Split set. | TAC-2, TAC-4 | Production-profile regressions and recorded source, segment, and reconstructed-stream measurements. |
@@ -60,7 +62,7 @@ The evidence boundary remains the accidental-loss and corruption model in [ADR 0
 | TAC-8 | PARTIAL | The Windows harness checks unrelated sentinel attributes and contents. Its Windows run and the physical preservation checks have not occurred. |
 | TAC-9 | PASS for host behavior | Finalization keeps source-backed completeness and consumer interoperability unestablished and does not issue a trust receipt. The producer's local receipt remains in the APFS fixture. |
 | TAC-10 | PASS | The platform matrix distinguishes built, externally finalized, and unqualified paths. Container package versions and the NRO hash are recorded above. |
-| TAC-11 | PASS | This slice covers canonical numbered directories. Legacy `.xcN` and `.nsN` layouts remain reserved for Slice C. |
+| TAC-11 | PASS for the canonical finalization boundary | Canonical FAT32 finalization remains limited to canonical numbered directories. Slice C adds separate host support for schema-v2 `.xcN` and `.nsN` sets; that does not qualify archive finalization or the pinned external consumer. |
 | TAC-12 | PASS for host behavior | Selected-directory identity and observed-displacement regressions pass in repository validation. |
 | TAC-13 | NOT RUN | Goldleaf finalization and the separate read-only Windows attribute inspection remain pending. |
 

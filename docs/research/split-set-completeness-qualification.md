@@ -2,7 +2,7 @@
 
 ## Status and scope
 
-This is a research result for NSCB Issue #6 at baseline `4b5b77a7cd240227b8cc22f1f48764e155b1973a`. It does not change production behavior or the existing authority contracts. Accepted ADR 0028 now governs future evidence-backed qualification, but it does not activate positive Split resolution; the current resolver continues returning `unsupported_split_layout` for suspected Split inputs.
+This research records the Issue #6 investigation at baseline `4b5b77a7cd240227b8cc22f1f48764e155b1973a`. It does not change production behavior or the authority contracts. At that baseline, the resolver returned `unsupported_split_layout` for suspected Split inputs. Issue #6 later added canonical source-backed resolution, and Issue #14 Slice C added schema-v2 legacy resolution. The historical conclusions below still describe limits of names, hashes, and filesystem markers; they do not describe current resolver coverage or establish external-consumer compatibility.
 
 The central result is that numbering, visible member count, file sizes, a valid container prefix, and a canonical archive marker can establish useful structural facts, but none of the reviewed layouts independently tells a host that it has seen the actual last part. Synthetic complete/incomplete pairs with byte-for-byte identical visible members are direct counterexamples to any rule based only on those observations. The paired results and the wider adversarial matrix are in [the evidence matrix](split-set-completeness-evidence-matrix.md).
 
@@ -23,7 +23,7 @@ Fixture labels are never counted as terminal evidence. If two cases expose ident
 
 ## Existing NSCB boundary
 
-The current input resolver returns ordered physical segments and selection provenance, but does not read content bytes or recognize a content family. Its supported v1 input is one physical segment. Suspected numeric and legacy suffix layouts remain fail-closed under the accepted Issue #6 implementation.
+At the recorded baseline, the input resolver returned ordered physical segments and selection provenance, but did not read content bytes or recognize a content family. Its supported v1 input was one physical segment. Suspected numeric and legacy suffix layouts failed closed under the accepted Issue #6 implementation at that time.
 
 The recognizer and PFS0 probe accept internal `Read + Seek` readers, so an ordered virtual reader could present multiple already-qualified files as one logical stream without building a large concatenated temporary file. That trait boundary answers only the parser-integration question. It cannot supply a missing part count or prove that the final segment is present.
 
@@ -106,7 +106,7 @@ Do not repurpose `nscb.input_list` v1. It selects paths and is not an integrity 
 
 ### Option C — Continued fail-closed handling
 
-Continue returning `unsupported_split_layout` for suspected Split inputs unless one of the explicitly qualified proof profiles is enabled. This matches the current contract and is the only option supported as an immediate implementation policy by this evidence.
+The original Issue #6 recommendation was to return `unsupported_split_layout` for suspected Split inputs until an explicitly qualified proof profile existed. That recommendation was superseded by the accepted source-backed resolver contract and the Issue #14 Slice C implementation. The evidence warning remains: a short part, recognized container prefix, archive attribute, or sequence with no visible gap does not establish the final member.
 
 ## Streaming-reader feasibility and constraints
 

@@ -4,7 +4,7 @@
 
 The synthetic files contain only short ASCII payloads. The experiment harness assigned fixture ground truth (the hypothetical expected part count) separately from the observed directory entries. The resolver cannot see fixture labels. The positive pairs are decisive: each complete and incomplete scenario has exactly the same observed member names, types, lengths, and SHA-256 values. The harness also modeled an equal concatenation marker in both cases; that marker value was **assumed equal and was not set or tested on the host filesystem**.
 
-Unless a row says “executed,” its result is source-based analysis or a proposed acceptance test, not a runtime test of NSCB. No Split layout was run through the production resolver because it intentionally fails closed.
+Unless a row says “executed,” its result is source-based analysis or a proposed acceptance test, not a runtime test of NSCB. The statement that no Split layout had run through the production resolver describes the evidence available when this Issue #6 matrix was written; it predates the canonical source-backed resolver and Issue #14 Slice C's schema-v2 legacy tests. The rows below remain an evidence record for the original indistinguishability experiments, not a current resolver test report.
 
 ## Paired indistinguishability experiments
 
@@ -18,12 +18,12 @@ The different fixture labels in P1–P3 were harness-only ground truth. None was
 
 ## Adversarial cases and acceptance implications
 
-Expected resolver disposition below means the current approved contract: suspected Split candidates remain typed `unsupported_split_layout` failures. “Not executed” means no production resolver was used and no claim of a new implementation test is made.
+Expected resolver disposition below means the approved contract at the recorded Issue #6 baseline: suspected Split candidates remained typed `unsupported_split_layout` failures. “Not executed” means no production resolver was used in that research experiment; it makes no claim about later implementation tests.
 
 | Case | Fixture ground truth or setup | Independently observed evidence | Structural consistency vs terminal proof | Expected outcome / observed result |
 | --- | --- | --- | --- | --- |
 | Complete single and multi-part candidates | P1 and P2 complete labels | Names, types, lengths, and hashes from P1/P2 | Structure is enumerable; terminal proof absent | Fail closed. Executed only as a filesystem observation experiment; not through NSCB. |
-| Select first, middle, or last member | A path names one member of a hypothetical ordered set | Only selected path and sibling directory contents are available; the member’s position is not proof of set end | Discovery may find siblings; no independent expected count is present | Fail closed under current resolver. Segment-selection integration was not executed. |
+| Select first, middle, or last member | A path names one member of a hypothetical ordered set | Only selected path and sibling directory contents are available; the member’s position is not proof of set end | Discovery may find siblings; no independent expected count is present | Fail closed under the baseline resolver. Segment-selection integration was not executed in this research experiment. |
 | Missing first member | Hypothetical expected sequence begins `00`; visible entries begin `01` | Missing zero is visible only if the grammar requires zero as the first member | A grammar can reject the sequence; that does not prove a later terminal member is present | Fail closed. Not executed as resolver behavior. |
 | Missing middle member | Hypothetical expected `00,01,02`; visible `00,02` | A numeric gap is directly observable | Sequence consistency can fail; no completeness inference is needed | Reject as inconsistent. Not executed in the resolver. |
 | Missing final member | Hypothetical expected 3; visible `00,01` | Same observations as complete two-part P2 | No gap exists before the missing terminal member | Fail closed. P2 is the decisive executed counterexample. |
