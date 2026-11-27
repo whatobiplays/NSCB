@@ -553,6 +553,40 @@ fn legacy_layout_matches(
 }
 
 #[cfg(target_os = "macos")]
+/// Supplies operation-local XCI evidence for `LegacyXc` error mapping.
+///
+/// Keeping this probe here lets general recognition retain its permissive behavior.
+fn source_has_xci_header_marker(
+    source_file: &mut File,
+    source_size: u64,
+) -> Result<bool, OperationFailureCode> {
+    let mut marker = [0; 4];
+    if source_size >= marker.len() as u64 {
+        source_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+        source_file
+            .read_exact(&mut marker)
+            .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+        if marker == *b"PFS0" {
+            return Ok(false);
+        }
+    }
+
+    let xci_marker_end = 0x100 + marker.len() as u64;
+    if source_size < xci_marker_end {
+        return Ok(false);
+    }
+    source_file
+        .seek(SeekFrom::Start(0x100))
+        .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+    source_file
+        .read_exact(&mut marker)
+        .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+    Ok(marker == *b"HEAD")
+}
+
+#[cfg(target_os = "macos")]
 fn plan_split_macos<'a>(
     request: SplitRequest,
     trust_store: &'a dyn SplitTrustWriter,
@@ -624,72 +658,125 @@ fn plan_split_macos<'a>(
     }
 
     let source_path = source_parent_path.join(&source_name);
-    let segment_names =
-        if layout == SplitLayout::Canonical {
-            Vec::new()
+    let segment_names = if layout == SplitLayout::Canonical {
+        Vec::new()
+    } else {
+        let member_stem = legacy_member_stem(&source_name)?;
+        if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+            return Err(OperationError::new(OperationFailureCode::Cancelled));
+        }
+        let has_xci_header_marker = if layout == SplitLayout::LegacyXc {
+            source_has_xci_header_marker(&mut source_file, source_size)
+                .map_err(OperationError::new)?
         } else {
-            let member_stem = legacy_member_stem(&source_name)?;
-            if cancellation.is_some_and(CancellationHandle::is_cancelled) {
-                return Err(OperationError::new(OperationFailureCode::Cancelled));
-            }
-            source_file
-                .seek(SeekFrom::Start(0))
+            false
+        };
+        source_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        let recognition_result =
+            crate::recognition::recognize(&mut source_file, source_size, &source_path);
+
+        #[cfg(test)]
+        if failpoint == Some(SplitTestFailpoint::MutateSourceAfterRecognition)
+            || failpoint
+                == Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot)
+        {
+            let mut mutation_file = fs::OpenOptions::new()
+                .write(true)
+                .open(&source_path)
                 .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
-            let recognition =
-                crate::recognition::recognize(&mut source_file, source_size, &source_path)
-                    .map_err(|error| {
-                        let code = match error.code() {
-                    crate::recognition::ContentRecognitionErrorCode::InputUnavailable => {
-                        OperationFailureCode::SourceUnavailable
-                    }
-                    crate::recognition::ContentRecognitionErrorCode::LimitExceeded
-                    | crate::recognition::ContentRecognitionErrorCode::ResourceLimitExceeded => {
+            if failpoint == Some(SplitTestFailpoint::MutateSourceAfterRecognition) {
+                std::io::Seek::seek(&mut mutation_file, std::io::SeekFrom::End(0))
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+                std::io::Write::write_all(&mut mutation_file, b"changed")
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            } else {
+                std::io::Seek::seek(&mut mutation_file, std::io::SeekFrom::Start(0x100))
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+                std::io::Write::write_all(&mut mutation_file, b"NOPE")
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            }
+            mutation_file
+                .sync_all()
+                .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        }
+
+        let recognition_snapshot = source_snapshot.clone();
+        let observed_snapshot = snapshot_of(&source_file)?;
+        #[cfg(test)]
+        let observed_snapshot = if failpoint
+            == Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot)
+        {
+            // Simulate a filesystem snapshot that misses the post-recognition byte change.
+            source_snapshot.clone()
+        } else {
+            observed_snapshot
+        };
+
+        if observed_snapshot != recognition_snapshot {
+            return Err(OperationError::new(OperationFailureCode::SourceChanged));
+        }
+        let recognition = match recognition_result {
+            Ok(recognition) => recognition,
+            Err(error) => {
+                use crate::recognition::ContentRecognitionErrorCode as Code;
+                let code = match (layout, error.code()) {
+                    (_, Code::InputUnavailable) => OperationFailureCode::SourceUnavailable,
+                    (_, Code::LimitExceeded | Code::ResourceLimitExceeded) => {
                         OperationFailureCode::ResourceLimitExceeded
+                    }
+                    (SplitLayout::LegacyXc, Code::TruncatedInput | Code::MalformedInput)
+                        if has_xci_header_marker =>
+                    {
+                        OperationFailureCode::InvalidXciImage
+                    }
+                    (SplitLayout::LegacyXc, Code::UnsupportedStructure)
+                        if has_xci_header_marker =>
+                    {
+                        OperationFailureCode::UnsupportedXciProfile
                     }
                     _ => OperationFailureCode::UnsupportedSplitLayout,
                 };
-                        OperationError::new(code)
-                    })?;
-            if !legacy_layout_matches(layout, &recognition) {
-                return Err(OperationError::new(
-                    OperationFailureCode::UnsupportedSplitLayout,
-                ));
+                if !matches!(
+                    code,
+                    OperationFailureCode::SourceUnavailable
+                        | OperationFailureCode::ResourceLimitExceeded
+                ) {
+                    confirm_source_unchanged(
+                        &mut source_file,
+                        &recognition_snapshot,
+                        observed_size,
+                        &source_sha256,
+                        cancellation,
+                    )?;
+                }
+                return Err(OperationError::new(code));
             }
-            source_file
-                .seek(SeekFrom::Start(0))
-                .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
-            let (confirmed_size, confirmed_sha256) = hash_file_with_check(
-                &mut source_file,
-                || {
-                    if cancellation.is_some_and(CancellationHandle::is_cancelled) {
-                        Err(OperationFailureCode::Cancelled)
-                    } else {
-                        Ok(())
-                    }
-                },
-                #[cfg(test)]
-                None,
-            )
-            .map_err(|error| match error {
-                HashFileFailure::Operation(code) => OperationError::new(code),
-                HashFileFailure::Io => OperationError::new(OperationFailureCode::SourceUnavailable),
-            })?;
-            if confirmed_size != observed_size
-                || confirmed_sha256 != source_sha256
-                || snapshot_of(&source_file)? != source_snapshot
-            {
-                return Err(OperationError::new(OperationFailureCode::SourceChanged));
-            }
-            if cancellation.is_some_and(CancellationHandle::is_cancelled) {
-                return Err(OperationError::new(OperationFailureCode::Cancelled));
-            }
-            (0..lengths.len())
-                .map(|index| {
-                    legacy_segment_name(layout, &member_stem, index as u8)
-                        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))
-                })
-                .collect::<Result<Vec<_>, _>>()?
         };
+        // Same-size writes can evade metadata checks; confirm before success or a structural recognition error.
+        confirm_source_unchanged(
+            &mut source_file,
+            &recognition_snapshot,
+            observed_size,
+            &source_sha256,
+            cancellation,
+        )?;
+        if !legacy_layout_matches(layout, &recognition) {
+            return Err(OperationError::new(
+                OperationFailureCode::UnsupportedSplitLayout,
+            ));
+        }
+        if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+            return Err(OperationError::new(OperationFailureCode::Cancelled));
+        }
+        (0..lengths.len())
+            .map(|index| {
+                legacy_segment_name(layout, &member_stem, index as u8)
+                    .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
 
     let destination_path = destination_parent_path.join(&destination_name);
     let canonical_directory = destination_path.join(&source_name);
@@ -781,6 +868,8 @@ fn plan_split_macos<'a>(
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SplitTestFailpoint {
+    MutateSourceAfterRecognition,
+    MutateSourceAfterRecognitionWithUnchangedSnapshot,
     FailureBeforeSegmentSync,
     FailureBeforeManifestSync,
     FailureAtPromotion,
@@ -1036,6 +1125,63 @@ fn hash_file_with_check(
     }
     check().map_err(HashFileFailure::Operation)?;
     Ok((length, Sha256Digest::from_bytes(hasher.finalize().into())))
+}
+
+#[cfg(target_os = "macos")]
+/// Rechecks source bytes and metadata against the snapshot captured for planning.
+fn confirm_source_unchanged(
+    source_file: &mut File,
+    source_snapshot: &FileSnapshot,
+    expected_size: u64,
+    expected_sha256: &Sha256Digest,
+    cancellation: Option<&CancellationHandle>,
+) -> Result<(), OperationError> {
+    source_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let (confirmed_size, confirmed_sha256) = hash_file_with_check(
+        source_file,
+        || {
+            if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+                Err(OperationFailureCode::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+        #[cfg(test)]
+        None,
+    )
+    .map_err(|error| match error {
+        HashFileFailure::Operation(code) => OperationError::new(code),
+        HashFileFailure::Io => OperationError::new(OperationFailureCode::SourceUnavailable),
+    })?;
+    let confirmed_snapshot = snapshot_of(source_file)?;
+    if !source_confirmation_matches(
+        source_snapshot,
+        &confirmed_snapshot,
+        expected_size,
+        confirmed_size,
+        expected_sha256,
+        &confirmed_sha256,
+    ) {
+        return Err(OperationError::new(OperationFailureCode::SourceChanged));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+/// Checks whether recognition still refers to the planned source bytes and metadata.
+fn source_confirmation_matches(
+    planned_snapshot: &FileSnapshot,
+    confirmed_snapshot: &FileSnapshot,
+    planned_size: u64,
+    confirmed_size: u64,
+    planned_sha256: &Sha256Digest,
+    confirmed_sha256: &Sha256Digest,
+) -> bool {
+    planned_size == confirmed_size
+        && planned_sha256 == confirmed_sha256
+        && planned_snapshot == confirmed_snapshot
 }
 
 #[cfg(target_os = "macos")]
@@ -2842,7 +2988,9 @@ fn run_split_transaction(
             | SplitTestFailpoint::SimulatedInterruptionAfterCleanupArtifactUnlink
             | SplitTestFailpoint::SimulatedInterruptionAfterReceiptCommitted
             | SplitTestFailpoint::SimulatedAcknowledgementBeforeReceiptJournalUpdate
-            | SplitTestFailpoint::SimulatedFailureAfterJournalCreateBeforeIdentityRecord,
+            | SplitTestFailpoint::SimulatedFailureAfterJournalCreateBeforeIdentityRecord
+            | SplitTestFailpoint::MutateSourceAfterRecognition
+            | SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot,
         )
         | None => {}
     }
@@ -8347,6 +8495,8 @@ mod producer_tests {
         malformed_second_xci[second_compressed_member.data_offset + 0x4008
             ..second_compressed_member.data_offset + 0x4010]
             .fill(0);
+        let mut unsupported_xci_structure = fixture.image.clone();
+        unsupported_xci_structure[0x130..0x138].fill(0);
         let ncz = synthetic_ncz_member();
         let mut malformed_ncz = ncz.clone();
         malformed_ncz[0x4008..0x4010].fill(0);
@@ -8356,39 +8506,113 @@ mod producer_tests {
         let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
         let engine = Engine::new();
         let cases = [
-            ("pfs0.xci", fixture.package, SplitLayout::LegacyXc),
-            ("xci.nsp", fixture.image, SplitLayout::LegacyNs),
+            (
+                "pfs0.xci",
+                fixture.package,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "malformed-pfs0.xci",
+                b"PFS0".to_vec(),
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "xci.nsp",
+                fixture.image,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
             (
                 "compressed.xci",
                 compressed_xci.image,
                 SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
             ),
             (
                 "malformed-first-ncz.xci",
                 malformed_first_xci,
                 SplitLayout::LegacyXc,
+                OperationFailureCode::InvalidXciImage,
             ),
             (
                 "malformed-second-ncz.xci",
                 malformed_second_xci,
                 SplitLayout::LegacyXc,
+                OperationFailureCode::InvalidXciImage,
             ),
-            ("compressed.nsp", compressed_pfs0, SplitLayout::LegacyNs),
+            (
+                "compressed-second-ncz.xci",
+                compressed_second_xci.image,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "unsupported-xci-structure.xci",
+                unsupported_xci_structure,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedXciProfile,
+            ),
+            (
+                "compressed.nsp",
+                compressed_pfs0,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
             (
                 "malformed-ncz.nsp",
                 malformed_compressed_pfs0,
                 SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
             ),
-            ("standalone.nca", standalone_nca, SplitLayout::LegacyNs),
-            ("standalone.ncz", ncz, SplitLayout::LegacyNs),
+            (
+                "standalone.nca",
+                standalone_nca,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "standalone.ncz",
+                ncz,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
             (
                 "unknown.xci",
                 b"unrecognized bytes".to_vec(),
                 SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "unknown-long.xci",
+                vec![0; 0x104],
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "partial-xci-header.xci",
+                {
+                    let mut bytes = vec![0; 0x103];
+                    bytes[0x100..].copy_from_slice(b"HEA");
+                    bytes
+                },
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "truncated-xci-header.xci",
+                {
+                    let mut bytes = vec![0; 0x104];
+                    bytes[0x100..].copy_from_slice(b"HEAD");
+                    bytes
+                },
+                SplitLayout::LegacyXc,
+                OperationFailureCode::InvalidXciImage,
             ),
         ];
 
-        for (index, (name, bytes, layout)) in cases.into_iter().enumerate() {
+        for (index, (name, bytes, layout, expected_error)) in cases.into_iter().enumerate() {
             let source = root_path.join(name);
             let bundle = root_path.join(format!("bundle-{index}"));
             fs::write(&source, bytes).unwrap();
@@ -8398,8 +8622,153 @@ mod producer_tests {
                     &trust,
                 )
                 .unwrap_err();
-            assert_eq!(error.code(), OperationFailureCode::UnsupportedSplitLayout);
+            assert_eq!(error.code(), expected_error, "{name}");
         }
+    }
+
+    #[test]
+    fn source_change_after_recognition_with_unchanged_snapshot_is_not_mapped_as_xci_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let mut source_bytes = vec![0; 0x104];
+        source_bytes[0x100..0x104].copy_from_slice(b"HEAD");
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_recognition_with_changed_snapshot_is_source_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let source_bytes = pfs0_with_one_member("member.nca", &vec![0; 0x200]);
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognition),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_generic_recognition_error_with_unchanged_snapshot_is_source_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let mut source_bytes = vec![0; 0x104];
+        source_bytes[..4].copy_from_slice(b"PFS0");
+        source_bytes[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        fs::write(&source, source_bytes).unwrap();
+        let mut recognition_file = fs::File::open(&source).unwrap();
+        assert!(crate::recognition::recognize(&mut recognition_file, 0x104, &source).is_err());
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let stable_error = plan_split_for_tests(
+            SplitRequest::new(source.clone(), bundle.clone()).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            stable_error.code(),
+            OperationFailureCode::UnsupportedSplitLayout
+        );
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_non_pfs0_recognition_with_unchanged_snapshot_is_source_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let mut source_bytes = vec![0; 0x104];
+        source_bytes[..4].copy_from_slice(b"NCA3");
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_successful_recognition_with_unchanged_snapshot_is_not_unsupported_layout()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let source_bytes = pfs0_with_one_member("member.nca", &vec![0; 0x200]);
+        assert!(source_bytes.len() > 0x104);
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_confirmation_rejects_digest_change_with_stable_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.bin");
+        fs::write(&source, b"sample").unwrap();
+        let source_file = File::open(source).unwrap();
+        let snapshot = super::snapshot_of(&source_file).unwrap();
+        let planned_sha256 = crate::sha256::Sha256Digest::from_bytes([0x11; 32]);
+        let confirmed_sha256 = crate::sha256::Sha256Digest::from_bytes([0x22; 32]);
+
+        assert!(!super::source_confirmation_matches(
+            &snapshot,
+            &snapshot,
+            6,
+            6,
+            &planned_sha256,
+            &confirmed_sha256,
+        ));
     }
 
     #[test]
@@ -10388,9 +10757,11 @@ mod producer_tests {
                         failure.code(),
                         OperationFailureCode::DestinationBusy
                             | OperationFailureCode::Busy
+                            | OperationFailureCode::DestinationChanged
                             | OperationFailureCode::StalePlan
                     )
-                })
+                }),
+            "unexpected concurrent failure disposition: {dispositions:?}"
         );
         assert!(!staging_path.exists());
         assert_eq!(
@@ -13268,6 +13639,24 @@ mod producer_tests {
             interruption.split_receipt_commit_state(),
             Some(SplitReceiptCommitState::NotAttempted)
         );
+        let journal_path = fs::read_dir(bundle.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "journal")
+            })
+            .expect("interrupted canonical transaction journal");
+        for record_bytes in fs::read(&journal_path)
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let record: serde_json::Value = serde_json::from_slice(record_bytes).unwrap();
+            assert_eq!(record["version"], 1);
+            assert!(record.get("layout").is_none());
+            assert!(record.get("segment_names").is_none());
+        }
         assert!(
             Engine::new()
                 .resolve_inputs_with(
