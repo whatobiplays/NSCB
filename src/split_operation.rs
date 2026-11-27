@@ -31,11 +31,13 @@ use crate::file_identity::{
 #[cfg(target_os = "macos")]
 use crate::input_resolution::{InputResolutionCapabilities, InputResolutionRequest};
 use crate::inspection::CancellationHandle;
+#[cfg(any(target_os = "macos", test))]
+use crate::split_manifest::MAX_LEGACY_SPLIT_SEGMENTS;
 use crate::split_manifest::SplitLayout;
 #[cfg(target_os = "macos")]
 use crate::split_manifest::{
-    MAX_LEGACY_SPLIT_SEGMENTS, MAX_SPLIT_MANIFEST_BYTES, SplitManifestSegment,
-    encode_legacy_manifest, encode_manifest, is_safe_component_name, legacy_segment_name,
+    MAX_SPLIT_MANIFEST_BYTES, SplitManifestSegment, encode_legacy_manifest, encode_manifest,
+    is_safe_component_name, legacy_segment_name,
 };
 #[cfg(target_os = "macos")]
 use fs2::FileExt as _;
@@ -8405,10 +8407,7 @@ mod producer_tests {
             )
             .unwrap();
         assert_eq!(plan.snapshot().layout(), SplitLayout::LegacyXc);
-        assert_eq!(
-            plan.snapshot().segment_names(),
-            &["unknown-profile.xc0"]
-        );
+        assert_eq!(plan.snapshot().segment_names(), &["unknown-profile.xc0"]);
     }
 
     #[test]
