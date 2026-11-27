@@ -413,23 +413,22 @@ fn normalized_case_and_unicode_aliases_are_duplicate_selections() {
 #[test]
 fn suspected_split_parts_fail_before_standalone_or_extension_handling() {
     let tree = TempTree::new();
-    for name in [
-        "game.xc0",
-        "game.xc1",
-        "game.ns0",
-        "game.ns12",
-        "game.00",
-        "game.nsp.00",
+    for (name, expected_error) in [
+        ("game.xc0", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.xc1", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.ns0", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.ns12", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.00", InputResolutionErrorCode::UnsupportedSplitLayout),
+        (
+            "game.nsp.00",
+            InputResolutionErrorCode::UnsupportedSplitLayout,
+        ),
     ] {
         tree.write(name, b"segment");
         let error = Engine::new()
             .resolve_inputs(request(&tree).with_path(name))
             .expect_err("suspected Split segments are not standalone inputs");
-        assert_eq!(
-            error.code(),
-            InputResolutionErrorCode::UnsupportedSplitLayout,
-            "{name}"
-        );
+        assert_eq!(error.code(), expected_error, "{name}");
     }
     tree.write("00", b"segment");
     let error = Engine::new()
@@ -854,10 +853,7 @@ fn batch_resolution_keeps_duplicate_and_unsafe_split_failures_global() {
                 .with_path("game.xc0"),
         )
         .expect_err("unsafe Split qualification must reject the batch");
-    assert_eq!(
-        error.code(),
-        InputResolutionErrorCode::UnsupportedSplitLayout
-    );
+    assert_eq!(error.code(), InputResolutionErrorCode::SplitManifestMissing);
 }
 
 #[test]

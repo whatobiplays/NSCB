@@ -7471,7 +7471,7 @@ fn recorded_bundle_is_trusted(
             .iter()
             .enumerate()
             .any(|(index, segment)| {
-                journal_segment_name(record, index).map_or(true, |name| name != segment.name)
+                journal_segment_name(record, index).is_none_or(|name| name != segment.name)
             })
     {
         return false;
@@ -7665,21 +7665,20 @@ fn same_journal_identity(left: &JournalRecord, right: &JournalRecord) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+/// Returns the recorded layout, treating metadata-free version 1 journals as canonical.
 fn journal_layout(record: &JournalRecord) -> Option<SplitLayout> {
     match record.version {
         1 if record.layout.is_none() && record.segment_names.is_empty() => {
             Some(SplitLayout::Canonical)
         }
-        2 => record.layout.filter(|layout| !layout.is_canonical()),
+        2 => record.layout,
         _ => None,
     }
 }
 
 #[cfg(target_os = "macos")]
 fn journal_segment_name(record: &JournalRecord, index: usize) -> Option<String> {
-    if record.segment_lengths.get(index).is_none() {
-        return None;
-    }
+    record.segment_lengths.get(index)?;
     match journal_layout(record)? {
         SplitLayout::Canonical => Some(format!("{index:02}")),
         SplitLayout::LegacyXc | SplitLayout::LegacyNs => record.segment_names.get(index).cloned(),
@@ -7705,10 +7704,10 @@ fn journal_segment_names_are_valid(record: &JournalRecord, source_name: &OsStr) 
         return false;
     };
     if layout == SplitLayout::Canonical {
-        return true;
+        return record.segment_names.is_empty();
     }
     if record.segment_names.len() != record.segment_lengths.len()
-        || record.segment_names.len() > MAX_SEGMENT_COUNT
+        || record.segment_names.len() > MAX_LEGACY_SPLIT_SEGMENTS
     {
         return false;
     }
@@ -8369,6 +8368,65 @@ mod producer_tests {
                 .unwrap_err();
             assert_eq!(error.code(), OperationFailureCode::UnsupportedSplitLayout);
         }
+    }
+
+    #[test]
+    fn journal_segment_names_follow_layout_specific_rules() {
+        let segment_names = (0..=super::MAX_LEGACY_SPLIT_SEGMENTS)
+            .map(|index| format!("game.ns{index}"))
+            .collect::<Vec<_>>();
+        let mut record = super::JournalRecord {
+            version: 2,
+            transaction_id: "legacy-limit-test".to_owned(),
+            phase: JournalPhase::Prepared,
+            destination_name_hex: String::new(),
+            staging_name_hex: String::new(),
+            canonical_name_hex: String::new(),
+            source_identity: String::new(),
+            source_size: segment_names.len() as u64,
+            source_sha256: String::new(),
+            layout: Some(SplitLayout::LegacyNs),
+            segment_lengths: vec![1; segment_names.len()],
+            segment_names,
+            destination_parent_identity: None,
+            journal_identity: None,
+            journal_mode: None,
+            destination_identity: None,
+            staging_identity: None,
+            manifest_sha256: None,
+            artifacts: Vec::new(),
+            cleanup_name_hex: None,
+            cleanup_parent_identity: None,
+        };
+
+        record.layout = Some(SplitLayout::Canonical);
+        record.segment_names.clear();
+        assert!(super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+        record.segment_names.push("unexpected".to_owned());
+        assert!(!super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+
+        record.layout = Some(SplitLayout::LegacyNs);
+        record.segment_names = (0..=super::MAX_LEGACY_SPLIT_SEGMENTS)
+            .map(|index| format!("game.ns{index}"))
+            .collect();
+
+        assert!(!super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+
+        record.segment_names.pop();
+        record.segment_lengths.pop();
+        assert!(super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
     }
 
     #[test]
@@ -11676,10 +11734,9 @@ mod producer_tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|segment| {
+            .flat_map(|segment| {
                 fs::read(split_directory.join(segment["name"].as_str().unwrap())).unwrap()
             })
-            .flatten()
             .collect::<Vec<_>>();
         assert_eq!(reconstructed, source_bytes);
     }

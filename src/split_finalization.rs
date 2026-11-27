@@ -139,6 +139,7 @@ pub fn finalize_split_directory(
     if verified.identity != binding.identity {
         return Err(error(SplitFinalizationErrorCode::DestinationChanged));
     }
+    ensure_canonical_layout(&verified)?;
     let sizes = verified
         .segments
         .iter()
@@ -234,6 +235,16 @@ fn valid_segment_profile(sizes: &[u64], segment_limit: u64, max_segments: usize)
         && last <= segment_limit
 }
 
+fn ensure_canonical_layout(
+    verified: &VerifiedSplitDirectory,
+) -> Result<(), SplitFinalizationError> {
+    if verified.layout.is_canonical() {
+        Ok(())
+    } else {
+        Err(error(SplitFinalizationErrorCode::InvalidSplitSet).with_manifest_consistency_verified())
+    }
+}
+
 fn ensure_directory_identity(
     verified: &VerifiedSplitDirectory,
     binding: &SelectedDirectoryBinding,
@@ -291,6 +302,7 @@ fn finalize_with_backend(
     binding: &SelectedDirectoryBinding,
     backend: &mut impl ArchiveAttributeBackend,
 ) -> Result<SplitArchiveAttributeStatus, SplitFinalizationError> {
+    ensure_canonical_layout(verified)?;
     ensure_directory_identity(verified, binding)?;
     let is_fat32 = backend.is_fat32(&verified.directory);
     ensure_directory_identity(verified, binding)?;
@@ -441,6 +453,7 @@ mod tests {
             VerifiedSplitDirectory {
                 directory: self.0.clone(),
                 identity: path_identity(&self.0).unwrap(),
+                layout: crate::split_manifest::SplitLayout::Canonical,
                 source_size: 1,
                 source_sha256: crate::Sha256Digest::digest(b"x"),
                 segments: Vec::new(),
@@ -460,6 +473,7 @@ mod tests {
     #[derive(Default)]
     struct FakeBackend {
         supported: bool,
+        is_fat32_calls: usize,
         attributes: u32,
         fail_get: bool,
         fail_set: bool,
@@ -472,6 +486,7 @@ mod tests {
 
     impl ArchiveAttributeBackend for FakeBackend {
         fn is_fat32(&mut self, _: &Path) -> bool {
+            self.is_fat32_calls += 1;
             self.supported
         }
 
@@ -588,6 +603,52 @@ mod tests {
             assert_eq!(code.as_str(), label);
             assert_eq!(failure.to_string(), label);
         }
+    }
+
+    #[test]
+    fn legacy_verified_split_is_rejected_before_backend_calls() {
+        let directory = TestDirectory::new();
+        let split_directory = directory.0.join("game.nsp");
+        fs::create_dir(&split_directory).unwrap();
+        let payload = b"legacy split payload";
+        fs::write(split_directory.join("game.xc0"), payload).unwrap();
+        let digest = crate::Sha256Digest::digest(payload).to_hex();
+        let manifest = serde_json::json!({
+            "schema_version": 2,
+            "kind": "nscb.split_manifest",
+            "required_features": [],
+            "layout": "legacy_xc",
+            "source": {
+                "size_bytes": payload.len(),
+                "sha256": digest.clone(),
+            },
+            "segments": [{
+                "name": "game.xc0",
+                "size_bytes": payload.len(),
+                "sha256": digest,
+            }],
+        });
+        let sidecar = crate::split_resolution::sidecar_path(&split_directory).unwrap();
+        fs::write(sidecar, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+        let verified = crate::split_resolution::verify_split_directory(
+            &split_directory,
+            crate::split_resolution::SplitInventoryPolicy::RequireExactMembers,
+        )
+        .unwrap();
+        let binding = SelectedDirectoryBinding::open(&split_directory).unwrap();
+        let mut backend = FakeBackend {
+            supported: true,
+            ..FakeBackend::default()
+        };
+
+        let result = finalize_with_backend(&verified, &binding, &mut backend);
+
+        assert!(matches!(
+            result,
+            Err(error) if error.code() == SplitFinalizationErrorCode::InvalidSplitSet
+        ));
+        assert_eq!(backend.is_fat32_calls, 0);
+        assert_eq!(backend.set_calls, 0);
     }
 
     #[test]

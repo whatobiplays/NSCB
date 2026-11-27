@@ -1,4 +1,4 @@
-//! Canonical Split directory qualification.
+//! Split directory qualification.
 //!
 //! A directory is only accepted as a Split input after the adjacent manifest,
 //! a host-owned receipt, every physical member, both digest levels, and a final
@@ -13,7 +13,7 @@ use crate::input_resolution::{
     SplitQualificationKind, looks_like_split_segment, read_directory,
 };
 use crate::sha256::Sha256Digest;
-use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, SplitManifest, parse_manifest};
+use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, SplitLayout, SplitManifest, parse_manifest};
 use crate::split_reader::{SegmentOpenError, open_segment_file, revalidate_segment};
 use crate::split_trust::{SourceEvidence, SplitTrustStore, trust_store_error};
 use sha2::{Digest as _, Sha256};
@@ -53,6 +53,8 @@ pub(crate) struct QualifiedSplit {
 pub(crate) struct VerifiedSplitDirectory {
     pub(crate) directory: PathBuf,
     pub(crate) identity: FileIdentity,
+    /// Layout declared by the validated manifest.
+    pub(crate) layout: SplitLayout,
     pub(crate) source_size: u64,
     pub(crate) source_sha256: Sha256Digest,
     pub(crate) segments: Vec<QualifiedSegment>,
@@ -77,7 +79,7 @@ struct SplitManifestCandidate {
     source: SourceEvidence,
 }
 
-/// Qualifies the canonical Split directory at `directory`.
+/// Qualifies the Split directory at `directory`.
 pub(crate) fn qualify_directory(
     directory: &Path,
     context: &mut SplitResolutionContext<'_>,
@@ -191,6 +193,7 @@ fn verify_manifest_candidate(
         manifest,
         source: _,
     } = candidate;
+    let layout = manifest.layout;
     let expected_names = manifest
         .segments
         .iter()
@@ -299,6 +302,7 @@ fn verify_manifest_candidate(
     Ok(VerifiedSplitDirectory {
         directory,
         identity: directory_identity,
+        layout,
         source_size: manifest.source_size,
         source_sha256: manifest.source_sha256,
         segments: opened
