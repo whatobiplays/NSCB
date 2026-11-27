@@ -103,6 +103,109 @@ fn complete_multipart_set_qualifies_from_member_and_directory() {
 }
 
 #[test]
+fn legacy_manifests_resolve_their_declared_members() {
+    let tree = TempTree::new("legacy-layouts");
+    let store = tree.store();
+    let source_bytes = source(3 * 1024 + 17);
+    let parts = source_bytes.chunks(1024).collect::<Vec<_>>();
+    let source_sha256 = Sha256Digest::digest(&source_bytes);
+
+    for (directory_name, layout, suffix) in [
+        ("game.backup.xci", "legacy_xc", "xc"),
+        ("game.backup.nsp", "legacy_ns", "ns"),
+    ] {
+        let member_names = (0..parts.len())
+            .map(|index| format!("game.backup.{suffix}{index}"))
+            .collect::<Vec<_>>();
+        let segments = parts
+            .iter()
+            .zip(&member_names)
+            .map(|(part, name)| {
+                serde_json::json!({
+                    "name": name,
+                    "size_bytes": part.len(),
+                    "sha256": Sha256Digest::digest(part).to_hex(),
+                })
+            })
+            .collect::<Vec<_>>();
+        let manifest = serde_json::json!({
+            "schema_version": 2,
+            "kind": "nscb.split_manifest",
+            "required_features": [],
+            "layout": layout,
+            "source": {
+                "size_bytes": source_bytes.len(),
+                "sha256": source_sha256.to_hex(),
+            },
+            "segments": segments,
+        });
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+        let directory = tree.path().join(directory_name);
+        fs::create_dir_all(&directory).unwrap();
+        for (name, part) in member_names.iter().zip(&parts) {
+            fs::write(directory.join(name), part).unwrap();
+        }
+        fs::write(sidecar_path(&directory), &manifest_bytes).unwrap();
+        store
+            .issue(SplitTrustReceipt::new(
+                Sha256Digest::digest(&manifest_bytes),
+                source_bytes.len() as u64,
+                source_sha256,
+            ))
+            .unwrap();
+
+        for selection in [
+            directory_name.to_owned(),
+            format!("{directory_name}/{}", member_names[0]),
+        ] {
+            let result = resolve(request(&tree).with_path(selection), &store).unwrap();
+            assert_eq!(result.inputs.len(), 1);
+            assert_eq!(
+                result.inputs[0]
+                    .segments
+                    .iter()
+                    .map(|segment| segment
+                        .path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned())
+                    .collect::<Vec<_>>(),
+                member_names
+            );
+            assert_eq!(
+                result.inputs[0]
+                    .qualification
+                    .as_ref()
+                    .unwrap()
+                    .manifest_schema_version,
+                2
+            );
+        }
+    }
+}
+
+#[test]
+fn unmanifested_legacy_member_fails_closed() {
+    let tree = TempTree::new("legacy-without-manifest");
+    let directory = tree.path().join("game.nsp");
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("game.ns0"), source(1024)).unwrap();
+
+    let store = tree.store();
+    for (path, expected_error) in [
+        ("game.nsp", InputResolutionErrorCode::UnsupportedSplitLayout),
+        (
+            "game.nsp/game.ns0",
+            InputResolutionErrorCode::SplitManifestMissing,
+        ),
+    ] {
+        let error = resolve(request(&tree).with_path(path), &store).unwrap_err();
+        assert_eq!(error.code(), expected_error);
+    }
+}
+
+#[test]
 fn one_part_set_qualifies() {
     let tree = TempTree::new("single");
     let fixture = SplitFixture::new(&source(1024), 4096);
@@ -895,13 +998,23 @@ fn manifest_validation_is_strict_and_bounded() {
     let cases = vec![
         (
             serde_json::json!({
-                "schema_version": 2,
+            "schema_version": 3,
                 "kind": "nscb.split_manifest",
                 "required_features": [],
                 "source": {"size_bytes": 1, "sha256": zero},
                 "segments": [valid_segment.clone()],
             }),
             InputResolutionErrorCode::SplitManifestVersionUnsupported,
+        ),
+        (
+            serde_json::json!({
+                "schema_version": 2,
+                "kind": "nscb.split_manifest",
+                "required_features": [],
+                "source": {"size_bytes": 1, "sha256": zero},
+                "segments": [valid_segment.clone()],
+            }),
+            InputResolutionErrorCode::SplitManifestInvalid,
         ),
         (
             serde_json::json!({

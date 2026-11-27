@@ -551,6 +551,8 @@ pub enum OperationFailureCode {
     SourceUnavailable,
     /// Copy-through does not accept physical members or directories resolved as Split inputs.
     SplitInputUnsupported,
+    /// Source bytes do not qualify for the requested legacy Split layout.
+    UnsupportedSplitLayout,
     /// A source changed after the immutable plan was made.
     SourceChanged,
     /// The source length cannot be represented by the qualified Split profile.
@@ -635,6 +637,7 @@ impl OperationFailureCode {
             Self::DestinationCollision => "destination_collision",
             Self::SourceUnavailable => "source_unavailable",
             Self::SplitInputUnsupported => "split_input_unsupported",
+            Self::UnsupportedSplitLayout => "unsupported_split_layout",
             Self::SourceChanged => "source_changed",
             Self::SplitSourceSizeUnsupported => "split_source_size_unsupported",
             Self::SplitReplacementUnsupported => "split_replacement_unsupported",

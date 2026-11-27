@@ -1,6 +1,6 @@
 # Input selection and resolution
 
-NSCB resolves ordered paths, directory candidates, and versioned JSON input lists through one read-only Engine operation. Resolution returns filesystem paths, observed file sizes, ordered physical segments, and the selection provenance for each result. Ordinary inputs are resolved from metadata. A canonical Split set additionally requires a host-owned local receipt and is validated by streaming its complete bytes. Resolution does not recognize a Nintendo content family, validate identity, or establish authenticity.
+NSCB resolves ordered paths, directory candidates, and versioned JSON input lists through one read-only Engine operation. Resolution returns filesystem paths, observed file sizes, ordered physical segments, and the selection provenance for each result. Ordinary inputs are resolved from metadata. Split sets require an active host-local receipt and validation of all declared bytes. Resolution does not recognize a Nintendo content family, validate identity, or establish authenticity.
 
 ## Rust API
 
@@ -17,7 +17,7 @@ let request = InputResolutionRequest::new(host_input_root)
 let result = Engine::new().resolve_inputs(request)?;
 ```
 
-Engine::resolve_inputs accepts ordinary files and directories without any Split capability. Canonical Split candidates fail with split_evidence_untrusted because no receipt store was supplied. Hosts that resolve Split sets call the additive Engine::resolve_inputs_with method:
+Engine::resolve_inputs accepts ordinary files and directories without any Split capability. Split candidates fail with split_evidence_untrusted because no receipt store was supplied. Hosts that resolve Split sets call the additive Engine::resolve_inputs_with method:
 
 ```rust
 use nscb::{
@@ -42,7 +42,7 @@ The standalone `copy-batch` command resolves through the configured local Split 
 
 Relative direct paths use the request's base directory. Relative paths inside an input list use the directory containing that list. The Engine does not consult the process working directory; a host must choose both bases through the request and list location.
 
-The request preserves selection order. Each `ResolvedInput` contains an ordered `segments` vector, `provenance`, and an optional `qualification`. A non-Split input has one segment and no qualification. A qualified canonical Split set has one segment per declared member and a `SplitQualification` that reports the evidence family, manifest schema version, original source size, and original source SHA-256. The non-exhaustive public result types allow future additive evidence without changing the version-1 representation. A segment record reports a canonical absolute path and the file size observed during resolution.
+The request preserves selection order. Each `ResolvedInput` contains an ordered `segments` vector, `provenance`, and an optional `qualification`. A non-Split input has one segment and no qualification. A qualified Split set has one segment per declared member and a `SplitQualification` that reports the evidence family, manifest schema version, original source size, and original source SHA-256. The non-exhaustive public result types allow future additive evidence without changing the version-1 representation. A segment record reports a canonical absolute path and the file size observed during resolution.
 
 ## CLI
 
@@ -60,7 +60,7 @@ Explicit regular files are eligible regardless of filename extension. Directorie
 
 The extension filter applies only to directory discovery. Hidden matching files are included. Directory candidates are sorted by NFC-normalized, lowercased relative path; caller selections and entries within each list retain their supplied order. An empty request, empty list, empty directory result, or any unusable selected path is a typed failure rather than a successful empty batch. In batch resolution, an empty selected directory or empty input list remains item-local so another viable selection can proceed.
 
-Directory discovery is nonrecursive and skips discovered symlinks by default. `--recursive` enables recursive discovery. `--follow-symlinks` allows traversal through discovered symlinks; discovered directory symlinks are traversed only when recursion is also enabled. An explicitly selected directory symlink can be used as the discovery root with `--follow-symlinks` alone. Explicit regular-file symlinks are eligible selections. A canonical Split directory or numbered member reached through an intermediate symlinked path also requires `--follow-symlinks`, matching the directory alias policy. A symlink target reached during discovery must stay within the selected directory tree. Cycle back-edges are skipped. Reaching the same directory through another alias or selecting the same logical file more than once returns `duplicate_selection`.
+Directory discovery is nonrecursive and skips discovered symlinks by default. `--recursive` enables recursive discovery. `--follow-symlinks` allows traversal through discovered symlinks; discovered directory symlinks are traversed only when recursion is also enabled. An explicitly selected directory symlink can be used as the discovery root with `--follow-symlinks` alone. Explicit regular-file symlinks are eligible selections. A Split directory or member reached through an intermediate symlinked path also requires `--follow-symlinks`, matching the directory alias policy. A symlink target reached during discovery must stay within the selected directory tree. Cycle back-edges are skipped. Reaching the same directory through another alias or selecting the same logical file more than once returns `duplicate_selection`.
 
 With `--follow-symlinks` but without recursion, a broken symlink with a
 discoverable ordinary filename is an item-local `input_unavailable` failure in
@@ -124,11 +124,13 @@ The segment array is ordered. Provenance indexes top-level selections from zero;
 
 Handled failures use the existing versioned `kind: "error"` document with a sanitized `error.code`. Exit classes follow ADR 0023: 0 means success, 2 means usage/configuration error, 3 means input or prerequisite failure, 6 means cooperative cancellation (including `split_resolution_cancelled`), and 7 means internal or output failure (including `split_state_unavailable`). Duplicate logical selections are input-resolution failures and use exit 3.
 
-## Canonical Split sets
+## Split sets
 
 `qualification` is omitted for non-Split inputs. It establishes Split-set completeness only. It grants no content-recognition, authenticity, Verification, or execution authority.
 
-A canonical v1 Split set is a directory containing contiguous two-digit members `00` through at most `99`, plus a deterministic sibling manifest named `<directory-name>.nscb-split.json`. One-part sets containing only `00` are supported. Selecting any member or the directory resolves the same logical input. Directory discovery recognizes a canonical Split directory by its members and sibling manifest even when the directory has an arbitrary name such as `backup.zip/`; the ordinary single-file extension filter continues to apply to files.
+A canonical v1 Split set is a directory containing contiguous two-digit members `00` through `99`, plus a deterministic sibling manifest named `<directory-name>.nscb-split.json`. One-part sets containing only `00` are supported. Selecting any member or the directory resolves the same logical input. Directory discovery recognizes manifest-declared Split members and their sibling manifest even when the directory has an arbitrary name such as `backup.zip/`; the ordinary single-file extension filter continues to apply to files.
+
+Schema v2 manifests may declare `legacy_xc` or `legacy_ns` and record the exact name of each member. Legacy names use one safe stem and an unpadded, zero-based `.xcN` or `.nsN` suffix, such as `game.xc0` or `game.ns0`. The resolver accepts indexes through 99; the NSCB producer limits legacy output to ten members. The manifest must sit beside the Split directory and have an active host-local receipt. Selecting a declared member or the directory resolves the same logical input.
 
 The unsigned manifest declares the source length and SHA-256, the ordered member names, and each member's length and SHA-256. The manifest is a consistency declaration, not a trust anchor. Resolution computes each member digest and the reconstructed whole-stream digest while streaming the opened files once. It also revalidates the opened handles, member identities and lengths, the directory identity, the exact manifest bytes, and the receipt after hashing. Missing, replaced, mutated, aliased, symlinked, special, or competing members fail closed.
 
@@ -136,9 +138,9 @@ The resolver only looks up receipts. It never issues, refreshes, or revives trus
 
 Revocation is explicit and durable. A stale issuance that began before a revocation cannot overwrite the revocation; the store rejects it as stale evidence. Re-establishing trust after revocation requires a fresh authorized source-backed operation that revalidates the original source and resulting parts. Issue #6 contains only a test-only fixture issuer for this seam. It does not contain the production source-to-Split writer, which remains Issue #14 scope.
 
-Legacy `.xcN` and `.nsN` layouts, manifest-free numbered directories, and unrecognized numbered names remain fail-closed. They are never returned as successful standalone inputs.
+Legacy members are accepted only when a schema-v2 manifest declares their layout and exact names and an active receipt binds the manifest bytes. Legacy-looking files without that manifest and receipt fail closed; they are not treated as standalone inputs.
 
-To keep that boundary conservative, numeric-only filenames, numeric extensions such as `notes.2024`, and numbered suffixes before a recognized content extension such as `Game.1.nsp` are treated as suspected Split-like names. Inside a canonical directory they cause incompleteness instead of being silently ignored.
+Numeric-only filenames, numeric extensions such as `notes.2024`, and numbered suffixes before a recognized content extension such as `Game.1.nsp` are treated as possible Split members. In a candidate Split directory, those names cause resolution to fail closed instead of being ignored.
 
 ## Local trust store and state directory
 

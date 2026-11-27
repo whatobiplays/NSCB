@@ -63,7 +63,7 @@ pub(crate) struct VerifiedSplitDirectory {
 pub(crate) enum SplitInventoryPolicy {
     /// Preserve resolver behavior for unrelated files and metadata.
     AllowUnrelatedEntries,
-    /// Require every entry to be a canonical numbered member.
+    /// Require every entry to be declared as a member in the manifest.
     RequireExactMembers,
 }
 
@@ -83,6 +83,7 @@ pub(crate) fn qualify_directory(
     context: &mut SplitResolutionContext<'_>,
 ) -> Result<QualifiedSplit, InputResolutionError> {
     let candidate = read_manifest_candidate(directory, context)?;
+    let manifest_schema_version = candidate.manifest.schema_version;
     require_receipt(
         &candidate.manifest_sha256,
         candidate.source,
@@ -105,7 +106,7 @@ pub(crate) fn qualify_directory(
         manifest_sha256,
         qualification: SplitQualification {
             kind: SplitQualificationKind::LocalSplitReceipt,
-            manifest_schema_version: 1,
+            manifest_schema_version: u16::from(manifest_schema_version),
             original_size_bytes: verified.source_size,
             original_sha256: verified.source_sha256,
         },
@@ -190,15 +191,19 @@ fn verify_manifest_candidate(
         manifest,
         source: _,
     } = candidate;
-    let expected_count = manifest.segments.len();
-    let entries = read_split_members(&directory, expected_count, context, inventory_policy)?;
+    let expected_names = manifest
+        .segments
+        .iter()
+        .map(|segment| segment.name.clone())
+        .collect::<Vec<_>>();
+    let entries = read_split_members(&directory, &expected_names, context, inventory_policy)?;
 
     if let Some(control) = context.control {
         control.begin_split_input(context.input_index, manifest.source_size);
         control.check_cancelled()?;
     }
 
-    let mut opened = Vec::with_capacity(expected_count);
+    let mut opened = Vec::with_capacity(expected_names.len());
     for (segment, member) in manifest.segments.iter().zip(entries.iter()) {
         let Some((path, size)) = member else {
             return Err(error(InputResolutionErrorCode::SplitSetIncomplete));
@@ -273,7 +278,7 @@ fn verify_manifest_candidate(
         }
     }
     let rechecked_entries =
-        read_split_members(&directory, expected_count, context, inventory_policy)?;
+        read_split_members(&directory, &expected_names, context, inventory_policy)?;
     if rechecked_entries != entries {
         return Err(error(InputResolutionErrorCode::SplitInputChanged));
     }
@@ -361,12 +366,12 @@ pub(crate) fn canonical_member_index(name: &OsStr) -> Option<u8> {
 
 fn read_split_members(
     directory: &Path,
-    expected_count: usize,
+    expected_names: &[String],
     context: &mut SplitResolutionContext<'_>,
     inventory_policy: SplitInventoryPolicy,
 ) -> Result<Vec<Option<(PathBuf, u64)>>, InputResolutionError> {
     let entries = read_directory(directory, context.visited_entries)?;
-    let mut members: Vec<Option<(PathBuf, u64)>> = vec![None; expected_count];
+    let mut members: Vec<Option<(PathBuf, u64)>> = vec![None; expected_names.len()];
     for (position, entry) in entries.into_iter().enumerate() {
         if position % 1024 == 0
             && let Some(control) = context.control
@@ -375,9 +380,11 @@ fn read_split_members(
         }
         let name = entry.file_name();
         let path = directory.join(&name);
-        if let Some(index) = canonical_member_index(&name) {
-            let index = usize::from(index);
-            if index >= expected_count || members[index].is_some() {
+        if let Some(index) = expected_names
+            .iter()
+            .position(|expected| name == OsStr::new(expected))
+        {
+            if members[index].is_some() {
                 return Err(error(InputResolutionErrorCode::SplitSetIncomplete));
             }
             let file_type = entry

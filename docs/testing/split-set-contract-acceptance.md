@@ -15,7 +15,7 @@ Each fixture record must separately state (1) fixture producer's ground truth; (
 | Complete 3-part canonical set; matching issued receipt and both digest levels | One `ResolvedInput` with ordered parts and typed local completeness evidence |
 | Select `00`, `01`, `02`, or root directory individually | Each selection resolves the identical logical set and sidecar |
 | Complete single part `00` with source-backed receipt | Qualified (even if underlying bytes are not recognized Nintendo Content) |
-| Directory expansion encounters qualified `backup.zip/` Split directory | Discover by canonical segment plus sibling-manifest evidence regardless of the ordinary single-file extension filter, preserving sorted order and duplicate checks |
+| Directory expansion encounters qualified `backup.zip/` Split directory | Discover by declared member plus sibling-manifest evidence regardless of the ordinary single-file extension filter, preserving sorted order and duplicate checks |
 | Original regular file without Split representation | Existing single-file behavior, no Split receipt required |
 | Missing terminal `02` while `00`, `01` remain contiguous | `split_set_incomplete` / mismatch; no successful input |
 | Missing first or middle part | `split_set_incomplete` |
@@ -35,7 +35,7 @@ Each fixture record must separately state (1) fixture producer's ground truth; (
 | Explicit directory symlink without traversal permission | Respect existing traversal rejection contract |
 | Two independent selections address the same set by member/root/alias | Existing `duplicate_selection` error; never process twice |
 | Duplicate manifest JSON keys, unknown required feature, wrong version or kind | Appropriate versioned typed failure; no guessing |
-| Segment name outside ASCII `00`-`99` or directory escape in manifest | Invalid manifest / unsupported competing layout |
+| Segment name outside the selected layout's grammar or directory escape in manifest | Invalid manifest / unsupported competing layout |
 | 101+ declared segments or cumulative-length overflow | Bounded input failure; no wraparound or partial success |
 | Zero-length source and single zero-length `00` | Only accepted after explicit canonical consumer interoperability qualification; else typed unsupported configuration |
 | Alternate smaller segment size | Allowed only for validated interoperable profile; otherwise rejected at planning |
@@ -59,7 +59,9 @@ Each fixture record must separately state (1) fixture producer's ground truth; (
 | Temporarily unmounted external volume | Does not revoke receipts or trigger deletion |
 | Resource ceiling reached during hashing/manifest parse | Bounded failure and sanitized diagnostics; no partial JSON success |
 | Non-UTF-8 path in CLI machine result | Preserve established `unrepresentable_path` behavior; Rust paths stay native |
-| Legacy `.xcN` / `.nsN` or ordinary numbered directory without trusted evidence | Continue fail-closed behavior (`unsupported_split_layout` or typed missing evidence as applicable) |
+| Schema-v2 `legacy_xc` manifest declares exact contiguous `.xcN` members and active receipt | Resolve a recognized, uncompressed XCI set identically by selecting a member or its Split directory |
+| Schema-v2 `legacy_ns` manifest declares exact contiguous `.nsN` members and active receipt | Resolve a recognized PFS0 set without NCZ members identically by selecting a member or its Split directory |
+| Legacy-looking member or ordinary numbered directory lacks a supported manifest and active receipt | Fail closed (`unsupported_split_layout` or the applicable typed missing-evidence error) |
 
 ## Correction-specific acceptance scenarios
 
@@ -124,7 +126,7 @@ Receipt cleanup acquires locks in this order: destination lock, private receipt-
 4. **Public compatibility:** Existing `resolve` CLI and JSON input list fixtures remain unchanged. Additive Rust/JSON fields are accepted by consumers; versioning and exit classes conform to ADRs 0023 and 0026. All error messages come from localized resources.
 5. **Supported host platforms:** Explicitly qualify macOS arm64, Linux x86_64/aarch64, and any additional supported platform in the repository's release matrix. Characterize FAT archive attribute handling separately from source-byte qualification.
 6. **Worktree governance:** All validation and review tools must bind the exact implementation worktree. Never fabricate or retrofit an old Delegation result; complete separate attestation as authorized.
-7. **Bundle paths:** The explicit destination is the outer bundle directory. Results expose that path and the inner canonical Split directory. Resolver tests pass the returned canonical directory and its numbered members directly; wrapper-directory discovery is not permitted.
+7. **Bundle paths:** The explicit destination is the outer bundle directory. Results expose that path and the inner Split directory. Resolver tests pass the returned directory and its manifest-declared members directly; wrapper-directory discovery is not permitted.
 8. **Already-up-to-date:** A destination qualifies only when its active receipt, exact planned source length and SHA-256, manifest, segment membership and lengths, and destination policy match. A different valid Split representation must conflict or follow the explicit skip policy.
 9. **Publication policy and destination coordination:** Qualify new-destination create primitives separately on every supported OS/filesystem. A request to replace an existing destination fails before staging or mutation. Test stable destination-scoped exclusion for cooperating NSCB writers on the same destination and concurrent progress for independent destinations; validate lock identity and parent route. Do not claim protection against uncoordinated external writers. Detected path displacement with unknown final state returns `PublicationUncertain`, retains recoverable artifacts, and does not attempt compensating rename.
 10. **Receipt uncertainty:** Exercise an issue call that reports an error after durable commit and a store whose follow-up lookup is unavailable. Reconcile durable receipt evidence before deciding transaction status. The current candidate serializes exact-manifest issuance with cleanup; only authoritative never-committed state can grant a lease. Unavailable, revoked, corrupt, historical, or uncertain state preserves output and recovery evidence. Recovery never issues trust. A committed receipt with a stale journal remains committed after recovery.
@@ -143,4 +145,16 @@ Qualify the inventory through the public `OperationResult` accessors. Cover succ
 - Issue #9 implements the governed Plan/execution/staged-output publication foundation needed by producer logic.
 - The canonical source-backed Split producer and durable local receipt are implemented through the existing APFS publication path. Existing-destination replacement remains unsupported until separately qualified.
 - FAT32 transfer, targeted archive-attribute finalization, and independent Horizon consumption remain separate obligations. The [canonical FAT32 qualification protocol](canonical-fat32-split-qualification.md) contains the PAC/TAC mapping and physical test procedure. Physical FAT32 and Horizon evidence remains `NOT RUN` until separately authorized and successfully completed.
-- Legacy `.xcN` and `.nsN` compatibility remains a separate future scope.
+- At the time this contract was written, legacy `.xcN` and `.nsN` compatibility remained separate from canonical qualification. Issue #14 Slice C covers that compatibility work.
+
+### Issue #14 Slice C execution record (2026-11-26)
+
+Implementation uses clean baseline `836b1388a1abc811f3b1589004c6733ea7e0f086` in worktree `/Users/daniel/.codex/worktrees/issue-14-legacy-split-layouts/NSCB`, branch `codex/issue-14-legacy-split-layouts`.
+
+Host regression coverage exercises both legacy writer layouts, schema-v2 member selection through the resolver, fail-closed behavior without a manifest, and recovery from interrupted publication and receipt commit. It also confirms that an unsupported nested NCA profile does not block LegacyXc when the complete XCI scan finds no NCZ member, while an XCI containing a valid NCZ member is rejected. The strict conversion inspector rejected the diagnostic fixture because changing its Program NCA byte left the enclosing HFS0 digest stale; this does not establish an NCZ detection failure. The focused `split_operation` suite and legacy-filtered `split_resolution` tests passed. The full resolver suite passed before the final direct-member regression was added. A combined run of both suites failed `sidecar_replacement_during_hashing_fails_closed`; an isolated rerun passed after 276 seconds. The cause of the combined-run failure is not established. These host tests do not qualify the external consumer or clear PAC-6.
+
+The task follows development-process release `2026.11.25`, revision `8e391636cb50f9bfe6e8def2d0f54eeb65d1d157`. The owner-dispatched qualification is [run 45612390118](https://github.com/danielbyon/development-process/actions/runs/45612390118), attempt 1, owner ID `327737`. The approved release context and bundle are artifacts `15020776261` and `15021765219`. The owner verified the release manifest, frozen context, and three provenance sidecars; their artifact and payload digests match the immutable release assets. This task needs no new pin or repeat qualification. NSC_BUILDER v0.99 is pinned separately at `92690c0137f520b6ee4d6c20b6f5abe8a3ce5738`.
+
+GPT Repo MCP does not currently enroll this worktree. Its read-only root listing showed the primary checkout at `/Users/daniel/Projects/NSCB`, and the current-work-session lookup found no session. Codex client connection settings and MCP server lifecycle remain unchanged. Work proceeds manually under owner approval. CodeGraph and TokenSave are initialized for this branch, and Serena is active in the worktree.
+
+PAC-6 remains a hard closeout gate. At pinned NSC_BUILDER v0.99 commit `92690c0137f520b6ee4d6c20b6f5abe8a3ce5738`, `py/ztools/squirrel.py --joinfile` is the consumer's byte-emitting path, and `JOINER.bat` invokes it. An isolated attempt used Python 3.10.22 on macOS 27.2 with a 9,499-byte synthetic source split into `synthetic.xc0` and `synthetic.xc1` at byte 1,731. The source SHA-256 was `b52469a9581c4d15f20420a015a763396a215f86b350a64296f933e8550fe36e`. The command exited 1 with `ModuleNotFoundError: No module named 'Crypto'`; it wrote no output, so there is no consumer digest to compare. No dependency was installed. The README specifies Windows, and the joiner also assumes Windows drive-path behavior. This attempt does not pass PAC-6. A pass requires bytes emitted by the actual v0.99 consumer with a digest matching the original source. Harness concatenation and reimplemented readers do not count. PAC-6 remains unproven and needs separate owner disposition before closeout.
