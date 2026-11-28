@@ -1,3 +1,3 @@
 NSCB Issue #14 Slice C PAC-6 qualification for PR #93.
 Pinned NSC_BUILDER v0.99: 92690c0137f520b6ee4d6c20b6f5abe8a3ce5738
-PAC-6 diagnostic retry after failed isolation preflight 46096089897.
+PAC-6 diagnostic follow-up after isolation preflight failure in run 46099779947.

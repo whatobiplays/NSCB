@@ -140,8 +140,16 @@ try {
     if ($probeExit -eq 0) {
         try {
             $diagnosticEnded = Get-Date
+            $successWfpEvents = @()
+            try {
+                $successWfpEvents = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5156; StartTime = $probeStarted; EndTime = $diagnosticEnded } -MaxEvents 256 -ErrorAction Stop)
+            } catch {
+                if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound,*') {
+                    throw
+                }
+            }
             $successEventRows = @(
-                foreach ($wfpEvent in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5156; StartTime = $probeStarted; EndTime = $diagnosticEnded } -MaxEvents 256 -ErrorAction Stop)) {
+                foreach ($wfpEvent in $successWfpEvents) {
                     $eventXml = [xml]$wfpEvent.ToXml()
                     $fields = @{}
                     foreach ($field in $eventXml.Event.EventData.Data) {
@@ -195,10 +203,23 @@ try {
         } catch {
             try {
                 $diagnosticErrorType = $_.Exception.GetType().FullName
+                $diagnosticCommand = [string]$_.InvocationInfo.MyCommand.Name
+                $allowedDiagnosticCommands = @('Get-WinEvent', 'Get-CimInstance', 'Get-NetFirewallProfile', 'ConvertTo-Json')
+                if ($diagnosticCommand -notin $allowedDiagnosticCommands) {
+                    $diagnosticCommand = 'Other'
+                }
+                $diagnosticErrorId = 'Other'
+                if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
+                    $diagnosticErrorId = 'NoMatchingEventsFound'
+                }
+                $diagnosticCategory = [string]$_.CategoryInfo.Category
                 $diagnosticFailure = [ordered]@{
                     probe_process_id = $probeProcessId
                     probe_exit_status = $probeExit
                     diagnostic_collection_error_type = $diagnosticErrorType
+                    diagnostic_collection_command = $diagnosticCommand
+                    diagnostic_collection_error_id = $diagnosticErrorId
+                    diagnostic_collection_category = $diagnosticCategory
                 } | ConvertTo-Json -Compress -Depth 4
                 Write-Output "PAC6_PREFLIGHT_DIAGNOSTIC=$diagnosticFailure"
             } catch {

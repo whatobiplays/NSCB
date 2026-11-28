@@ -198,7 +198,20 @@ class FixtureTests(unittest.TestCase):
             successful_probe_branch:failed_isolation
         ]
         self.assertIn("catch {", diagnostic_block)
+        self.assertIn("-ErrorAction Stop", diagnostic_block)
+        self.assertIn("NoMatchingEventsFound,", diagnostic_block)
+        self.assertIn(
+            "if ($_.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound,*') {\n"
+            "                    throw\n"
+            "                }",
+            diagnostic_block,
+        )
         self.assertIn("diagnostic_collection_error_type", diagnostic_block)
+        self.assertIn("diagnostic_collection_command", diagnostic_block)
+        self.assertIn("diagnostic_collection_error_id", diagnostic_block)
+        self.assertIn("$diagnosticCommand -notin $allowedDiagnosticCommands", diagnostic_block)
+        self.assertIn("$diagnosticErrorId = 'Other'", diagnostic_block)
+        self.assertNotIn("Exception.Message", diagnostic_block)
         self.assertNotIn("throw ", diagnostic_block)
         self.assertEqual(
             diagnostic_block.count("{") - diagnostic_block.count("}"),
