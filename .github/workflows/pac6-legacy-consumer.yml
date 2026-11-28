@@ -26,8 +26,11 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 30
     permissions: {}
+    outputs:
+      should_run: ${{ steps.fetch.outputs.should_run }}
     steps:
       - name: Fetch the exact task revision without repository credentials
+        id: fetch
         shell: pwsh
         env:
           PAC6_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -43,7 +46,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Unable to initialize the anonymous task checkout.' }
           git -c credential.helper= -c http.extraheader= -C $workspace remote add origin https://github.com/whatobiplays/NSCB.git
           if ($LASTEXITCODE -ne 0) { throw 'Unable to add the public task repository.' }
-          git -c credential.helper= -c http.extraheader= -C $workspace fetch --no-tags --depth=1 origin $env:PAC6_HEAD_SHA
+          git -c credential.helper= -c http.extraheader= -C $workspace fetch --no-tags --depth=2 origin $env:PAC6_HEAD_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch the exact task revision without credentials.' }
           git -c credential.helper= -c http.extraheader= -C $workspace checkout --detach --quiet FETCH_HEAD
           if ($LASTEXITCODE -ne 0) { throw 'Unable to check out the exact task revision.' }
@@ -51,14 +54,36 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $actualHead -ne $env:PAC6_HEAD_SHA) { throw 'The anonymous checkout differs from the pull request head.' }
           $gitConfig = Get-Content -LiteralPath (Join-Path $workspace '.git\config') -Raw
           if ($gitConfig -match '(?i)(extraheader|credential\s*=|https://[^\s/@]+@)') { throw 'Repository credentials were persisted in Git configuration.' }
+          # Compare to the first parent; other-parent diffs can resurface older PR changes.
+          $commitLines = @(git -C $workspace cat-file -p HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the latest task commit.' }
+          $parentLine = @($commitLines | Where-Object { $_ -match '^parent [0-9a-f]{40}$' } | Select-Object -First 1)
+          if ($parentLine.Count -ne 1) { throw 'Unable to identify the latest task commit parent.' }
+          $firstParent = ($parentLine[0] -split ' ')[1]
+          # Fetch the parent commit explicitly if the shallow fetch omitted it.
+          git -C $workspace cat-file -e "$firstParent^{commit}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git -c credential.helper= -c http.extraheader= -C $workspace fetch --no-tags --depth=1 origin $firstParent
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to fetch the latest task commit parent anonymously.' }
+            $fetchedParent = git -C $workspace rev-parse FETCH_HEAD
+            if ($LASTEXITCODE -ne 0 -or $fetchedParent -ne $firstParent) { throw 'The fetched parent differs from the latest task commit parent.' }
+          }
+          $changedFiles = @(git -C $workspace diff --name-only $firstParent HEAD)
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to inspect the latest task commit.' }
+          $shouldRun = $changedFiles -contains 'qualification/pac6/trigger.txt'
+          $shouldRunText = $shouldRun.ToString().ToLowerInvariant()
+          "should_run=$shouldRunText" | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          if (-not $shouldRun) { Write-Output 'Skipping PAC-6 because the latest commit did not update the qualification trigger.' }
 
       - name: Select the pinned CPython runtime
+        if: steps.fetch.outputs.should_run == 'true'
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: 3.12.10
           architecture: x64
 
       - name: Prepare the pinned consumer source and offline wheelhouse
+        if: steps.fetch.outputs.should_run == 'true'
         shell: pwsh
         env:
           PAC6_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -66,6 +91,7 @@ jobs:
         run: python qualification/pac6/prepare.py
 
       - name: Upload the reviewed qualification bundle
+        if: steps.fetch.outputs.should_run == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pac6-input-${{ github.run_id }}-${{ github.run_attempt }}
@@ -77,6 +103,7 @@ jobs:
   consume:
     needs: prepare
     if: >-
+      needs.prepare.outputs.should_run == 'true' &&
       github.event.pull_request.number == 93 &&
       github.event.pull_request.head.repo.full_name == 'whatobiplays/NSCB' &&
       github.event.pull_request.head.ref == 'codex/issue-14-legacy-split-layouts' &&
