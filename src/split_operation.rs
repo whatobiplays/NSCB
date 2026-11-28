@@ -7819,9 +7819,7 @@ fn journal_layout(record: &JournalRecord) -> Option<SplitLayout> {
         1 if record.layout.is_none() && record.segment_names.is_empty() => {
             Some(SplitLayout::Canonical)
         }
-        2 => record
-            .layout
-            .filter(|layout| *layout != SplitLayout::Canonical),
+        2 => record.layout,
         _ => None,
     }
 }
@@ -8809,7 +8807,7 @@ mod producer_tests {
         ));
         record.version = 2;
         record.layout = Some(SplitLayout::Canonical);
-        assert!(!super::journal_segment_names_are_valid(
+        assert!(super::journal_segment_names_are_valid(
             &record,
             OsStr::new("game.nsp")
         ));
