@@ -76,18 +76,20 @@ $auditRows = @($auditQuery | ConvertFrom-Csv)
 if ($auditRows.Count -ne 1) {
     throw 'The Filtering Platform Connection audit policy could not be identified.'
 }
-$priorFailureAudit = [string]$auditRows[0].'Inclusion Setting' -match '(?i)failure'
+$priorAuditSetting = [string]$auditRows[0].'Inclusion Setting'
+$priorFailureAudit = $priorAuditSetting -match '(?i)failure'
+$priorSuccessAudit = $priorAuditSetting -match '(?i)success'
 $auditChanged = $false
 $probeExit = $null
 $probeProcessId = $null
 $verification = $null
 
 try {
-    if (-not $priorFailureAudit) {
+    if (-not $priorFailureAudit -or -not $priorSuccessAudit) {
         $auditChanged = $true
-        & auditpol.exe /set /subcategory:$auditSubcategory /failure:enable | Out-Null
+        & auditpol.exe /set /subcategory:$auditSubcategory /success:enable /failure:enable | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            throw 'Unable to enable Filtering Platform Connection failure auditing.'
+            throw 'Unable to enable Filtering Platform Connection auditing.'
         }
     }
 
@@ -96,8 +98,13 @@ try {
         throw 'Unable to verify the Filtering Platform Connection audit policy.'
     }
     $activeAuditRows = @($activeAuditQuery | ConvertFrom-Csv)
-    if ($activeAuditRows.Count -ne 1 -or [string]$activeAuditRows[0].'Inclusion Setting' -notmatch '(?i)failure') {
-        throw 'Filtering Platform Connection failure auditing is not enabled.'
+    $activeAuditSetting = if ($activeAuditRows.Count -eq 1) {
+        [string]$activeAuditRows[0].'Inclusion Setting'
+    } else {
+        ''
+    }
+    if ($activeAuditSetting -notmatch '(?i)failure' -or $activeAuditSetting -notmatch '(?i)success') {
+        throw 'Filtering Platform Connection success and failure auditing are not enabled.'
     }
 
     New-NetFirewallRule `
@@ -124,23 +131,91 @@ try {
     $probeStarted = Get-Date
     $probeOutput = @(& $pythonPath -E -s -c $probeCode 2>$null)
     $probeExit = $LASTEXITCODE
-    if ($probeExit -eq 0) {
-        throw 'The Python network probe succeeded after the firewall rule was installed.'
-    }
     $probePidText = [string]($probeOutput | Select-Object -First 1)
     $parsedProcessId = 0
     if (-not [int]::TryParse($probePidText, [ref]$parsedProcessId)) {
         throw 'The Python network probe did not report its process ID.'
     }
     $probeProcessId = $parsedProcessId
+    if ($probeExit -eq 0) {
+        try {
+            $diagnosticEnded = Get-Date
+            $successEventRows = @(
+                foreach ($wfpEvent in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5156; StartTime = $probeStarted; EndTime = $diagnosticEnded } -MaxEvents 256 -ErrorAction Stop)) {
+                    $eventXml = [xml]$wfpEvent.ToXml()
+                    $fields = @{}
+                    foreach ($field in $eventXml.Event.EventData.Data) {
+                        $fields[[string]$field.Name] = [string]$field.InnerText
+                    }
+                    if ($fields['ProcessID'] -eq [string]$probeProcessId -and
+                        $fields['DestAddress'] -eq $probeHost -and
+                        $fields['DestPort'] -eq [string]$probePort) {
+                        [ordered]@{
+                            event_id = $wfpEvent.Id
+                            process_id = $fields['ProcessID']
+                            application = $fields['Application']
+                            source_address = $fields['SourceAddress']
+                            source_port = $fields['SourcePort']
+                            destination_address = $fields['DestAddress']
+                            destination_port = $fields['DestPort']
+                            protocol = $fields['Protocol']
+                            filter_runtime_id = $fields['FilterRTID']
+                            filter_origin = $fields['FilterOrigin']
+                            time_created_utc = $wfpEvent.TimeCreated.ToUniversalTime().ToString('o')
+                        }
+                    }
+                }
+            )
+            $diagnostic = [ordered]@{
+                windows = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber
+                python_path = $pythonPath
+                python_nt_path = $pythonNtPath
+                firewall_rule = [ordered]@{
+                    name = $rule.Name
+                    enabled = $rule.Enabled
+                    direction = $rule.Direction
+                    action = $rule.Action
+                    profile = $rule.Profile
+                    policy_store_source = $rule.PolicyStoreSource
+                    policy_store_source_type = $rule.PolicyStoreSourceType
+                    primary_status = $rule.PrimaryStatus
+                    application_program = $application.Program
+                }
+                active_firewall_profiles = @(
+                    Get-NetFirewallProfile -PolicyStore ActiveStore |
+                        Select-Object Name, Enabled, DefaultOutboundAction, AllowLocalFirewallRules
+                )
+                probe_process_id = $probeProcessId
+                probe_exit_status = $probeExit
+                matching_success_events = $successEventRows
+                audit_policy_before = $priorAuditSetting
+                audit_policy_during_probe = $activeAuditSetting
+            }
+            Write-Output "PAC6_PREFLIGHT_DIAGNOSTIC=$($diagnostic | ConvertTo-Json -Compress -Depth 6)"
+        } catch {
+            try {
+                $diagnosticErrorType = $_.Exception.GetType().FullName
+                $diagnosticFailure = [ordered]@{
+                    probe_process_id = $probeProcessId
+                    probe_exit_status = $probeExit
+                    diagnostic_collection_error_type = $diagnosticErrorType
+                } | ConvertTo-Json -Compress -Depth 4
+                Write-Output "PAC6_PREFLIGHT_DIAGNOSTIC=$diagnosticFailure"
+            } catch {
+                # Diagnostics are best-effort; the explicit isolation failure below remains authoritative.
+            }
+        }
+        throw 'The Python network probe succeeded after the firewall rule was installed.'
+    }
 
     $eventRows = @()
     $eventDeadline = [DateTime]::UtcNow.AddSeconds(5)
     $eventFile = Join-Path $env:RUNNER_TEMP 'pac6-wfp-events.json'
     $verifierPath = Join-Path $PSScriptRoot 'wfp_audit.py'
     do {
+        $verificationEnded = Get-Date
         $eventRows = @(
-            foreach ($wfpEvent in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $probeStarted } -ErrorAction SilentlyContinue)) {
+            foreach ($wfpEvent in @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 5157; StartTime = $probeStarted; EndTime = $verificationEnded } -MaxEvents 256 -ErrorAction SilentlyContinue)) {
                 $eventXml = [xml]$wfpEvent.ToXml()
                 $fields = @{}
                 foreach ($field in $eventXml.Event.EventData.Data) {
@@ -181,9 +256,26 @@ try {
 } finally {
     if ($auditChanged) {
         $restoreFailureAudit = if ($priorFailureAudit) { 'enable' } else { 'disable' }
-        & auditpol.exe /set /subcategory:$auditSubcategory "/failure:$restoreFailureAudit" | Out-Null
+        $restoreSuccessAudit = if ($priorSuccessAudit) { 'enable' } else { 'disable' }
+        & auditpol.exe /set /subcategory:$auditSubcategory "/success:$restoreSuccessAudit" "/failure:$restoreFailureAudit" | Out-Null
         if ($LASTEXITCODE -ne 0) {
             throw 'Unable to restore the prior Filtering Platform Connection audit policy.'
+        }
+        $restoredAuditQuery = & auditpol.exe /get /subcategory:$auditSubcategory /r
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to verify restoration of the Filtering Platform Connection audit policy.'
+        }
+        $restoredAuditRows = @($restoredAuditQuery | ConvertFrom-Csv)
+        $restoredAuditSetting = if ($restoredAuditRows.Count -eq 1) {
+            [string]$restoredAuditRows[0].'Inclusion Setting'
+        } else {
+            ''
+        }
+        if (
+            ($restoredAuditSetting -match '(?i)success') -ne $priorSuccessAudit -or
+            ($restoredAuditSetting -match '(?i)failure') -ne $priorFailureAudit
+        ) {
+            throw 'The Filtering Platform Connection audit policy was not restored to its prior state.'
         }
     }
 }
@@ -200,6 +292,7 @@ $evidence = [ordered]@{
     baseline_network_probe_exit_status = $baselineProbeExit
     audit_subcategory = $auditSubcategory
     failure_auditing_previously_enabled = $priorFailureAudit
+    success_auditing_previously_enabled = $priorSuccessAudit
     probe_process_id = $probeProcessId
     probe_address = $probeHost
     probe_port = $probePort

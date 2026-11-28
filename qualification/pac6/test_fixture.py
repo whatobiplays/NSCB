@@ -164,6 +164,11 @@ class FixtureTests(unittest.TestCase):
         self.assertIn("wfp_audit.py", script)
         self.assertIn("filter_origin = $fields['FilterOrigin']", script)
         self.assertIn("--firewall-rule-name $ruleName", script)
+        verification_query_start = script.index("$eventRows = @()")
+        verification_query_end = script.index("} while", verification_query_start)
+        verification_query = script[verification_query_start:verification_query_end]
+        self.assertIn("EndTime = $verificationEnded", verification_query)
+        self.assertIn("-MaxEvents 256", verification_query)
         verification_gate = script.index(
             "if ($null -eq $verification -or -not $verification.matched)"
         )
@@ -173,6 +178,44 @@ class FixtureTests(unittest.TestCase):
         verified_marker = script.index("PAC6_ISOLATION_VERIFIED=1")
         self.assertLess(verification_gate, failure_throw)
         self.assertLess(failure_throw, verified_marker)
+
+    def test_successful_probe_emits_wfp_diagnostics_before_failing_closed(self):
+        script = Path(__file__).with_name("block-python-egress.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/success:enable", script)
+        self.assertIn("Id = 5156", script)
+        self.assertIn("EndTime = $diagnosticEnded", script)
+        self.assertIn("-MaxEvents 256", script)
+        self.assertIn("diagnostic_collection_error_type", script)
+        diagnostic = script.index("PAC6_PREFLIGHT_DIAGNOSTIC=")
+        successful_probe_branch = script.index("if ($probeExit -eq 0) {")
+        failed_isolation = script.index(
+            "throw 'The Python network probe succeeded after the firewall rule was installed.'"
+        )
+        self.assertLess(diagnostic, failed_isolation)
+        diagnostic_block = script[
+            successful_probe_branch:failed_isolation
+        ]
+        self.assertIn("catch {", diagnostic_block)
+        self.assertIn("diagnostic_collection_error_type", diagnostic_block)
+        self.assertNotIn("throw ", diagnostic_block)
+        self.assertEqual(
+            diagnostic_block.count("{") - diagnostic_block.count("}"),
+            1,
+        )
+        verifier = script.index("$eventRows = @()", failed_isolation)
+        verified_marker = script.index("PAC6_ISOLATION_VERIFIED=1")
+        self.assertLess(failed_isolation, verifier)
+        self.assertLess(failed_isolation, verified_marker)
+        self.assertIn(
+            "        }\n"
+            "        throw 'The Python network probe succeeded after the firewall rule was installed.'\n"
+            "    }\n\n"
+            "    $eventRows = @()",
+            script,
+        )
+        self.assertIn("restoreSuccessAudit", script)
 
     def test_matrix_runner_reuses_verified_evidence_instead_of_reprobing(self):
         source = Path(__file__).with_name("run_matrix.py").read_text(
