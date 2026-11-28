@@ -1,4 +1,4 @@
-//! Canonical Split directory qualification.
+//! Split directory qualification.
 //!
 //! A directory is only accepted as a Split input after the adjacent manifest,
 //! a host-owned receipt, every physical member, both digest levels, and a final
@@ -13,7 +13,7 @@ use crate::input_resolution::{
     SplitQualificationKind, looks_like_split_segment, read_directory,
 };
 use crate::sha256::Sha256Digest;
-use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, SplitManifest, parse_manifest};
+use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, SplitLayout, SplitManifest, parse_manifest};
 use crate::split_reader::{SegmentOpenError, open_segment_file, revalidate_segment};
 use crate::split_trust::{SourceEvidence, SplitTrustStore, trust_store_error};
 use sha2::{Digest as _, Sha256};
@@ -53,6 +53,8 @@ pub(crate) struct QualifiedSplit {
 pub(crate) struct VerifiedSplitDirectory {
     pub(crate) directory: PathBuf,
     pub(crate) identity: FileIdentity,
+    /// Layout declared by the validated manifest.
+    pub(crate) layout: SplitLayout,
     pub(crate) source_size: u64,
     pub(crate) source_sha256: Sha256Digest,
     pub(crate) segments: Vec<QualifiedSegment>,
@@ -63,7 +65,7 @@ pub(crate) struct VerifiedSplitDirectory {
 pub(crate) enum SplitInventoryPolicy {
     /// Preserve resolver behavior for unrelated files and metadata.
     AllowUnrelatedEntries,
-    /// Require every entry to be a canonical numbered member.
+    /// Require every entry to be declared as a member in the manifest.
     RequireExactMembers,
 }
 
@@ -77,12 +79,13 @@ struct SplitManifestCandidate {
     source: SourceEvidence,
 }
 
-/// Qualifies the canonical Split directory at `directory`.
+/// Qualifies the Split directory at `directory`.
 pub(crate) fn qualify_directory(
     directory: &Path,
     context: &mut SplitResolutionContext<'_>,
 ) -> Result<QualifiedSplit, InputResolutionError> {
     let candidate = read_manifest_candidate(directory, context)?;
+    let manifest_schema_version = candidate.manifest.schema_version;
     require_receipt(
         &candidate.manifest_sha256,
         candidate.source,
@@ -105,7 +108,7 @@ pub(crate) fn qualify_directory(
         manifest_sha256,
         qualification: SplitQualification {
             kind: SplitQualificationKind::LocalSplitReceipt,
-            manifest_schema_version: 1,
+            manifest_schema_version: u16::from(manifest_schema_version),
             original_size_bytes: verified.source_size,
             original_sha256: verified.source_sha256,
         },
@@ -190,15 +193,37 @@ fn verify_manifest_candidate(
         manifest,
         source: _,
     } = candidate;
-    let expected_count = manifest.segments.len();
-    let entries = read_split_members(&directory, expected_count, context, inventory_policy)?;
+    let layout = manifest.layout;
+    // Version 2 legacy member stems must match the inner directory basename's file stem.
+    // Check this relationship before opening any members.
+    if manifest.schema_version == 2 && !layout.is_canonical() {
+        let directory_stem = directory
+            .file_name()
+            .and_then(|basename| Path::new(basename).file_stem())
+            .ok_or_else(|| error(InputResolutionErrorCode::SplitManifestInvalid))?;
+        let member_stem = manifest
+            .segments
+            .first()
+            .and_then(|segment| Path::new(&segment.name).file_stem())
+            .ok_or_else(|| error(InputResolutionErrorCode::SplitManifestInvalid))?;
+        if directory_stem != member_stem {
+            return Err(error(InputResolutionErrorCode::SplitManifestInvalid));
+        }
+    }
+
+    let expected_names = manifest
+        .segments
+        .iter()
+        .map(|segment| segment.name.clone())
+        .collect::<Vec<_>>();
+    let entries = read_split_members(&directory, &expected_names, context, inventory_policy)?;
 
     if let Some(control) = context.control {
         control.begin_split_input(context.input_index, manifest.source_size);
         control.check_cancelled()?;
     }
 
-    let mut opened = Vec::with_capacity(expected_count);
+    let mut opened = Vec::with_capacity(expected_names.len());
     for (segment, member) in manifest.segments.iter().zip(entries.iter()) {
         let Some((path, size)) = member else {
             return Err(error(InputResolutionErrorCode::SplitSetIncomplete));
@@ -273,7 +298,7 @@ fn verify_manifest_candidate(
         }
     }
     let rechecked_entries =
-        read_split_members(&directory, expected_count, context, inventory_policy)?;
+        read_split_members(&directory, &expected_names, context, inventory_policy)?;
     if rechecked_entries != entries {
         return Err(error(InputResolutionErrorCode::SplitInputChanged));
     }
@@ -294,6 +319,7 @@ fn verify_manifest_candidate(
     Ok(VerifiedSplitDirectory {
         directory,
         identity: directory_identity,
+        layout,
         source_size: manifest.source_size,
         source_sha256: manifest.source_sha256,
         segments: opened
@@ -361,12 +387,12 @@ pub(crate) fn canonical_member_index(name: &OsStr) -> Option<u8> {
 
 fn read_split_members(
     directory: &Path,
-    expected_count: usize,
+    expected_names: &[String],
     context: &mut SplitResolutionContext<'_>,
     inventory_policy: SplitInventoryPolicy,
 ) -> Result<Vec<Option<(PathBuf, u64)>>, InputResolutionError> {
     let entries = read_directory(directory, context.visited_entries)?;
-    let mut members: Vec<Option<(PathBuf, u64)>> = vec![None; expected_count];
+    let mut members: Vec<Option<(PathBuf, u64)>> = vec![None; expected_names.len()];
     for (position, entry) in entries.into_iter().enumerate() {
         if position % 1024 == 0
             && let Some(control) = context.control
@@ -375,9 +401,11 @@ fn read_split_members(
         }
         let name = entry.file_name();
         let path = directory.join(&name);
-        if let Some(index) = canonical_member_index(&name) {
-            let index = usize::from(index);
-            if index >= expected_count || members[index].is_some() {
+        if let Some(index) = expected_names
+            .iter()
+            .position(|expected| name == OsStr::new(expected))
+        {
+            if members[index].is_some() {
                 return Err(error(InputResolutionErrorCode::SplitSetIncomplete));
             }
             let file_type = entry

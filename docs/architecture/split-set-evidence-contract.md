@@ -1,12 +1,12 @@
 # Split-set evidence contract (accepted v1 architecture)
 
-**Status:** Accepted architecture under ADR 0028. Issue #6 implements read-only canonical resolution, the local receipt lookup contract, and a test-only source-backed issuance seam. Issue #14 adds a source-backed producer and user-facing command. Native tests exercise local APFS directory publication; other OS/filesystem combinations, FAT32 archive attributes, canonical-consumer interoperability, and legacy layouts remain unqualified. The wire protocol is not released.
+**Status:** Accepted architecture under ADR 0028. Issue #6 implements read-only Split resolution, the local receipt lookup contract, and a test-only source-backed issuance seam. Issue #14 adds a source-backed producer and user-facing command. Slice C adds host support for schema-v2 `.xcN` and `.nsN` layouts. Native tests exercise local APFS publication and resolution; other OS/filesystem combinations, FAT32 archive attributes, and external consumer interoperability remain unqualified. PAC-6 has not passed because the required pinned NSC_BUILDER output bytes and matching source digest are not available. The wire protocol is not released.
 
 **Authority:** Accepted ADR 0028, interpreted with ADRs 0007, 0008, 0010, 0011, 0013, 0022, 0023, 0025, 0026, and 0027.
 
 **Origin:** Decisions 1-46 from the NSCB Split-set contract review.
 
-**Scope:** Canonical FAT32-style numbered directory and local, source-backed evidence; no keys, Nintendo certificates, title interpretation, or third-party content authenticity claims.
+**Scope:** Canonical v1 and legacy v2 Split layouts with local, source-backed evidence; no keys, Nintendo certificates, title interpretation, or third-party content authenticity claims.
 
 ## 1. Vocabulary and proof claims
 
@@ -17,7 +17,7 @@
 - **Split-set completeness evidence:** An expectation of the exact original byte length and SHA-256 recorded from an observed single-file source *independently of the surviving output segments* during an authorized NSCB Split operation.
 - **Manifest:** A versioned, unsigned sidecar declaring expected logical bytes and each ordered segment. It supplies consistency data, not independent trust.
 - **Local trust receipt:** Host-retained, durable evidence binding the precise manifest bytes to the source evidence established during a completed, source-backed Split operation. This is local application trust within an accidental-corruption model, not cryptographic proof of origin.
-- **Qualified Split set:** A recognized canonical layout whose complete segment sequence, sizes, SHA-256 hashes, whole-stream SHA-256, manifest, and unrevoked local trust receipt all agree at resolution time.
+- **Qualified Split set:** A recognized layout whose complete segment sequence, sizes, SHA-256 hashes, whole-stream SHA-256, manifest, and unrevoked local trust receipt all agree at resolution time.
 
 A qualified Split set **does not** imply that the source was Nintendo Switch Content, that its source was genuine or complete relative to any upstream producer, or that Content Verification has passed. In particular, a source file which was already truncated before NSCB observed it can be reproduced exactly without establishing historical upstream completeness.
 
@@ -41,12 +41,18 @@ Game.nsp/
 - The numbered members are exactly the ASCII two-character basenames `00`, `01`, ..., at most `99`, with a contiguous zero-based sequence. One member `00` is permitted.
 - Numeric entries outside the declared contiguous sequence (including `03`) and other recognizable competing Split members must cause an ambiguity/incomplete-set error, even when declared members validate. Unrelated files such as `.DS_Store` may be ignored; no broad deletion or interpretation of unrelated data is allowed.
 - Segments are physical regular files, with unique filesystem identities where the platform can establish them; segment symlinks, reparse-point aliases, duplicate hardlinks, devices, FIFOs, and other special files are not permitted. The source path may be a regular file selected through the existing explicit-file policy.
-- Selecting the directory or any recognized numbered member discovers the adjacent sidecar by deterministic sibling derivation (`<directory-name>.nscb-split.json`). No directory-wide sidecar scanning, implicit network lookup, or heuristic fallback.
-- A producer request names the **outer bundle directory**. The bundle contains an inner canonical Split directory named after the selected source and a sibling manifest inside the bundle: `<bundle>/<source-name>/00...` and `<bundle>/<source-name>.nscb-split.json`. Typed and JSON results return both the outer bundle path and inner canonical directory path. Resolution accepts the returned canonical directory or a numbered member; it does not discover or unwrap a parent bundle.
+- Selecting the directory or a manifest-declared member discovers the adjacent sidecar by deterministic sibling derivation (`<directory-name>.nscb-split.json`). No directory-wide sidecar scanning, implicit network lookup, or heuristic fallback.
+- A producer request names the **outer bundle directory**. The bundle contains an inner Split directory named after the selected source and a sibling manifest inside the bundle: `<bundle>/<source-name>/<members>` and `<bundle>/<source-name>.nscb-split.json`. Typed and JSON results return both the outer bundle path and inner directory path. Resolution accepts the returned Split directory or a declared member; it does not discover or unwrap a parent bundle.
 - An explicitly selected symlink to the *directory* may be resolved only under the current directory-root symlink policy. Sidecar discovery uses the canonical/real directory's parent, not the alias parent. Individual numbered member symlinks remain rejected.
 - On compatible FAT32 hosts, the archive/ConcatenationFile attribute is a representation/interoperability concern, not the proof of completeness. Attribute loss on another filesystem must not be mistaken for manifest or receipt evidence; exported Switch-facing layout compatibility needs separate qualification.
 - Relative manifest member identifiers are limited to validated segment basenames, not directory paths. Any path separator, drive prefix, `.`/`..`, Unicode-lookalike number, non-ASCII numeric form, absolute path, duplicate key, or duplicate normalized identity is invalid.
-- Directory expansion collapses the complete set into one logical input at its sorted discovery position. Qualified canonical Split directory candidates may have arbitrary source basenames (for example `backup.zip/`) and must be eligible for bounded discovery independently of the existing *single-file* Nintendo Content extension filter, using precise canonical-segment and sibling-manifest evidence rather than arbitrary recursive directory probing. Independent overlapping selections are duplicate logical identities and fail under the existing resolution rules, preserving explicit argument/list order and prior path normalization.
+- Directory expansion collapses the complete set into one logical input at its sorted discovery position. Qualified Split directory candidates may have arbitrary source basenames (for example `backup.zip/`) and must be eligible for bounded discovery independently of the existing *single-file* Nintendo Content extension filter, using manifest and member evidence rather than arbitrary recursive directory probing. Independent overlapping selections are duplicate logical identities and fail under the existing resolution rules, preserving explicit argument/list order and prior path normalization.
+
+### Schema-v2 legacy layouts
+
+A schema-v2 manifest adds a required `layout` value of `legacy_xc` or `legacy_ns` and records the exact name of every segment. Legacy members use one safe stem with unpadded, zero-based `.xcN` or `.nsN` suffixes. That stem must equal `Path::file_stem` of the inner Split directory basename: `game.backup.xci/` contains members such as `game.backup.xc0`. The full basename, including its extension, names the inner directory and adjacent sidecar. Moving the outer bundle intact preserves this relationship and the same-host receipt. Renaming the inner directory also preserves the relationship when its stem stays the same, including a change to only the final extension. A rename that changes the stem requires matching member names and a new manifest receipt. Canonical v1 member names remain independent of the directory basename, so the existing canonical rename behavior is unchanged. Legacy indexes are contiguous; the resolver accepts at most 100 members, while the producer limits legacy output to ten.
+
+The `.xcN` producer requires recognized XCI framing and a complete scan with no NCZ member. A valid NCZ representation or malformed NCZ structure rejects the source. Unsupported nested NCA profiles do not block byte-preserving splitting because the producer does not transform or interpret those members. The `.nsN` producer accepts recognized PFS0 packages without NCZ members. Content recognition determines which layout is allowed; the source extension contributes only to the member names. Resolution requires the adjacent manifest and an active receipt for its exact bytes. A member selection and a directory selection resolve to the same logical input.
 
 ### FAT32 transfer and archive-attribute finalization
 
@@ -84,13 +90,15 @@ Values above are schematic placeholders, **not** a valid manifest fixture. Exact
 
 Contract rules:
 
-1. Required keys: `schema_version`, `kind`, `required_features`, `source`, `segments`. The nested fields above are required. `segments` has 1-100 entries and must describe exactly `00` through `count-1`. Every entry's filename is immutable within the manifest. Unknown optional extension keys may be ignored; unknown *required* features and unsupported versions fail closed.
+1. Schema v1 requires `schema_version`, `kind`, `required_features`, `source`, and `segments`, with the nested fields above. It has 1-100 entries named exactly `00` through `count-1`. Every entry's filename is immutable within the manifest. Unknown optional extension keys may be ignored; unknown *required* features and unsupported versions fail closed.
 2. Top-level and nested duplicate JSON keys, floats for sizes, negative values, Unicode-normalization tricks, invalid SHA-256 spelling, malformed UTF-8, and unsafe paths fail. No semantically ambiguous duplicate fields are tolerated.
 3. Bound manifest size to **256 KiB**, with bounded JSON nesting/collections and work limits; the exact implementation also observes the request's existing discovery budgets. Exceeding bounds is a typed limit failure, never success.
 4. Canonical v1 writer uses a deterministic default part size of `0xFFFF0000` (4,294,901,760) bytes, a value documented by upstream FAT32 concatenation implementations. Smaller requested sizes are supported only after explicit canonical-consumer interoperability qualification, and every selected size must obey the target FAT32 maximum and 100-part cap. Unsupported combinations fail during planning, never by producing a subtly noncanonical output.
 5. All nonfinal parts of a nonempty source use the chosen part size; the final part contains the remaining 1..part-size bytes. A zero-length source yields a single `00` of length 0 only if that exact representation passes the interoperability qualification; otherwise reject it explicitly as unsupported. Do not silently create zero-length terminal padding segments.
 6. No absolute paths, receipt identifiers, timestamps, original source filename, producing-host identity, or content recognition facts are required in the manifest. Optional descriptive fields may be added compatibly without becoming proof evidence. The manifest's **exact published UTF-8 bytes**, including optional fields and JSON formatting, are committed by the trust receipt; editing any byte invalidates that receipt, even when semantic data appears equivalent.
 7. The manifest is not a replacement for the versioned `nscb.input_list` schema. It cannot select operations, authorize writes, override policy, or serve as an executable Operation Plan.
+
+Schema v2 adds a required `layout` value and stores each member's exact name in its segment entry. The supported legacy values are `legacy_xc` and `legacy_ns`; names use one safe stem and contiguous, unpadded, zero-based `.xcN` or `.nsN` suffixes. The producer accepts at most ten legacy members. Canonical v1 manifests retain their existing fields and two-digit names. The resolver accepts both schemas and qualifies only the declared members whose bytes match the manifest and active receipt.
 
 ## 4. Local receipt and trust lifecycle
 
@@ -149,7 +157,7 @@ If journal initialization stops after creating `.journal.initializing` but befor
 
 ## 6. Resolution, execution, progress and cancellation
 
-- On `Engine::resolve_inputs`, first locate the canonical directory and sidecar, validate grammar/schema, retrieve an unrevoked receipt, enumerate expected segments, verify membership and unique physical identities, then stream all segment bytes once while calculating individual SHA-256 and the whole-file SHA-256. Check aggregate size and exact expected digest. Fail on cancellation, I/O error, mismatch, unexpected competing part or suspected source mutation.
+- On `Engine::resolve_inputs`, first locate the Split directory and sidecar, validate grammar/schema, retrieve an unrevoked receipt, enumerate the declared segments, verify membership and unique physical identities, then stream all segment bytes once while calculating individual SHA-256 and the whole-file SHA-256. Check aggregate size and exact expected digest. Fail on cancellation, I/O error, mismatch, unexpected competing part or suspected source mutation.
 - A successful response remains one logical input with ordered `segments`, original selection `provenance`, and an additive typed evidence description such as `qualification: { kind: "local_split_receipt", manifest_schema_version: 1, original_size_bytes: ..., original_sha256: ... }`. That metadata means **Split completeness evidence** only; it grants no Content Verification, authenticity, or executable Plan authorization.
 - Existing single regular files retain the existing success and output semantics, with no synthetic Split qualification requirement. Previously supported Rust builders/constructors and JSON version-1 fields remain compatible; additive fields may be introduced where the stable 1.x surface permits them.
 - Large hashing operations use bounded buffers, host-provided progress/cancellation, and aggregate request budgets; never concatenate a giant intermediate file simply to recognize segments. Progress conforms to ADR 0011's latest-value state and semantic events; `--json` produces exactly one versioned document on stdout with all progress on stderr or other explicitly separate channel.
@@ -162,7 +170,7 @@ All normal structured outputs obey ADR 0023's `schema_version`/`kind`; original 
 
 | Code | Meaning | Exit class |
 | --- | --- | --- |
-| `split_manifest_missing` | Canonical candidate lacks expected sidecar | 3 prerequisite/input |
+| `split_manifest_missing` | Split candidate lacks its expected sidecar | 3 prerequisite/input |
 | `split_evidence_untrusted` | Receipt missing, revoked, or not binding current exact manifest | 3 prerequisite/input |
 | `split_manifest_invalid` | Malformed/unsafe/inconsistent manifest | 3 prerequisite/input |
 | `split_manifest_version_unsupported` | Unsupported schema/version/required feature | 3 prerequisite/input (usage/configuration errors remain 2 where applicable) |
@@ -171,16 +179,16 @@ All normal structured outputs obey ADR 0023's `schema_version`/`kind`; original 
 | `split_input_changed` | Input mutation observed before or during validation/use | 3 prerequisite/input |
 | `split_state_unavailable` | Required host evidence store cannot be read or committed due to internal state failure | 7 internal failure |
 
-An output destination conflict uses existing class **4**, cancellation/interruption class **6**, and resource/internal errors existing class **7** where classified as internal. Incorrect invocation/configuration uses class **2**. Preserve established code `unsupported_split_layout` for unqualified legacy and unrecognized representations; do not repurpose it to mean a trusted canonical set with a missing sidecar. Normalize and sanitize messages via the existing host localization boundary.
+An output destination conflict uses existing class **4**, cancellation/interruption class **6**, and resource/internal errors existing class **7** where classified as internal. Incorrect invocation/configuration uses class **2**. Preserve established code `unsupported_split_layout` for unmanifested legacy candidates and unrecognized layouts; do not repurpose it to mean a trusted Split set with a missing sidecar. Normalize and sanitize messages via the existing host localization boundary.
 
 ## 8. Implementation sequencing and migration
 
 - **Issue #6:** Land additive source-evidence model, receipt interface, manifest parser, qualified canonical resolver, virtual-reader qualification, CLI/Rust error and JSON shape, and synthetic tests backed by trusted fixtures *derived from original unsplit test sources*. Test fixtures are not a production API for certifying imported parts. Do not require Issue #14's user-facing writer to implement or test the resolver.
 - **Issue #9:** Reuse the evidence/publication seam inside immutable Plans, staged publication, and host-managed progress/cancellation/recovery.
-- **Issue #14:** The canonical source-backed Split producer, local receipt issuance, APFS bundle publication, and conflict policy are implemented. FAT32 transfer, archive-attribute finalization, and independent Horizon consumption are separate obligations; host checks do not establish physical interoperability. Legacy `.xcN` and `.nsN` layouts remain unqualified and reserved for a separate scope.
+- **Issue #14:** The source-backed producer supports canonical v1 and schema-v2 `.xcN`/`.nsN` layouts through the local receipt and APFS publication path. FAT32 transfer, archive-attribute finalization, and independent Horizon consumption remain separate obligations; host checks do not establish physical interoperability. PAC-6 remains a closeout gate until the pinned external consumer emits bytes whose digest matches the source.
 - Update ADR 0013 with only the explicit distinction between *uncommitted ownership-tracked provisional artifacts* and committed *published user data*, reflecting Decisions 30/32. Preserve all other user-data protections.
 - ADR 0028 is accepted as architecture; do not mark Issue #6 complete merely because the design has been accepted. Production activation requires the [Split-set contract acceptance scenarios](../testing/split-set-contract-acceptance.md) to pass under each supported OS/filesystem profile.
 
 ## 9. Non-goals
 
-No key extraction, title rights changes, device installation, embedded content authenticity claims, accepted unsigned cross-host manifests, signature/key management, legacy `.xcN`/`.nsN` positive resolution, speculative XCI-header terminal proof, restoration from surviving parts without original source evidence, background persistent qualification Job on every read-only resolution, automatic source deletion, or hidden mutable global Engine state.
+No key extraction, title rights changes, device installation, embedded content authenticity claims, accepted unsigned cross-host manifests, signature/key management, physical or external-consumer qualification of legacy `.xcN`/`.nsN` output, speculative XCI-header terminal proof, restoration from surviving parts without original source evidence, background persistent qualification Job on every read-only resolution, automatic source deletion, or hidden mutable global Engine state.

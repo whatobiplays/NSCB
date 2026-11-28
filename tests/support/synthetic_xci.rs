@@ -597,6 +597,24 @@ pub fn with_compressed_secure_member() -> Fixture {
     )
 }
 
+pub fn with_compressed_second_secure_member() -> Fixture {
+    let nsp = crate::synthetic_nsp_qualification::valid();
+    let package = canonical_package(&nsp.meta_nca, &nsp.program_nca);
+    let compressed = ncz_member();
+    build_profile(
+        &nsp.meta_nca,
+        &nsp.program_nca,
+        &package,
+        &nsp.key_file,
+        ["ignored.bin", "compressed.ncz"],
+        &["update", "normal", "secure"],
+        None,
+        2,
+        Some([&nsp.program_nca, &compressed]),
+        &[],
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_profile(
     meta_nca: &[u8],

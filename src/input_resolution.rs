@@ -10,6 +10,7 @@
 use crate::file_identity::{FileIdentity, path_identity};
 use crate::inspection::CancellationHandle;
 use crate::sha256::Sha256Digest;
+use crate::split_manifest::legacy_segment_layout_and_index;
 use crate::split_resolution::{
     SplitResolutionContext, canonical_member_index, directory_has_canonical_member,
     has_adjacent_sidecar, qualify_directory,
@@ -1417,11 +1418,14 @@ impl<'a> Resolver<'a> {
         })?;
 
         if target_metadata.is_file() {
-            if selected_path
-                .file_name()
-                .and_then(canonical_member_index)
-                .is_some()
-            {
+            let is_split_member = selected_path.file_name().is_some_and(|name| {
+                canonical_member_index(name).is_some()
+                    || name
+                        .to_str()
+                        .and_then(legacy_segment_layout_and_index)
+                        .is_some()
+            });
+            if is_split_member {
                 let before = self.inputs.len();
                 (|| {
                     if is_symlink {

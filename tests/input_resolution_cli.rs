@@ -113,7 +113,7 @@ fn split_parts_and_empty_lists_fail_as_input_errors() {
     assert_eq!(split.status.code(), Some(3));
     assert_eq!(
         serde_json::from_slice::<Value>(&split.stdout).unwrap()["error"]["code"],
-        "unsupported_split_layout"
+        "split_manifest_missing"
     );
 
     let empty = run(

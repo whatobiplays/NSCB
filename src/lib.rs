@@ -126,6 +126,7 @@ pub use operation::{
     OperationSessionStatus, PlannedArtifact, PlannedContentGroup, PlannedContentMember,
     PlannedEffect, PlannedSource, RepackRequest, StagingStrategy,
 };
+pub use split_manifest::SplitLayout;
 pub use split_operation::{
     SplitBundleBaseline, SplitOutputPaths, SplitPlan, SplitPlanSnapshot, SplitReceiptCommitState,
     SplitRequest,

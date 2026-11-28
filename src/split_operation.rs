@@ -31,8 +31,14 @@ use crate::file_identity::{
 #[cfg(target_os = "macos")]
 use crate::input_resolution::{InputResolutionCapabilities, InputResolutionRequest};
 use crate::inspection::CancellationHandle;
+#[cfg(any(target_os = "macos", test))]
+use crate::split_manifest::MAX_LEGACY_SPLIT_SEGMENTS;
+use crate::split_manifest::SplitLayout;
 #[cfg(target_os = "macos")]
-use crate::split_manifest::{MAX_SPLIT_MANIFEST_BYTES, SplitManifestSegment, encode_manifest};
+use crate::split_manifest::{
+    MAX_SPLIT_MANIFEST_BYTES, SplitManifestSegment, encode_legacy_manifest, encode_manifest,
+    is_safe_component_name, legacy_segment_name,
+};
 #[cfg(target_os = "macos")]
 use fs2::FileExt as _;
 #[cfg(target_os = "macos")]
@@ -82,6 +88,7 @@ pub struct SplitRequest {
     source: PathBuf,
     bundle_directory: PathBuf,
     conflict_policy: ConflictPolicy,
+    layout: SplitLayout,
 }
 
 impl SplitRequest {
@@ -91,7 +98,15 @@ impl SplitRequest {
             source: source.into(),
             bundle_directory: bundle_directory.into(),
             conflict_policy: ConflictPolicy::Fail,
+            layout: SplitLayout::Canonical,
         }
+    }
+
+    /// Selects how the output members are named. Canonical is the default.
+    #[must_use]
+    pub fn with_layout(mut self, layout: SplitLayout) -> Self {
+        self.layout = layout;
+        self
     }
 
     /// Selects how the operation handles a bundle that already exists.
@@ -115,6 +130,11 @@ impl SplitRequest {
     pub const fn conflict_policy(&self) -> ConflictPolicy {
         self.conflict_policy
     }
+
+    /// Returns the member layout selected for this request.
+    pub const fn layout(&self) -> SplitLayout {
+        self.layout
+    }
 }
 
 /// The destination state captured by a Split plan.
@@ -136,12 +156,16 @@ pub enum SplitBundleBaseline {
 pub struct SplitPlanSnapshot {
     kind: &'static str,
     nscb_version: &'static str,
+    #[serde(skip_serializing_if = "SplitLayout::is_canonical")]
+    layout: SplitLayout,
     source: PlannedSource,
     bundle_directory: PathBuf,
     canonical_directory: PathBuf,
     manifest_path: PathBuf,
     segment_size_bytes: u64,
     segment_lengths: Vec<u64>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    segment_names: Vec<String>,
     conflict_policy: ConflictPolicy,
     destination_baseline: SplitBundleBaseline,
 }
@@ -172,6 +196,11 @@ impl SplitPlanSnapshot {
         &self.canonical_directory
     }
 
+    /// Returns the directory containing the selected Split layout.
+    pub fn split_directory(&self) -> &Path {
+        &self.canonical_directory
+    }
+
     /// Returns the manifest adjacent to the canonical directory.
     pub fn manifest_path(&self) -> &Path {
         &self.manifest_path
@@ -185,6 +214,16 @@ impl SplitPlanSnapshot {
     /// Returns the checked length of each planned physical segment.
     pub fn segment_lengths(&self) -> &[u64] {
         &self.segment_lengths
+    }
+
+    /// Returns the layout selected when this plan was created.
+    pub const fn layout(&self) -> SplitLayout {
+        self.layout
+    }
+
+    /// Returns the planned legacy member basenames, or an empty slice for canonical output.
+    pub fn segment_names(&self) -> &[String] {
+        &self.segment_names
     }
 
     /// Returns the destination policy captured by the plan.
@@ -208,6 +247,8 @@ pub struct SplitOutputPaths {
     bundle_directory: PathBuf,
     canonical_directory: PathBuf,
     manifest_path: PathBuf,
+    #[serde(skip_serializing_if = "SplitLayout::is_canonical")]
+    layout: SplitLayout,
     #[serde(skip_serializing_if = "Option::is_none")]
     recovery_bundle_directory: Option<PathBuf>,
 }
@@ -221,6 +262,16 @@ impl SplitOutputPaths {
     /// Returns the canonical Split directory accepted by the existing resolver.
     pub fn canonical_directory(&self) -> &Path {
         &self.canonical_directory
+    }
+
+    /// Returns the directory containing the selected Split layout.
+    pub fn split_directory(&self) -> &Path {
+        &self.canonical_directory
+    }
+
+    /// Returns the layout published at these paths.
+    pub const fn layout(&self) -> SplitLayout {
+        self.layout
     }
 
     /// Returns the versioned manifest adjacent to the canonical directory.
@@ -452,6 +503,90 @@ fn validate_split_output_parent_with(
 }
 
 #[cfg(target_os = "macos")]
+fn legacy_member_stem(source_name: &OsStr) -> Result<String, OperationError> {
+    let basename = source_name
+        .to_str()
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+    if !is_safe_component_name(basename) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let manifest_name = append_suffix(source_name, ".nscb-split.json");
+    if !manifest_name.to_str().is_some_and(is_safe_component_name) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    let stem = Path::new(basename)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))?;
+    if !is_safe_component_name(stem) {
+        return Err(OperationError::new(OperationFailureCode::UnsafePath));
+    }
+    Ok(stem.to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn legacy_layout_matches(
+    layout: SplitLayout,
+    recognition: &crate::recognition::ContentRecognitionResult,
+) -> bool {
+    use crate::recognition::{
+        CompressionVariant, RecognitionOutcome, RecognizedFamily, StructuralEligibility,
+    };
+
+    match (&recognition.recognition, layout) {
+        (
+            RecognitionOutcome::Recognized {
+                family: RecognizedFamily::Xci,
+                compression_variant: CompressionVariant::NotEstablished,
+            },
+            SplitLayout::LegacyXc,
+        ) => recognition.package_structure_eligibility == StructuralEligibility::Eligible,
+        (
+            RecognitionOutcome::Recognized {
+                family: RecognizedFamily::Pfs0,
+                compression_variant: CompressionVariant::NotEstablished,
+            },
+            SplitLayout::LegacyNs,
+        ) => recognition.package_structure_eligibility == StructuralEligibility::NotEstablished,
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+/// Supplies operation-local XCI evidence for `LegacyXc` error mapping.
+///
+/// Keeping this probe here lets general recognition retain its permissive behavior.
+fn source_has_xci_header_marker(
+    source_file: &mut File,
+    source_size: u64,
+) -> Result<bool, OperationFailureCode> {
+    let mut marker = [0; 4];
+    if source_size >= marker.len() as u64 {
+        source_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+        source_file
+            .read_exact(&mut marker)
+            .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+        if marker == *b"PFS0" {
+            return Ok(false);
+        }
+    }
+
+    let xci_marker_end = 0x100 + marker.len() as u64;
+    if source_size < xci_marker_end {
+        return Ok(false);
+    }
+    source_file
+        .seek(SeekFrom::Start(0x100))
+        .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+    source_file
+        .read_exact(&mut marker)
+        .map_err(|_| OperationFailureCode::SourceUnavailable)?;
+    Ok(marker == *b"HEAD")
+}
+
+#[cfg(target_os = "macos")]
 fn plan_split_macos<'a>(
     request: SplitRequest,
     trust_store: &'a dyn SplitTrustWriter,
@@ -498,8 +633,9 @@ fn plan_split_macos<'a>(
     if !metadata.file_type().is_file() {
         return Err(OperationError::new(OperationFailureCode::SourceUnavailable));
     }
+    let layout = request.layout;
     let source_size = metadata.len();
-    let lengths = segment_lengths(source_size, segment_size)?;
+    let lengths = segment_lengths_for_layout(source_size, segment_size, layout)?;
     let source_snapshot = file_snapshot(&metadata, Some(source_identity));
     let (observed_size, source_sha256) = hash_file_with_check(
         &mut source_file,
@@ -521,6 +657,127 @@ fn plan_split_macos<'a>(
         return Err(OperationError::new(OperationFailureCode::SourceChanged));
     }
 
+    let source_path = source_parent_path.join(&source_name);
+    let segment_names = if layout == SplitLayout::Canonical {
+        Vec::new()
+    } else {
+        let member_stem = legacy_member_stem(&source_name)?;
+        if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+            return Err(OperationError::new(OperationFailureCode::Cancelled));
+        }
+        let has_xci_header_marker = if layout == SplitLayout::LegacyXc {
+            source_has_xci_header_marker(&mut source_file, source_size)
+                .map_err(OperationError::new)?
+        } else {
+            false
+        };
+        source_file
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        let recognition_result =
+            crate::recognition::recognize(&mut source_file, source_size, &source_path);
+
+        #[cfg(test)]
+        if failpoint == Some(SplitTestFailpoint::MutateSourceAfterRecognition)
+            || failpoint
+                == Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot)
+        {
+            let mut mutation_file = fs::OpenOptions::new()
+                .write(true)
+                .open(&source_path)
+                .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            if failpoint == Some(SplitTestFailpoint::MutateSourceAfterRecognition) {
+                std::io::Seek::seek(&mut mutation_file, std::io::SeekFrom::End(0))
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+                std::io::Write::write_all(&mut mutation_file, b"changed")
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            } else {
+                std::io::Seek::seek(&mut mutation_file, std::io::SeekFrom::Start(0x100))
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+                std::io::Write::write_all(&mut mutation_file, b"NOPE")
+                    .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+            }
+            mutation_file
+                .sync_all()
+                .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+        }
+
+        let recognition_snapshot = source_snapshot.clone();
+        let observed_snapshot = snapshot_of(&source_file)?;
+        #[cfg(test)]
+        let observed_snapshot = if failpoint
+            == Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot)
+        {
+            // Simulate a filesystem snapshot that misses the post-recognition byte change.
+            source_snapshot.clone()
+        } else {
+            observed_snapshot
+        };
+
+        if observed_snapshot != recognition_snapshot {
+            return Err(OperationError::new(OperationFailureCode::SourceChanged));
+        }
+        let recognition = match recognition_result {
+            Ok(recognition) => recognition,
+            Err(error) => {
+                use crate::recognition::ContentRecognitionErrorCode as Code;
+                let code = match (layout, error.code()) {
+                    (_, Code::InputUnavailable) => OperationFailureCode::SourceUnavailable,
+                    (_, Code::LimitExceeded | Code::ResourceLimitExceeded) => {
+                        OperationFailureCode::ResourceLimitExceeded
+                    }
+                    (SplitLayout::LegacyXc, Code::TruncatedInput | Code::MalformedInput)
+                        if has_xci_header_marker =>
+                    {
+                        OperationFailureCode::InvalidXciImage
+                    }
+                    (SplitLayout::LegacyXc, Code::UnsupportedStructure)
+                        if has_xci_header_marker =>
+                    {
+                        OperationFailureCode::UnsupportedXciProfile
+                    }
+                    _ => OperationFailureCode::UnsupportedSplitLayout,
+                };
+                if !matches!(
+                    code,
+                    OperationFailureCode::SourceUnavailable
+                        | OperationFailureCode::ResourceLimitExceeded
+                ) {
+                    confirm_source_unchanged(
+                        &mut source_file,
+                        &recognition_snapshot,
+                        observed_size,
+                        &source_sha256,
+                        cancellation,
+                    )?;
+                }
+                return Err(OperationError::new(code));
+            }
+        };
+        // Same-size writes can evade metadata checks; confirm before success or a structural recognition error.
+        confirm_source_unchanged(
+            &mut source_file,
+            &recognition_snapshot,
+            observed_size,
+            &source_sha256,
+            cancellation,
+        )?;
+        if !legacy_layout_matches(layout, &recognition) {
+            return Err(OperationError::new(
+                OperationFailureCode::UnsupportedSplitLayout,
+            ));
+        }
+        if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+            return Err(OperationError::new(OperationFailureCode::Cancelled));
+        }
+        (0..lengths.len())
+            .map(|index| {
+                legacy_segment_name(layout, &member_stem, index as u8)
+                    .ok_or_else(|| OperationError::new(OperationFailureCode::UnsafePath))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
     let destination_path = destination_parent_path.join(&destination_name);
     let canonical_directory = destination_path.join(&source_name);
     let manifest_name = append_suffix(&source_name, ".nscb-split.json");
@@ -540,13 +797,13 @@ fn plan_split_macos<'a>(
             }
             Err(error) => return Err(error),
         };
-    let source_path = source_parent_path.join(&source_name);
     if source_path_within(&source_path, &destination_path) {
         return Err(OperationError::new(OperationFailureCode::UnsafePath));
     }
     let snapshot = SplitPlanSnapshot {
         kind: "split_plan",
         nscb_version: env!("CARGO_PKG_VERSION"),
+        layout,
         source: PlannedSource::new(
             source_path,
             source_identity.fingerprint(),
@@ -558,6 +815,7 @@ fn plan_split_macos<'a>(
         manifest_path,
         segment_size_bytes: segment_size,
         segment_lengths: lengths,
+        segment_names,
         conflict_policy: request.conflict_policy,
         destination_baseline: destination_identity.map_or(
             SplitBundleBaseline::Absent,
@@ -610,6 +868,8 @@ fn plan_split_macos<'a>(
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SplitTestFailpoint {
+    MutateSourceAfterRecognition,
+    MutateSourceAfterRecognitionWithUnchangedSnapshot,
     FailureBeforeSegmentSync,
     FailureBeforeManifestSync,
     FailureAtPromotion,
@@ -868,6 +1128,63 @@ fn hash_file_with_check(
 }
 
 #[cfg(target_os = "macos")]
+/// Rechecks source bytes and metadata against the snapshot captured for planning.
+fn confirm_source_unchanged(
+    source_file: &mut File,
+    source_snapshot: &FileSnapshot,
+    expected_size: u64,
+    expected_sha256: &Sha256Digest,
+    cancellation: Option<&CancellationHandle>,
+) -> Result<(), OperationError> {
+    source_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| OperationError::new(OperationFailureCode::SourceUnavailable))?;
+    let (confirmed_size, confirmed_sha256) = hash_file_with_check(
+        source_file,
+        || {
+            if cancellation.is_some_and(CancellationHandle::is_cancelled) {
+                Err(OperationFailureCode::Cancelled)
+            } else {
+                Ok(())
+            }
+        },
+        #[cfg(test)]
+        None,
+    )
+    .map_err(|error| match error {
+        HashFileFailure::Operation(code) => OperationError::new(code),
+        HashFileFailure::Io => OperationError::new(OperationFailureCode::SourceUnavailable),
+    })?;
+    let confirmed_snapshot = snapshot_of(source_file)?;
+    if !source_confirmation_matches(
+        source_snapshot,
+        &confirmed_snapshot,
+        expected_size,
+        confirmed_size,
+        expected_sha256,
+        &confirmed_sha256,
+    ) {
+        return Err(OperationError::new(OperationFailureCode::SourceChanged));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+/// Checks whether recognition still refers to the planned source bytes and metadata.
+fn source_confirmation_matches(
+    planned_snapshot: &FileSnapshot,
+    confirmed_snapshot: &FileSnapshot,
+    planned_size: u64,
+    confirmed_size: u64,
+    planned_sha256: &Sha256Digest,
+    confirmed_sha256: &Sha256Digest,
+) -> bool {
+    planned_size == confirmed_size
+        && planned_sha256 == confirmed_sha256
+        && planned_snapshot == confirmed_snapshot
+}
+
+#[cfg(target_os = "macos")]
 struct PlanningSplitTrustStore<'a> {
     writer: &'a dyn SplitTrustWriter,
     cancellation: Option<&'a CancellationHandle>,
@@ -926,14 +1243,24 @@ fn bundle_is_up_to_date_with_store(
     let Ok(manifest) = crate::split_manifest::parse_manifest(&manifest_bytes) else {
         return false;
     };
-    let Ok(canonical_manifest) = crate::split_manifest::encode_manifest(
-        manifest.source_size,
-        manifest.source_sha256,
-        &manifest.segments,
-    ) else {
+    let encoded_manifest = match manifest.layout {
+        SplitLayout::Canonical => crate::split_manifest::encode_manifest(
+            manifest.source_size,
+            manifest.source_sha256,
+            &manifest.segments,
+        ),
+        layout => crate::split_manifest::encode_legacy_manifest(
+            layout,
+            manifest.source_size,
+            manifest.source_sha256,
+            &manifest.segments,
+        ),
+    };
+    let Ok(encoded_manifest) = encoded_manifest else {
         return false;
     };
-    if manifest_bytes != canonical_manifest
+    if manifest_bytes != encoded_manifest
+        || manifest.layout != snapshot.layout
         || manifest.source_size != snapshot.source.size()
         || manifest.source_sha256 != snapshot.source.sha256()
         || manifest
@@ -942,6 +1269,13 @@ fn bundle_is_up_to_date_with_store(
             .map(|segment| segment.size)
             .collect::<Vec<_>>()
             != snapshot.segment_lengths
+        || manifest
+            .segments
+            .iter()
+            .enumerate()
+            .any(|(index, segment)| {
+                planned_segment_name(snapshot, index).map_or(true, |name| name != segment.name)
+            })
     {
         return false;
     }
@@ -1228,7 +1562,24 @@ fn output_paths_from_snapshot(
         bundle_directory: snapshot.bundle_directory.clone(),
         canonical_directory: snapshot.canonical_directory.clone(),
         manifest_path: snapshot.manifest_path.clone(),
+        layout: snapshot.layout,
         recovery_bundle_directory,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn planned_segment_name(
+    snapshot: &SplitPlanSnapshot,
+    index: usize,
+) -> Result<String, OperationFailureCode> {
+    if snapshot.layout == SplitLayout::Canonical {
+        Ok(format!("{index:02}"))
+    } else {
+        snapshot
+            .segment_names
+            .get(index)
+            .cloned()
+            .ok_or(OperationFailureCode::ValidationFailed)
     }
 }
 
@@ -2539,7 +2890,8 @@ fn run_split_transaction(
             });
         }
         Some(SplitTestFailpoint::SimulatedModifiedSegmentAfterPublication) => {
-            let segment = snapshot.canonical_directory.join("00");
+            let segment_name = planned_segment_name(snapshot, 0).map_err(plain_failure)?;
+            let segment = snapshot.canonical_directory.join(segment_name);
             if fs::write(&segment, b"XXXX").is_err() {
                 return Err(plain_failure(OperationFailureCode::WriteFailed));
             }
@@ -2551,7 +2903,8 @@ fn run_split_transaction(
             });
         }
         Some(SplitTestFailpoint::SimulatedSubstitutedSegmentAfterPublication) => {
-            let segment = snapshot.canonical_directory.join("00");
+            let segment_name = planned_segment_name(snapshot, 0).map_err(plain_failure)?;
+            let segment = snapshot.canonical_directory.join(segment_name);
             let original = match OpenOptions::new().read(true).open(&segment) {
                 Ok(original) => original,
                 Err(_) => return Err(plain_failure(OperationFailureCode::WriteFailed)),
@@ -2572,7 +2925,8 @@ fn run_split_transaction(
             });
         }
         Some(SplitTestFailpoint::SimulatedAliasedSegmentAfterPublication) => {
-            let segment = snapshot.canonical_directory.join("00");
+            let segment_name = planned_segment_name(snapshot, 0).map_err(plain_failure)?;
+            let segment = snapshot.canonical_directory.join(segment_name);
             let first_alias = snapshot.bundle_directory.join("retained-alias-a");
             let second_alias = snapshot.bundle_directory.join("retained-alias-b");
             let substitute = snapshot.bundle_directory.with_extension("split-substitute");
@@ -2634,7 +2988,9 @@ fn run_split_transaction(
             | SplitTestFailpoint::SimulatedInterruptionAfterCleanupArtifactUnlink
             | SplitTestFailpoint::SimulatedInterruptionAfterReceiptCommitted
             | SplitTestFailpoint::SimulatedAcknowledgementBeforeReceiptJournalUpdate
-            | SplitTestFailpoint::SimulatedFailureAfterJournalCreateBeforeIdentityRecord,
+            | SplitTestFailpoint::SimulatedFailureAfterJournalCreateBeforeIdentityRecord
+            | SplitTestFailpoint::MutateSourceAfterRecognition
+            | SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot,
         )
         | None => {}
     }
@@ -2842,14 +3198,11 @@ fn run_split_transaction(
                 return Err(SplitTrustStoreError::Unavailable);
             }
             let _ = session.finish_promotion();
-            if published_bundle_matches(snapshot, state, &staged, None).is_err()
-                || !bundle_is_up_to_date_with_store(
-                    snapshot,
-                    &state.source_name,
-                    locked_store,
-                    None,
-                )
-            {
+            let published_matches =
+                published_bundle_matches(snapshot, state, &staged, None).is_ok();
+            let trust_lookup_matches =
+                bundle_is_up_to_date_with_store(snapshot, &state.source_name, locked_store, None);
+            if !published_matches || !trust_lookup_matches {
                 commit_failure = Some(OperationFailureCode::PublicationUncertain);
                 return Err(SplitTrustStoreError::Unavailable);
             }
@@ -3082,6 +3435,10 @@ struct JournalRecord {
     source_identity: String,
     source_size: u64,
     source_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<SplitLayout>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    segment_names: Vec<String>,
     #[serde(default)]
     destination_parent_identity: Option<String>,
     #[serde(default)]
@@ -3110,7 +3467,11 @@ impl JournalRecord {
         destination_identity: Option<FileIdentity>,
     ) -> Self {
         Self {
-            version: 1,
+            version: if snapshot.layout == SplitLayout::Canonical {
+                1
+            } else {
+                2
+            },
             transaction_id,
             phase: JournalPhase::Prepared,
             destination_name_hex: encode_os_name(&state.destination_name),
@@ -3119,6 +3480,12 @@ impl JournalRecord {
             source_identity: snapshot.source.identity().to_hex(),
             source_size: snapshot.source.size(),
             source_sha256: state.source_sha256.to_hex(),
+            layout: (snapshot.layout != SplitLayout::Canonical).then_some(snapshot.layout),
+            segment_names: if snapshot.layout == SplitLayout::Canonical {
+                Vec::new()
+            } else {
+                snapshot.segment_names.clone()
+            },
             destination_parent_identity: Some(identity_string(state.destination_parent_identity)),
             journal_identity: None,
             journal_mode: None,
@@ -3324,11 +3691,12 @@ fn stage_and_verify(
         .ok_or(OperationFailureCode::UnsafePath)?;
     let mut planned_children = Vec::with_capacity(snapshot.segment_lengths.len() + 1);
     for index in 0..snapshot.segment_lengths.len() {
+        let name = planned_segment_name(snapshot, index)?;
         planned_children.push(planned_artifact(
             vec![
                 encode_os_name(staging_name),
                 encode_os_name(canonical_name),
-                encode_os_name(OsStr::new(&format!("{index:02}"))),
+                encode_os_name(OsStr::new(&name)),
             ],
             canonical_identity,
             ArtifactKind::RegularFile,
@@ -3351,7 +3719,7 @@ fn stage_and_verify(
 
     for (index, &length) in snapshot.segment_lengths.iter().enumerate() {
         check_cancelled(session)?;
-        let name = format!("{index:02}");
+        let name = planned_segment_name(snapshot, index)?;
         let part_path = vec![
             encode_os_name(staging_name),
             encode_os_name(canonical_name),
@@ -3392,6 +3760,7 @@ fn stage_and_verify(
         let part_digest = Sha256Digest::from_bytes(part_hasher.finalize().into());
         segments.push(SplitManifestSegment {
             index: index as u8,
+            name,
             size: length,
             sha256: part_digest,
         });
@@ -3408,8 +3777,18 @@ fn stage_and_verify(
     }
     validate_source(state, Some(session))?;
 
-    let manifest_bytes = encode_manifest(snapshot.source.size(), state.source_sha256, &segments)
-        .map_err(|_| OperationFailureCode::ValidationFailed)?;
+    let manifest_bytes = match snapshot.layout {
+        SplitLayout::Canonical => {
+            encode_manifest(snapshot.source.size(), state.source_sha256, &segments)
+        }
+        layout => encode_legacy_manifest(
+            layout,
+            snapshot.source.size(),
+            state.source_sha256,
+            &segments,
+        ),
+    }
+    .map_err(|_| OperationFailureCode::ValidationFailed)?;
     let manifest_path = vec![encode_os_name(staging_name), encode_os_name(manifest_name)];
     let mut manifest_file =
         create_journaled_file(&bundle_directory, manifest_name, &manifest_path, journal)?;
@@ -3454,7 +3833,7 @@ fn stage_and_verify(
     let verified_segments =
         verify_bundle_parts(snapshot, state, &stage_path, &segments, Some(session))?;
     for (index, evidence) in verified_segments.iter().enumerate() {
-        let name = format!("{index:02}");
+        let name = planned_segment_name(snapshot, index)?;
         record_verified_file(
             &canonical_directory,
             OsStr::new(&name),
@@ -3513,10 +3892,10 @@ fn verify_bundle_parts(
         );
     }
     if actual_names.len() != expected.len()
-        || expected.iter().enumerate().any(|(index, _)| {
+        || expected.iter().any(|segment| {
             !actual_names
                 .iter()
-                .any(|name| name == &OsString::from(format!("{index:02}")))
+                .any(|name| name == OsStr::new(&segment.name))
         })
     {
         return Err(OperationFailureCode::ValidationFailed);
@@ -3527,7 +3906,7 @@ fn verify_bundle_parts(
     let mut evidence = Vec::with_capacity(expected.len());
     for segment in expected {
         check_cancelled_if_attached(session)?;
-        let path = canonical_path.join(format!("{:02}", segment.index));
+        let path = canonical_path.join(&segment.name);
         let mut opened_segment = open_segment_file(&path, segment.size)
             .map_err(|_| OperationFailureCode::ValidationFailed)?;
         let identity = opened_segment
@@ -6276,9 +6655,17 @@ fn published_bundle_matches(
         .iter()
         .map(|item| item.size)
         .collect::<Vec<_>>();
-    if manifest.source_size != snapshot.source.size()
+    if manifest.layout != snapshot.layout
+        || manifest.source_size != snapshot.source.size()
         || manifest.source_sha256 != state.source_sha256
         || expected_lengths != snapshot.segment_lengths
+        || manifest
+            .segments
+            .iter()
+            .enumerate()
+            .any(|(index, segment)| {
+                planned_segment_name(snapshot, index).map_or(true, |name| name != segment.name)
+            })
     {
         return Err(OperationFailureCode::ValidationFailed);
     }
@@ -7223,9 +7610,17 @@ fn recorded_bundle_is_trusted(
     let Ok(manifest) = crate::split_manifest::parse_manifest(&manifest_bytes) else {
         return false;
     };
-    if manifest.source_size != record.source_size
+    if journal_layout(record) != Some(manifest.layout)
+        || manifest.source_size != record.source_size
         || manifest.source_sha256.to_hex() != record.source_sha256
         || manifest.segments.len() != record.segment_lengths.len()
+        || manifest
+            .segments
+            .iter()
+            .enumerate()
+            .any(|(index, segment)| {
+                journal_segment_name(record, index).is_none_or(|name| name != segment.name)
+            })
     {
         return false;
     }
@@ -7235,7 +7630,7 @@ fn recorded_bundle_is_trusted(
         if record.segment_lengths.get(index) != Some(&segment.size) {
             return false;
         }
-        let segment_name = OsString::from(format!("{:02}", segment.index));
+        let segment_name = OsString::from(&segment.name);
         let segment_path = vec![
             staging_hex.clone(),
             record.canonical_name_hex.clone(),
@@ -7403,6 +7798,8 @@ fn same_journal_identity(left: &JournalRecord, right: &JournalRecord) -> bool {
         && left.source_identity == right.source_identity
         && left.source_size == right.source_size
         && left.source_sha256 == right.source_sha256
+        && left.layout == right.layout
+        && left.segment_names == right.segment_names
         && left.destination_parent_identity == right.destination_parent_identity
         && (left.journal_identity.is_none()
             || right.journal_identity.as_ref() == left.journal_identity.as_ref())
@@ -7416,8 +7813,71 @@ fn same_journal_identity(left: &JournalRecord, right: &JournalRecord) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+/// Returns the recorded layout, treating metadata-free version 1 journals as canonical.
+fn journal_layout(record: &JournalRecord) -> Option<SplitLayout> {
+    match record.version {
+        1 if record.layout.is_none() && record.segment_names.is_empty() => {
+            Some(SplitLayout::Canonical)
+        }
+        2 => record.layout.filter(|layout| !layout.is_canonical()),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn journal_segment_name(record: &JournalRecord, index: usize) -> Option<String> {
+    record.segment_lengths.get(index)?;
+    match journal_layout(record)? {
+        SplitLayout::Canonical => Some(format!("{index:02}")),
+        SplitLayout::LegacyXc | SplitLayout::LegacyNs => record.segment_names.get(index).cloned(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn journal_segment_index(record: &JournalRecord, encoded_name: &str) -> Option<usize> {
+    record
+        .segment_lengths
+        .iter()
+        .enumerate()
+        .find_map(|(index, _)| {
+            journal_segment_name(record, index).and_then(|name| {
+                (encode_os_name(OsStr::new(&name)) == encoded_name).then_some(index)
+            })
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn journal_segment_names_are_valid(record: &JournalRecord, source_name: &OsStr) -> bool {
+    let Some(layout) = journal_layout(record) else {
+        return false;
+    };
+    if layout == SplitLayout::Canonical {
+        return record.segment_names.is_empty();
+    }
+    if record.segment_names.len() != record.segment_lengths.len()
+        || record.segment_names.len() > MAX_LEGACY_SPLIT_SEGMENTS
+    {
+        return false;
+    }
+    let Ok(stem) = legacy_member_stem(source_name) else {
+        return false;
+    };
+    record
+        .segment_names
+        .iter()
+        .enumerate()
+        .all(|(index, name)| {
+            u8::try_from(index)
+                .ok()
+                .and_then(|index| legacy_segment_name(layout, &stem, index))
+                .as_deref()
+                == Some(name.as_str())
+        })
+}
+
+#[cfg(target_os = "macos")]
 fn journal_record_is_valid(record: &JournalRecord) -> bool {
-    if record.version != 1 {
+    if !matches!(record.version, 1 | 2) {
         return false;
     }
     let Some(_staging) = decode_os_name(&record.staging_name_hex) else {
@@ -7426,7 +7886,8 @@ fn journal_record_is_valid(record: &JournalRecord) -> bool {
     let Some(canonical) = decode_os_name(&record.canonical_name_hex) else {
         return false;
     };
-    if decode_os_name(&record.destination_name_hex).is_none()
+    if !journal_segment_names_are_valid(record, &canonical)
+        || decode_os_name(&record.destination_name_hex).is_none()
         || record.staging_name_hex
             != encode_os_name(OsStr::new(&format!(
                 ".nscb-split-{}.bundle",
@@ -7501,7 +7962,8 @@ fn journal_record_is_valid(record: &JournalRecord) -> bool {
                 if root == &record.staging_name_hex
                     && inner == &record.canonical_name_hex
                     && record.segment_lengths.iter().enumerate().any(|(index, _)| {
-                        *segment == encode_os_name(OsStr::new(&format!("{index:02}")))
+                        journal_segment_name(record, index)
+                            .is_some_and(|name| *segment == encode_os_name(OsStr::new(&name)))
                     }) =>
             {
                 ArtifactKind::RegularFile
@@ -7578,9 +8040,7 @@ fn journal_record_is_valid(record: &JournalRecord) -> bool {
                         }
                         if let [_, _, encoded_segment] = artifact.relative_path_hex.as_slice() {
                             let Some(segment_index) =
-                                decode_os_name(encoded_segment).and_then(|name| {
-                                    name.to_str().and_then(|value| value.parse::<usize>().ok())
-                                })
+                                journal_segment_index(record, encoded_segment)
                             else {
                                 return false;
                             };
@@ -7759,8 +8219,30 @@ fn journal_phase_can_advance(previous: JournalPhase, next: JournalPhase) -> bool
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn segment_lengths(source_size: u64, segment_size: u64) -> Result<Vec<u64>, OperationError> {
+    segment_lengths_with_limit(source_size, segment_size, MAX_SEGMENT_COUNT)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn segment_lengths_for_layout(
+    source_size: u64,
+    segment_size: u64,
+    layout: SplitLayout,
+) -> Result<Vec<u64>, OperationError> {
+    let limit = match layout {
+        SplitLayout::Canonical => MAX_SEGMENT_COUNT,
+        SplitLayout::LegacyXc | SplitLayout::LegacyNs => MAX_LEGACY_SPLIT_SEGMENTS,
+    };
+    segment_lengths_with_limit(source_size, segment_size, limit)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn segment_lengths_with_limit(
+    source_size: u64,
+    segment_size: u64,
+    maximum_segments: usize,
+) -> Result<Vec<u64>, OperationError> {
     if source_size == 0 || segment_size == 0 {
         return Err(OperationError::new(
             crate::operation::OperationFailureCode::SplitSourceSizeUnsupported,
@@ -7771,7 +8253,7 @@ fn segment_lengths(source_size: u64, segment_size: u64) -> Result<Vec<u64>, Oper
     let count = full_segments.checked_add(has_tail).ok_or_else(|| {
         OperationError::new(crate::operation::OperationFailureCode::SplitSourceSizeUnsupported)
     })?;
-    if count == 0 || count > MAX_SEGMENT_COUNT as u64 {
+    if count == 0 || count > maximum_segments as u64 {
         return Err(OperationError::new(
             crate::operation::OperationFailureCode::SplitSourceSizeUnsupported,
         ));
@@ -7789,8 +8271,11 @@ fn segment_lengths(source_size: u64, segment_size: u64) -> Result<Vec<u64>, Oper
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SEGMENT_SIZE_BYTES, OperationError, segment_lengths};
+    use super::{
+        DEFAULT_SEGMENT_SIZE_BYTES, OperationError, segment_lengths, segment_lengths_for_layout,
+    };
     use crate::operation::OperationFailureCode;
+    use crate::split_manifest::SplitLayout;
 
     #[test]
     fn production_segment_boundaries_use_checked_fixed_size_arithmetic() {
@@ -7821,6 +8306,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_layouts_allow_ten_segments_and_reject_eleven() {
+        for layout in [SplitLayout::LegacyXc, SplitLayout::LegacyNs] {
+            assert_eq!(segment_lengths_for_layout(10, 1, layout).unwrap().len(), 10);
+            assert_eq!(
+                segment_lengths_for_layout(11, 1, layout)
+                    .unwrap_err()
+                    .code(),
+                OperationFailureCode::SplitSourceSizeUnsupported
+            );
+        }
+    }
+
+    #[test]
     fn zero_source_and_zero_segment_size_fail_without_a_zero_length_tail() {
         for (source_size, segment_size) in [(0, 4), (1, 0)] {
             let error: OperationError = segment_lengths(source_size, segment_size).unwrap_err();
@@ -7835,7 +8333,7 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod producer_tests {
     use super::{
-        JournalPhase, SPLIT_IO_BUFFER_SIZE, SPLIT_RECEIPT_LOCK_NAME, SplitRequest,
+        JournalPhase, SPLIT_IO_BUFFER_SIZE, SPLIT_RECEIPT_LOCK_NAME, SplitLayout, SplitRequest,
         SplitTestFailpoint, acquire_destination_lock, has_one_qualified_candidate,
         open_journal_writer, plan_split_for_tests, plan_split_for_tests_with_cancellation,
         recover_incomplete_for_destination, validate_split_output_parent_with,
@@ -7856,10 +8354,38 @@ mod producer_tests {
     use std::ffi::OsStr;
     use std::fs::{self, File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
-    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier, Mutex};
+
+    fn pfs0_with_one_member(name: &str, member: &[u8]) -> Vec<u8> {
+        let mut bytes = b"PFS0".to_vec();
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::try_from(name.len() + 1).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+        bytes.extend_from_slice(&u64::try_from(member.len()).unwrap().to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(member);
+        bytes
+    }
+
+    fn synthetic_ncz_member() -> Vec<u8> {
+        let mut bytes = vec![0; 0x4000];
+        bytes.extend_from_slice(b"NCZSECTN");
+        bytes.extend_from_slice(&1_u64.to_le_bytes());
+        for value in [0x4000_u64, 16, 1, 0] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&[0; 32]);
+        bytes.extend_from_slice(&[0x28, 0xb5, 0x2f, 0xfd, 0x20, 16, 0x81, 0, 0]);
+        bytes.extend_from_slice(&[0; 16]);
+        bytes
+    }
 
     #[test]
     fn unsupported_implicit_destination_volume_fails_before_directory_creation() {
@@ -7871,6 +8397,506 @@ mod producer_tests {
         assert_eq!(result, Err(OperationFailureCode::UnsupportedCapability));
         assert!(!output_directory.exists());
         assert!(!output_directory.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn legacy_plan_uses_recognized_bytes_and_source_basename_rules() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let fixture = crate::test_synthetic_xci::valid();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+        let engine = Engine::new();
+
+        let pfs0_source = root_path.join("package.backup.xci");
+        let pfs0_bundle = root_path.join("pfs0.bundle");
+        fs::write(&pfs0_source, &fixture.package).unwrap();
+        let pfs0_plan = engine
+            .plan_split(
+                SplitRequest::new(&pfs0_source, &pfs0_bundle).with_layout(SplitLayout::LegacyNs),
+                &trust,
+            )
+            .unwrap();
+        assert_eq!(pfs0_plan.snapshot().layout(), SplitLayout::LegacyNs);
+        assert_eq!(
+            pfs0_plan.snapshot().split_directory(),
+            pfs0_bundle.join("package.backup.xci")
+        );
+        assert_eq!(
+            pfs0_plan.snapshot().manifest_path(),
+            pfs0_bundle.join("package.backup.xci.nscb-split.json")
+        );
+        assert_eq!(
+            pfs0_plan.snapshot().segment_names(),
+            &["package.backup.ns0"]
+        );
+        let serialized = serde_json::to_value(pfs0_plan.snapshot()).unwrap();
+        assert_eq!(serialized["layout"], "legacy_ns");
+        assert_eq!(serialized["segment_names"][0], "package.backup.ns0");
+
+        let extensionless_source = root_path.join("plain-package");
+        let extensionless_bundle = root_path.join("extensionless.bundle");
+        fs::write(&extensionless_source, &fixture.package).unwrap();
+        let extensionless_plan = engine
+            .plan_split(
+                SplitRequest::new(&extensionless_source, &extensionless_bundle)
+                    .with_layout(SplitLayout::LegacyNs),
+                &trust,
+            )
+            .unwrap();
+        assert_eq!(
+            extensionless_plan.snapshot().segment_names(),
+            &["plain-package.ns0"]
+        );
+
+        let xci_source = root_path.join("image.backup.nsp");
+        let xci_bundle = root_path.join("xci.bundle");
+        fs::write(&xci_source, &fixture.image).unwrap();
+        let xci_plan = engine
+            .plan_split(
+                SplitRequest::new(&xci_source, &xci_bundle).with_layout(SplitLayout::LegacyXc),
+                &trust,
+            )
+            .unwrap();
+        assert_eq!(xci_plan.snapshot().layout(), SplitLayout::LegacyXc);
+        assert_eq!(xci_plan.snapshot().segment_names(), &["image.backup.xc0"]);
+
+        let xci_result = engine.execute_split(xci_plan, &OperationSession::new());
+        assert_eq!(xci_result.outcome(), Some(OperationOutcome::SplitCreated));
+        let xci_output = xci_result.split_output_paths().unwrap();
+        let xci_directory = xci_output.split_directory();
+        assert_eq!(
+            fs::read(xci_directory.join("image.backup.xc0")).unwrap(),
+            fixture.image
+        );
+        assert!(!xci_directory.join("00").exists());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(xci_output.manifest_path()).unwrap()).unwrap();
+        assert_eq!(manifest["layout"], "legacy_xc");
+        assert_eq!(manifest["segments"][0]["name"], "image.backup.xc0");
+    }
+
+    #[test]
+    fn legacy_plan_rejects_wrong_family_compression_and_unknown_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let fixture = crate::test_synthetic_xci::valid();
+        let compressed_xci = crate::test_synthetic_xci::with_compressed_secure_member();
+        let mut malformed_first_xci = compressed_xci.image.clone();
+        let first_compressed_member = compressed_xci.secure_entries[0];
+        malformed_first_xci[first_compressed_member.data_offset + 0x4008
+            ..first_compressed_member.data_offset + 0x4010]
+            .fill(0);
+        let compressed_second_xci =
+            crate::test_synthetic_xci::with_compressed_second_secure_member();
+        let mut malformed_second_xci = compressed_second_xci.image.clone();
+        let second_compressed_member = compressed_second_xci.secure_entries[1];
+        malformed_second_xci[second_compressed_member.data_offset + 0x4008
+            ..second_compressed_member.data_offset + 0x4010]
+            .fill(0);
+        let mut unsupported_xci_structure = fixture.image.clone();
+        unsupported_xci_structure[0x130..0x138].fill(0);
+        let ncz = synthetic_ncz_member();
+        let mut malformed_ncz = ncz.clone();
+        malformed_ncz[0x4008..0x4010].fill(0);
+        let compressed_pfs0 = pfs0_with_one_member("content.ncz", &ncz);
+        let malformed_compressed_pfs0 = pfs0_with_one_member("content.ncz", &malformed_ncz);
+        let standalone_nca = crate::synthetic_nsp_qualification::valid().program_nca;
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+        let engine = Engine::new();
+        let cases = [
+            (
+                "pfs0.xci",
+                fixture.package,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "malformed-pfs0.xci",
+                b"PFS0".to_vec(),
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "xci.nsp",
+                fixture.image,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "compressed.xci",
+                compressed_xci.image,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "malformed-first-ncz.xci",
+                malformed_first_xci,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::InvalidXciImage,
+            ),
+            (
+                "malformed-second-ncz.xci",
+                malformed_second_xci,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::InvalidXciImage,
+            ),
+            (
+                "compressed-second-ncz.xci",
+                compressed_second_xci.image,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "unsupported-xci-structure.xci",
+                unsupported_xci_structure,
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedXciProfile,
+            ),
+            (
+                "compressed.nsp",
+                compressed_pfs0,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "malformed-ncz.nsp",
+                malformed_compressed_pfs0,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "standalone.nca",
+                standalone_nca,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "standalone.ncz",
+                ncz,
+                SplitLayout::LegacyNs,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "unknown.xci",
+                b"unrecognized bytes".to_vec(),
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "unknown-long.xci",
+                vec![0; 0x104],
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "partial-xci-header.xci",
+                {
+                    let mut bytes = vec![0; 0x103];
+                    bytes[0x100..].copy_from_slice(b"HEA");
+                    bytes
+                },
+                SplitLayout::LegacyXc,
+                OperationFailureCode::UnsupportedSplitLayout,
+            ),
+            (
+                "truncated-xci-header.xci",
+                {
+                    let mut bytes = vec![0; 0x104];
+                    bytes[0x100..].copy_from_slice(b"HEAD");
+                    bytes
+                },
+                SplitLayout::LegacyXc,
+                OperationFailureCode::InvalidXciImage,
+            ),
+        ];
+
+        for (index, (name, bytes, layout, expected_error)) in cases.into_iter().enumerate() {
+            let source = root_path.join(name);
+            let bundle = root_path.join(format!("bundle-{index}"));
+            fs::write(&source, bytes).unwrap();
+            let error = engine
+                .plan_split(
+                    SplitRequest::new(source, bundle).with_layout(layout),
+                    &trust,
+                )
+                .unwrap_err();
+            assert_eq!(error.code(), expected_error, "{name}");
+        }
+    }
+
+    #[test]
+    fn source_change_after_recognition_with_unchanged_snapshot_is_not_mapped_as_xci_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let mut source_bytes = vec![0; 0x104];
+        source_bytes[0x100..0x104].copy_from_slice(b"HEAD");
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_recognition_with_changed_snapshot_is_source_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let source_bytes = pfs0_with_one_member("member.nca", &vec![0; 0x200]);
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognition),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_generic_recognition_error_with_unchanged_snapshot_is_source_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let mut source_bytes = vec![0; 0x104];
+        source_bytes[..4].copy_from_slice(b"PFS0");
+        source_bytes[4..8].copy_from_slice(&1_u32.to_le_bytes());
+        fs::write(&source, source_bytes).unwrap();
+        let mut recognition_file = fs::File::open(&source).unwrap();
+        assert!(crate::recognition::recognize(&mut recognition_file, 0x104, &source).is_err());
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let stable_error = plan_split_for_tests(
+            SplitRequest::new(source.clone(), bundle.clone()).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            stable_error.code(),
+            OperationFailureCode::UnsupportedSplitLayout
+        );
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_non_pfs0_recognition_with_unchanged_snapshot_is_source_changed() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let mut source_bytes = vec![0; 0x104];
+        source_bytes[..4].copy_from_slice(b"NCA3");
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_change_after_successful_recognition_with_unchanged_snapshot_is_not_unsupported_layout()
+     {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let source = root_path.join("source.xci");
+        let bundle = root_path.join("bundle");
+        let source_bytes = pfs0_with_one_member("member.nca", &vec![0; 0x200]);
+        assert!(source_bytes.len() > 0x104);
+        fs::write(&source, source_bytes).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+
+        let error = plan_split_for_tests(
+            SplitRequest::new(source, bundle).with_layout(SplitLayout::LegacyXc),
+            &trust,
+            0x1000,
+            Some(SplitTestFailpoint::MutateSourceAfterRecognitionWithUnchangedSnapshot),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), OperationFailureCode::SourceChanged);
+    }
+
+    #[test]
+    fn source_confirmation_rejects_digest_change_with_stable_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source.bin");
+        fs::write(&source, b"sample").unwrap();
+        let source_file = File::open(source).unwrap();
+        let snapshot = super::snapshot_of(&source_file).unwrap();
+        let planned_sha256 = crate::sha256::Sha256Digest::from_bytes([0x11; 32]);
+        let confirmed_sha256 = crate::sha256::Sha256Digest::from_bytes([0x22; 32]);
+
+        assert!(!super::source_confirmation_matches(
+            &snapshot,
+            &snapshot,
+            6,
+            6,
+            &planned_sha256,
+            &confirmed_sha256,
+        ));
+    }
+
+    #[test]
+    fn journal_segment_names_follow_layout_specific_rules() {
+        let segment_names = (0..=super::MAX_LEGACY_SPLIT_SEGMENTS)
+            .map(|index| format!("game.ns{index}"))
+            .collect::<Vec<_>>();
+        let mut record = super::JournalRecord {
+            version: 2,
+            transaction_id: "legacy-limit-test".to_owned(),
+            phase: JournalPhase::Prepared,
+            destination_name_hex: String::new(),
+            staging_name_hex: String::new(),
+            canonical_name_hex: String::new(),
+            source_identity: String::new(),
+            source_size: segment_names.len() as u64,
+            source_sha256: String::new(),
+            layout: Some(SplitLayout::LegacyNs),
+            segment_lengths: vec![1; segment_names.len()],
+            segment_names,
+            destination_parent_identity: None,
+            journal_identity: None,
+            journal_mode: None,
+            destination_identity: None,
+            staging_identity: None,
+            manifest_sha256: None,
+            artifacts: Vec::new(),
+            cleanup_name_hex: None,
+            cleanup_parent_identity: None,
+        };
+
+        record.layout = None;
+        record.segment_names.clear();
+        record.version = 1;
+        assert!(super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+        record.version = 2;
+        record.layout = Some(SplitLayout::Canonical);
+        assert!(!super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+        record.segment_names.push("unexpected".to_owned());
+        assert!(!super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+
+        record.layout = Some(SplitLayout::LegacyNs);
+        record.segment_names = (0..=super::MAX_LEGACY_SPLIT_SEGMENTS)
+            .map(|index| format!("game.ns{index}"))
+            .collect();
+
+        assert!(!super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+
+        record.segment_names.pop();
+        record.segment_lengths.pop();
+        assert!(super::journal_segment_names_are_valid(
+            &record,
+            OsStr::new("game.nsp")
+        ));
+    }
+
+    #[test]
+    fn legacy_plan_accepts_xci_with_unsupported_nested_nca_profile_without_ncz() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let fixture = crate::test_synthetic_xci::valid();
+        let mut unsupported_profile = fixture.image.clone();
+        let program = fixture.secure_entries[1];
+        unsupported_profile[program.data_offset + 0x404] = 5;
+        let source = root_path.join("unknown-profile.xci");
+        let recognition = crate::recognition::recognize(
+            &mut std::io::Cursor::new(&unsupported_profile),
+            u64::try_from(unsupported_profile.len()).unwrap(),
+            &source,
+        )
+        .unwrap();
+        assert!(matches!(
+            recognition.recognition,
+            crate::recognition::RecognitionOutcome::Recognized {
+                family: crate::recognition::RecognizedFamily::Xci,
+                compression_variant: crate::recognition::CompressionVariant::NotEstablished,
+            }
+        ));
+        assert_eq!(
+            recognition.package_structure_eligibility,
+            crate::recognition::StructuralEligibility::Eligible
+        );
+        fs::write(&source, unsupported_profile).unwrap();
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+        let plan = Engine::new()
+            .plan_split(
+                SplitRequest::new(&source, root_path.join("unknown-profile.bundle"))
+                    .with_layout(SplitLayout::LegacyXc),
+                &trust,
+            )
+            .unwrap();
+        assert_eq!(plan.snapshot().layout(), SplitLayout::LegacyXc);
+        assert_eq!(plan.snapshot().segment_names(), &["unknown-profile.xc0"]);
+    }
+
+    #[test]
+    fn legacy_plan_rejects_nonportable_source_names() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = fs::canonicalize(root.path()).unwrap();
+        let package = crate::test_synthetic_xci::valid().package;
+        let trust = LocalSplitTrustStore::new(root_path.join("state").join("split-trust"));
+        let engine = Engine::new();
+
+        let reserved = root_path.join("CON.xci");
+        fs::write(&reserved, &package).unwrap();
+        let error = engine
+            .plan_split(
+                SplitRequest::new(&reserved, root_path.join("reserved.bundle"))
+                    .with_layout(SplitLayout::LegacyNs),
+                &trust,
+            )
+            .unwrap_err();
+        assert_eq!(error.code(), OperationFailureCode::UnsafePath);
+
+        let non_utf8 = std::ffi::OsString::from_vec(b"source-\xff.xci".to_vec());
+        let error = super::legacy_member_stem(std::ffi::OsStr::from_bytes(non_utf8.as_bytes()))
+            .unwrap_err();
+        assert_eq!(error.code(), OperationFailureCode::UnsafePath);
     }
 
     #[test]
@@ -8449,6 +9475,108 @@ mod producer_tests {
     }
 
     #[test]
+    fn legacy_layouts_round_trip_exact_bytes_through_segmented_and_virtual_readers() {
+        let cases = [
+            (
+                SplitLayout::LegacyXc,
+                "game.xci",
+                crate::test_synthetic_xci::valid().image,
+            ),
+            (
+                SplitLayout::LegacyNs,
+                "game.nsp",
+                pfs0_with_one_member("payload.bin", b"legacy virtual reader payload"),
+            ),
+        ];
+
+        for (layout, source_name, source_bytes) in cases {
+            let member_count_cases = [
+                (false, source_bytes.len() as u64 + 1),
+                (true, source_bytes.len().div_ceil(3) as u64),
+            ];
+            for (multipart, segment_size) in member_count_cases {
+                let root = tempfile::tempdir().unwrap();
+                let source = root.path().join(source_name);
+                let bundle = root.path().join(format!("{source_name}.split"));
+                let state_path = root.path().join("state").join("split-trust");
+                fs::write(&source, &source_bytes).unwrap();
+                let trust = LocalSplitTrustStore::new(state_path);
+                let plan = plan_split_for_tests(
+                    SplitRequest::new(&source, &bundle).with_layout(layout),
+                    &trust,
+                    segment_size,
+                    None,
+                )
+                .unwrap();
+                let result = Engine::new().execute_split(plan, &OperationSession::new());
+                assert_eq!(result.outcome(), Some(OperationOutcome::SplitCreated));
+                assert_eq!(
+                    result.split_receipt_commit_state(),
+                    Some(SplitReceiptCommitState::ConfirmedCommitted)
+                );
+                let output = result.split_output_paths().unwrap();
+                let first_member = match layout {
+                    SplitLayout::LegacyXc => "game.xc0",
+                    SplitLayout::LegacyNs => "game.ns0",
+                    SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+                };
+                assert_eq!(
+                    resolve_bytes(&bundle, output.canonical_directory(), &trust),
+                    source_bytes
+                );
+
+                let member = output.canonical_directory().join(first_member);
+                let resolved = Engine::new()
+                    .resolve_inputs_with(
+                        InputResolutionRequest::new(&bundle).with_path(&member),
+                        InputResolutionCapabilities::new().with_split_trust_store(&trust),
+                    )
+                    .unwrap();
+                let opened = resolved.inputs[0]
+                    .segments
+                    .iter()
+                    .map(|segment| open_segment_file(&segment.path, segment.size).unwrap())
+                    .collect();
+                let mut reader = SegmentedFileReader::from_segments(opened).unwrap();
+                let mut reconstructed = Vec::new();
+                reader.read_to_end(&mut reconstructed).unwrap();
+                assert_eq!(reconstructed, source_bytes);
+
+                if multipart {
+                    let start = segment_size.saturating_sub(2) as usize;
+                    let end = (start + 7).min(source_bytes.len());
+                    reader.seek(SeekFrom::Start(start as u64)).unwrap();
+                    let mut crossing = vec![0; end - start];
+                    reader.read_exact(&mut crossing).unwrap();
+                    assert_eq!(crossing, source_bytes[start..end]);
+                }
+
+                let journal_path = fs::read_dir(bundle.parent().unwrap())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.extension()
+                            .is_some_and(|extension| extension == "journal")
+                    })
+                    .expect("completed transaction journal");
+                let journal = fs::read_to_string(journal_path).unwrap();
+                for line in journal.lines() {
+                    let record: serde_json::Value = serde_json::from_str(line).unwrap();
+                    assert_eq!(record["version"], 2);
+                    assert_eq!(
+                        record["layout"],
+                        match layout {
+                            SplitLayout::LegacyXc => "legacy_xc",
+                            SplitLayout::LegacyNs => "legacy_ns",
+                            SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+                        }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn real_multipart_writer_resolver_and_virtual_reader_round_trip() {
         let root = tempfile::tempdir().unwrap();
         let source_bytes = b"abcdefghij";
@@ -8516,6 +9644,9 @@ mod producer_tests {
             })
             .expect("completed transaction journal");
         let journal = fs::read_to_string(journal_path).unwrap();
+        assert!(journal.lines().all(|line| {
+            serde_json::from_str::<serde_json::Value>(line).unwrap()["version"] == 1
+        }));
         let phases = journal
             .lines()
             .map(|line| {
@@ -9624,9 +10755,11 @@ mod producer_tests {
                         failure.code(),
                         OperationFailureCode::DestinationBusy
                             | OperationFailureCode::Busy
+                            | OperationFailureCode::DestinationChanged
                             | OperationFailureCode::StalePlan
                     )
-                })
+                }),
+            "unexpected concurrent failure disposition: {dispositions:?}"
         );
         assert!(!staging_path.exists());
         assert_eq!(
@@ -10709,6 +11842,69 @@ mod producer_tests {
     }
 
     #[test]
+    fn legacy_layouts_reject_nonidentical_replacement_without_mutating_bundle() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            replacement_bytes,
+            segment_size,
+            first_member,
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let created = Engine::new().execute_split(plan, &OperationSession::new());
+            assert_eq!(created.outcome(), Some(OperationOutcome::SplitCreated));
+
+            let manifest_path = bundle.join(format!("{source_name}.nscb-split.json"));
+            let manifest_before = fs::read(&manifest_path).unwrap();
+            let manifest_digest = crate::Sha256Digest::digest(&manifest_before);
+            assert_eq!(
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes),
+                manifest_digest
+            );
+            assert!(trust.lookup(&manifest_digest).unwrap().is_some());
+
+            fs::write(&source, &replacement_bytes).unwrap();
+            let error = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle)
+                    .with_layout(layout)
+                    .with_conflict_policy(crate::ConflictPolicy::Replace),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap_err();
+
+            assert_eq!(
+                error.code(),
+                OperationFailureCode::SplitReplacementUnsupported,
+                "{layout:?}"
+            );
+            assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+            assert_eq!(
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes),
+                manifest_digest
+            );
+            assert!(trust.lookup(&manifest_digest).unwrap().is_some());
+        }
+    }
+
+    #[test]
     fn replace_rejects_an_occupied_file_destination_as_unsupported() {
         let root = tempfile::tempdir().unwrap();
         let (source, bundle, state_path) = setup(root.path(), b"old source bytes");
@@ -11047,6 +12243,500 @@ mod producer_tests {
                 .collect::<Vec<_>>(),
             b"new source bytes"
         );
+    }
+
+    struct LegacyRecoveryCase {
+        layout: SplitLayout,
+        source_name: &'static str,
+        source_bytes: Vec<u8>,
+        replacement_bytes: Vec<u8>,
+        segment_size: u64,
+        first_member: &'static str,
+    }
+
+    fn legacy_recovery_cases() -> [LegacyRecoveryCase; 2] {
+        let original_nsp = pfs0_with_one_member("payload.bin", b"original legacy payload");
+        let replacement_nsp = pfs0_with_one_member("payload.bin", b"replacement payload");
+        let original_xci = crate::test_synthetic_xci::valid().image;
+        let mut replacement_xci_fixture = crate::test_synthetic_xci::valid();
+        let replacement_program = replacement_xci_fixture.secure_entries[1];
+        replacement_xci_fixture.image[replacement_program.data_offset + 0x404] = 5;
+        let replacement_xci = replacement_xci_fixture.image;
+        let xci_segment_size = original_xci.len().div_ceil(4) as u64;
+
+        [
+            LegacyRecoveryCase {
+                layout: SplitLayout::LegacyNs,
+                source_name: "game.nsp",
+                source_bytes: original_nsp,
+                replacement_bytes: replacement_nsp,
+                segment_size: 16,
+                first_member: "game.ns0",
+            },
+            LegacyRecoveryCase {
+                layout: SplitLayout::LegacyXc,
+                source_name: "game.xci",
+                source_bytes: original_xci,
+                replacement_bytes: replacement_xci,
+                segment_size: xci_segment_size,
+                first_member: "game.xc0",
+            },
+        ]
+    }
+
+    fn assert_legacy_artifact_bytes(
+        artifact_root: &Path,
+        source_name: &str,
+        first_member: &str,
+        source_bytes: &[u8],
+    ) -> super::Sha256Digest {
+        let split_directory = artifact_root.join(source_name);
+        assert!(split_directory.is_dir());
+        assert!(split_directory.join(first_member).is_file());
+        assert!(!split_directory.join("00").exists());
+
+        let manifest_bytes =
+            fs::read(artifact_root.join(format!("{source_name}.nscb-split.json"))).unwrap();
+        let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+        assert_eq!(manifest["schema_version"], 2);
+        assert_eq!(manifest["segments"][0]["name"], first_member);
+        let reconstructed = manifest["segments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|segment| {
+                fs::read(split_directory.join(segment["name"].as_str().unwrap())).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(reconstructed, source_bytes);
+        super::Sha256Digest::digest(&manifest_bytes)
+    }
+
+    #[test]
+    fn interrupted_legacy_create_recovers_and_publishes_declared_members() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            seed_cleanup_lease_state(&trust);
+
+            let interrupted = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::SimulatedInterruptionAfterPublication),
+            )
+            .unwrap();
+            let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
+            assert_eq!(
+                interruption.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let recovery_result = Engine::new().execute_split(retry, &OperationSession::new());
+            assert_eq!(
+                recovery_result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::DestinationChanged)
+            );
+            assert!(!bundle.exists());
+
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let result = Engine::new().execute_split(retry, &OperationSession::new());
+
+            assert_eq!(result.outcome(), Some(OperationOutcome::SplitCreated));
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::ConfirmedCommitted)
+            );
+            let split_directory = bundle.join(source_name);
+            assert!(split_directory.join(first_member).is_file());
+            assert!(!split_directory.join("00").exists());
+            let manifest_bytes =
+                fs::read(bundle.join(format!("{source_name}.nscb-split.json"))).unwrap();
+            let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+            assert_eq!(manifest["schema_version"], 2);
+            assert_eq!(manifest["segments"][0]["name"], first_member);
+            let reconstructed = manifest["segments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|segment| {
+                    fs::read(split_directory.join(segment["name"].as_str().unwrap())).unwrap()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(reconstructed, source_bytes);
+        }
+    }
+
+    #[test]
+    fn committed_legacy_journal_recovers_with_manifest_member_names() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes: original_source,
+            replacement_bytes: replacement_source,
+            segment_size,
+            first_member,
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &original_source).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+
+            let interrupted = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::SimulatedInterruptionAfterReceiptCommitted),
+            )
+            .unwrap();
+            let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
+            assert_eq!(
+                interruption.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                interruption.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::ConfirmedCommitted)
+            );
+
+            fs::write(&source, replacement_source).unwrap();
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let result = Engine::new().execute_split(retry, &OperationSession::new());
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::DestinationConflict)
+            );
+
+            let journal_path = fs::read_dir(&output_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension() == Some(OsStr::new("journal")))
+                .unwrap();
+            let journal = fs::read(journal_path).unwrap();
+            let last_record = journal
+                .split(|byte| *byte == b'\n')
+                .rev()
+                .find(|line| !line.is_empty())
+                .unwrap();
+            let record: serde_json::Value = serde_json::from_slice(last_record).unwrap();
+            assert_eq!(record["version"], 2);
+            assert_eq!(
+                record["layout"],
+                match layout {
+                    SplitLayout::LegacyXc => "legacy_xc",
+                    SplitLayout::LegacyNs => "legacy_ns",
+                    SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+                }
+            );
+            assert_eq!(record["phase"], "completed");
+            assert_eq!(record["segment_names"][0], first_member);
+            assert_eq!(
+                fs::read(bundle.join(source_name).join(first_member)).unwrap(),
+                &original_source[..segment_size as usize]
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_cancellation_before_publication_retains_unpublished_artifacts_without_receipt() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::CancelDuringStagedVerification),
+            )
+            .unwrap();
+
+            let result = Engine::new().execute_split(plan, &OperationSession::new());
+
+            assert_eq!(result.state(), crate::JobState::Cancelled);
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::Cancelled)
+            );
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(result.cleanup_artifact_retained());
+            assert!(!bundle.exists());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            let recovery = result
+                .split_output_paths()
+                .unwrap()
+                .recovery_bundle_directory()
+                .unwrap();
+            assert!(recovery.is_dir());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(recovery, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_promotion_failure_retains_staged_members_without_receipt() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::FailureAtPromotion),
+            )
+            .unwrap();
+
+            let result = Engine::new().execute_split(plan, &OperationSession::new());
+
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationFailed)
+            );
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(result.cleanup_artifact_retained());
+            assert!(!bundle.exists());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            let recovery = result
+                .split_output_paths()
+                .unwrap()
+                .recovery_bundle_directory()
+                .unwrap();
+            assert!(recovery.is_dir());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(recovery, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_receipt_commit_uncertainty_retains_published_members_for_both_layouts() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let inner = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            inner
+                .issue(SplitTrustReceipt::new(
+                    super::Sha256Digest::digest(b"unrelated manifest"),
+                    1,
+                    super::Sha256Digest::digest(b"unrelated source"),
+                ))
+                .unwrap();
+            let trust = NoCleanupLeaseWriter { inner };
+            let plan = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::FailureBeforeReceiptCommit),
+            )
+            .unwrap();
+
+            let result = Engine::new().execute_split(plan, &OperationSession::new());
+
+            assert_eq!(
+                result.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                result.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(result.cleanup_artifact_retained());
+            assert!(bundle.is_dir());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            let recovery = result
+                .split_output_paths()
+                .unwrap()
+                .recovery_bundle_directory()
+                .unwrap();
+            assert_eq!(recovery, bundle.canonicalize().unwrap());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(recovery, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn legacy_recovery_rejects_journal_layout_member_mismatch_without_mutation() {
+        for LegacyRecoveryCase {
+            layout,
+            source_name,
+            source_bytes,
+            segment_size,
+            first_member,
+            ..
+        } in legacy_recovery_cases()
+        {
+            let root = tempfile::tempdir().unwrap();
+            let output_parent = root.path().join("output");
+            fs::create_dir(&output_parent).unwrap();
+            let source = root.path().join(source_name);
+            fs::write(&source, &source_bytes).unwrap();
+            let bundle = output_parent.join(format!("{source_name}.split"));
+            let trust = LocalSplitTrustStore::new(root.path().join("state").join("split-trust"));
+            let interrupted = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                Some(SplitTestFailpoint::SimulatedInterruptionAfterPublication),
+            )
+            .unwrap();
+            let interruption = Engine::new().execute_split(interrupted, &OperationSession::new());
+            assert_eq!(
+                interruption.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                interruption.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::NotAttempted)
+            );
+            assert!(bundle.is_dir());
+            let manifest_digest =
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes);
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+
+            let journal_path = fs::read_dir(&output_parent)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "journal")
+                })
+                .expect("incomplete transaction journal");
+            let journal_before = fs::read(&journal_path).unwrap();
+            let mismatched_layout = match layout {
+                SplitLayout::LegacyXc => "legacy_ns",
+                SplitLayout::LegacyNs => "legacy_xc",
+                SplitLayout::Canonical => unreachable!("test covers legacy layouts"),
+            };
+            let mut mismatched_journal = Vec::new();
+            for line in journal_before
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                let mut record: serde_json::Value = serde_json::from_slice(line).unwrap();
+                record["layout"] = serde_json::Value::String(mismatched_layout.to_owned());
+                serde_json::to_writer(&mut mismatched_journal, &record).unwrap();
+                mismatched_journal.push(b'\n');
+            }
+            fs::write(&journal_path, &mismatched_journal).unwrap();
+            let mismatch_bytes = fs::read(&journal_path).unwrap();
+            assert_ne!(mismatch_bytes, journal_before);
+            let last_record = mismatch_bytes
+                .split(|byte| *byte == b'\n')
+                .rev()
+                .find(|line| !line.is_empty())
+                .unwrap();
+            let mismatched_record: serde_json::Value = serde_json::from_slice(last_record).unwrap();
+            assert_eq!(mismatched_record["layout"], mismatched_layout);
+            assert_eq!(mismatched_record["segment_names"][0], first_member);
+
+            let retry = plan_split_for_tests(
+                SplitRequest::new(&source, &bundle).with_layout(layout),
+                &trust,
+                segment_size,
+                None,
+            )
+            .unwrap();
+            let recovery = Engine::new().execute_split(retry, &OperationSession::new());
+
+            assert_eq!(
+                recovery.failure().map(|failure| failure.code()),
+                Some(OperationFailureCode::PublicationUncertain)
+            );
+            assert_eq!(
+                recovery.split_receipt_commit_state(),
+                Some(SplitReceiptCommitState::Uncertain)
+            );
+            assert!(recovery.cleanup_artifact_retained());
+            assert!(bundle.is_dir());
+            assert_eq!(fs::read(&source).unwrap(), source_bytes);
+            assert_eq!(fs::read(&journal_path).unwrap(), mismatch_bytes);
+            assert_eq!(
+                assert_legacy_artifact_bytes(&bundle, source_name, first_member, &source_bytes),
+                manifest_digest
+            );
+            assert!(trust.lookup(&manifest_digest).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -11709,6 +13399,8 @@ mod producer_tests {
             source_identity: super::identity_string(root_identity),
             source_size: 0,
             source_sha256: String::new(),
+            layout: None,
+            segment_names: Vec::new(),
             destination_parent_identity: None,
             journal_identity: None,
             journal_mode: None,
@@ -11766,6 +13458,7 @@ mod producer_tests {
                 bundle_directory: root.path().join("destination"),
                 canonical_directory: staging_path.clone(),
                 manifest_path: staging_path.join("split.json"),
+                layout: super::SplitLayout::Canonical,
                 recovery_bundle_directory: None,
             },
             super::SplitReceiptCommitState::NotAttempted,
@@ -11944,6 +13637,24 @@ mod producer_tests {
             interruption.split_receipt_commit_state(),
             Some(SplitReceiptCommitState::NotAttempted)
         );
+        let journal_path = fs::read_dir(bundle.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "journal")
+            })
+            .expect("interrupted canonical transaction journal");
+        for record_bytes in fs::read(&journal_path)
+            .unwrap()
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let record: serde_json::Value = serde_json::from_slice(record_bytes).unwrap();
+            assert_eq!(record["version"], 1);
+            assert!(record.get("layout").is_none());
+            assert!(record.get("segment_names").is_none());
+        }
         assert!(
             Engine::new()
                 .resolve_inputs_with(

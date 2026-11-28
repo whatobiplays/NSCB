@@ -18,7 +18,7 @@ use nscb::{
     InspectionRequest, InspectionResult, JobState, LocalSplitTrustStore, NcaContentId,
     NcaContentType, OperationEventConsumer, OperationEventKind, OperationFailureCode,
     OperationPlan, OperationResult, OperationSession, OperationSessionSnapshot, ProgramId,
-    SplitQualificationKind, SplitRequest, SplitTrustWriter, VerificationErrorCode,
+    SplitLayout, SplitQualificationKind, SplitRequest, SplitTrustWriter, VerificationErrorCode,
     VerificationProfile, VerificationRequest,
 };
 use serde::Serialize;
@@ -4131,6 +4131,7 @@ struct SplitInvocation {
     source: PathBuf,
     bundle_directory: Option<PathBuf>,
     conflict_policy: ConflictPolicy,
+    layout: SplitLayout,
     json: bool,
     jsonl: bool,
 }
@@ -4564,9 +4565,12 @@ fn parse_split(args: &[OsString]) -> Result<SplitInvocation, ()> {
     let mut positionals = Vec::new();
     let mut conflict_policy = ConflictPolicy::Fail;
     let mut conflict_selected = false;
+    let mut layout = SplitLayout::Canonical;
+    let mut layout_selected = false;
     let mut json = false;
     let mut jsonl = false;
-    for argument in args.iter().skip(1) {
+    let mut arguments = args.iter().skip(1).peekable();
+    while let Some(argument) = arguments.next() {
         if argument == OsStr::new("--replace") {
             if conflict_selected {
                 return Err(());
@@ -4579,6 +4583,17 @@ fn parse_split(args: &[OsString]) -> Result<SplitInvocation, ()> {
             }
             conflict_selected = true;
             conflict_policy = ConflictPolicy::Skip;
+        } else if argument == OsStr::new("--layout") {
+            if layout_selected {
+                return Err(());
+            }
+            layout_selected = true;
+            layout = match arguments.next().and_then(|value| value.to_str()) {
+                Some("canonical") => SplitLayout::Canonical,
+                Some("legacy-xc") => SplitLayout::LegacyXc,
+                Some("legacy-ns") => SplitLayout::LegacyNs,
+                _ => return Err(()),
+            };
         } else if argument == OsStr::new("--json") {
             if json {
                 return Err(());
@@ -4611,6 +4626,7 @@ fn parse_split(args: &[OsString]) -> Result<SplitInvocation, ()> {
         source,
         bundle_directory,
         conflict_policy,
+        layout,
         json,
         jsonl,
     })
@@ -6228,7 +6244,8 @@ fn run_split_impl(
         reporting.begin_planning();
     }
     let request = SplitRequest::new(&invocation.source, &bundle_directory)
-        .with_conflict_policy(invocation.conflict_policy);
+        .with_conflict_policy(invocation.conflict_policy)
+        .with_layout(invocation.layout);
     let plan = match engine.plan_split_with_cancellation(
         request,
         trust_store,
@@ -7424,7 +7441,7 @@ mod split_cli_tests {
     use super::parse_split;
     #[cfg(target_os = "macos")]
     use super::run_split_with_trust_store;
-    use nscb::ConflictPolicy;
+    use nscb::{ConflictPolicy, SplitLayout};
     #[cfg(target_os = "macos")]
     use nscb::{Engine, LocalSplitTrustStore};
     #[cfg(target_os = "macos")]
@@ -7453,11 +7470,19 @@ mod split_cli_tests {
             Some(std::path::Path::new("bundle"))
         );
         assert_eq!(invocation.conflict_policy, ConflictPolicy::Replace);
+        assert_eq!(invocation.layout, SplitLayout::Canonical);
         assert!(invocation.json);
         assert!(!invocation.jsonl);
 
         let skipped = parse_split(&args(&["split", "source.nca", "--skip"])).unwrap();
         assert_eq!(skipped.conflict_policy, ConflictPolicy::Skip);
+
+        let legacy_xc =
+            parse_split(&args(&["split", "source.xci", "--layout", "legacy-xc"])).unwrap();
+        assert_eq!(legacy_xc.layout, SplitLayout::LegacyXc);
+        let legacy_ns =
+            parse_split(&args(&["split", "source.nsp", "--layout", "legacy-ns"])).unwrap();
+        assert_eq!(legacy_ns.layout, SplitLayout::LegacyNs);
     }
 
     #[test]
@@ -7468,6 +7493,16 @@ mod split_cli_tests {
             &["split", "source.nca", "--json", "--jsonl"][..],
             &["split", "source.nca", "bundle", "extra"][..],
             &["split", "--json"][..],
+            &["split", "source.nca", "--layout"][..],
+            &["split", "source.nca", "--layout", "legacy-xci"][..],
+            &[
+                "split",
+                "source.nca",
+                "--layout",
+                "legacy-xc",
+                "--layout",
+                "legacy-ns",
+            ][..],
         ] {
             assert!(parse_split(&args(invalid)).is_err(), "accepted {invalid:?}");
         }

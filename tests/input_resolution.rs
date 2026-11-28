@@ -5,11 +5,12 @@ use nscb::CopyBatchRequest;
 use nscb::{
     Engine, InputResolutionBatchRequest, InputResolutionCapabilities, InputResolutionControl,
     InputResolutionErrorCode, InputResolutionRequest, InputSelectionSource, LocalSplitTrustStore,
+    Sha256Digest, SplitTrustReceipt, SplitTrustWriter,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use support::split_fixture::SplitFixture;
+use support::split_fixture::{SplitFixture, sidecar_path};
 
 static NEXT_TREE: AtomicU64 = AtomicU64::new(1);
 
@@ -50,6 +51,186 @@ fn resolve(request: InputResolutionRequest) -> nscb::InputResolutionResult {
     Engine::new()
         .resolve_inputs(request)
         .expect("resolve input selection")
+}
+
+fn write_trusted_legacy_split(
+    bundle: &Path,
+    directory_name: &str,
+    stem: &str,
+    layout: &str,
+    source: &[u8],
+    part_size: usize,
+    store: &LocalSplitTrustStore,
+) -> (PathBuf, Vec<String>) {
+    let fixture = SplitFixture::new(source, part_size);
+    let suffix = match layout {
+        "legacy_xc" => "xc",
+        "legacy_ns" => "ns",
+        _ => unreachable!("test layout is supported"),
+    };
+    let member_names = (0..fixture.parts.len())
+        .map(|index| format!("{stem}.{suffix}{index}"))
+        .collect::<Vec<_>>();
+    let segments = fixture
+        .parts
+        .iter()
+        .enumerate()
+        .map(|(index, part)| {
+            serde_json::json!({
+                "name": &member_names[index],
+                "size_bytes": part.len(),
+                "sha256": Sha256Digest::digest(part).to_hex(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let manifest = serde_json::to_vec(&serde_json::json!({
+        "schema_version": 2,
+        "kind": "nscb.split_manifest",
+        "required_features": [],
+        "layout": layout,
+        "source": {
+            "size_bytes": fixture.source.len(),
+            "sha256": fixture.source_sha256.to_hex(),
+        },
+        "segments": segments,
+    }))
+    .expect("serialize legacy Split manifest");
+
+    let directory = bundle.join(directory_name);
+    fs::create_dir_all(&directory).expect("create legacy Split directory");
+    for (name, part) in member_names.iter().zip(&fixture.parts) {
+        fs::write(directory.join(name), part).expect("write legacy Split member");
+    }
+    fs::write(sidecar_path(&directory), &manifest).expect("write legacy Split manifest");
+    store
+        .issue(SplitTrustReceipt::new(
+            Sha256Digest::digest(&manifest),
+            fixture.source.len() as u64,
+            fixture.source_sha256,
+        ))
+        .expect("issue trusted legacy Split receipt");
+
+    (directory, member_names)
+}
+
+#[test]
+fn trusted_legacy_resolver_accepts_one_hundred_members_after_outer_bundle_relocation() {
+    let source = (0..100).map(|value| value as u8).collect::<Vec<_>>();
+
+    for (layout, directory_name, suffix) in [
+        ("legacy_xc", "game.xci", "xc"),
+        ("legacy_ns", "game.nsp", "ns"),
+    ] {
+        let tree = TempTree::new();
+        let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+        let bundle = tree.path().join("original-bundle");
+        let (_, member_names) =
+            write_trusted_legacy_split(&bundle, directory_name, "game", layout, &source, 1, &store);
+        assert_eq!(member_names.len(), 100);
+
+        let relocated_bundle = tree.path().join("relocated-bundle");
+        fs::rename(&bundle, &relocated_bundle).expect("relocate outer legacy bundle");
+        let selected_directory = PathBuf::from("relocated-bundle").join(directory_name);
+        let selected_member = selected_directory.join(format!("game.{suffix}99"));
+        for selected_path in [selected_directory, selected_member] {
+            let resolved = Engine::new()
+                .resolve_inputs_with(
+                    request(&tree).with_path(selected_path),
+                    InputResolutionCapabilities::new().with_split_trust_store(&store),
+                )
+                .expect("resolve trusted legacy Split from directory or member 99");
+
+            let input = &resolved.inputs[0];
+            assert_eq!(input.segments.len(), 100);
+            assert_eq!(
+                input.segments[99]
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy(),
+                format!("game.{suffix}99")
+            );
+            let reconstructed = input
+                .segments
+                .iter()
+                .flat_map(|segment| fs::read(&segment.path).expect("read resolved member"))
+                .collect::<Vec<_>>();
+            assert_eq!(reconstructed, source);
+        }
+    }
+}
+
+#[test]
+fn trusted_canonical_v1_split_remains_valid_after_directory_rename() {
+    let tree = TempTree::new();
+    let fixture = SplitFixture::new(b"canonical rename remains supported", 8);
+    let original_directory = fixture.write(tree.path(), "original-name");
+    let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+    fixture.issue(&store);
+
+    let renamed_directory = tree.path().join("renamed-name");
+    fs::rename(&original_directory, &renamed_directory).expect("rename canonical directory");
+    fs::rename(
+        sidecar_path(&original_directory),
+        sidecar_path(&renamed_directory),
+    )
+    .expect("rename canonical manifest sidecar");
+
+    let resolved = Engine::new()
+        .resolve_inputs_with(
+            request(&tree).with_path("renamed-name"),
+            InputResolutionCapabilities::new().with_split_trust_store(&store),
+        )
+        .expect("resolve renamed schema-v1 Split");
+    let input = &resolved.inputs[0];
+    assert_eq!(input.segments.len(), fixture.parts.len());
+    assert!(input.segments.iter().enumerate().all(|(index, segment)| {
+        segment
+            .path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+            == format!("{index:02}")
+    }));
+    let reconstructed = input
+        .segments
+        .iter()
+        .flat_map(|segment| fs::read(&segment.path).expect("read canonical member"))
+        .collect::<Vec<_>>();
+    assert_eq!(reconstructed, fixture.source);
+}
+
+#[test]
+fn mismatched_v2_legacy_stem_is_rejected_before_members_are_consumed() {
+    for (directory_name, layout) in [("renamed.xci", "legacy_xc"), ("renamed.nsp", "legacy_ns")] {
+        let tree = TempTree::new();
+        let store = LocalSplitTrustStore::new(tree.path().join("state").join("split-trust"));
+        let bundle = tree.path().join("mismatched-bundle");
+        let (directory, member_names) = write_trusted_legacy_split(
+            &bundle,
+            directory_name,
+            "game",
+            layout,
+            b"mismatched legacy stem",
+            8,
+            &store,
+        );
+        fs::remove_file(directory.join(&member_names[0]))
+            .expect("remove member for ordering check");
+
+        let error = Engine::new()
+            .resolve_inputs_with(
+                request(&tree).with_path(format!("mismatched-bundle/{directory_name}")),
+                InputResolutionCapabilities::new().with_split_trust_store(&store),
+            )
+            .expect_err("reject a v2 stem mismatch before looking up members");
+        assert_eq!(
+            error.code(),
+            InputResolutionErrorCode::SplitManifestInvalid,
+            "layout {layout}"
+        );
+    }
 }
 
 #[test]
@@ -413,23 +594,22 @@ fn normalized_case_and_unicode_aliases_are_duplicate_selections() {
 #[test]
 fn suspected_split_parts_fail_before_standalone_or_extension_handling() {
     let tree = TempTree::new();
-    for name in [
-        "game.xc0",
-        "game.xc1",
-        "game.ns0",
-        "game.ns12",
-        "game.00",
-        "game.nsp.00",
+    for (name, expected_error) in [
+        ("game.xc0", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.xc1", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.ns0", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.ns12", InputResolutionErrorCode::SplitManifestMissing),
+        ("game.00", InputResolutionErrorCode::UnsupportedSplitLayout),
+        (
+            "game.nsp.00",
+            InputResolutionErrorCode::UnsupportedSplitLayout,
+        ),
     ] {
         tree.write(name, b"segment");
         let error = Engine::new()
             .resolve_inputs(request(&tree).with_path(name))
             .expect_err("suspected Split segments are not standalone inputs");
-        assert_eq!(
-            error.code(),
-            InputResolutionErrorCode::UnsupportedSplitLayout,
-            "{name}"
-        );
+        assert_eq!(error.code(), expected_error, "{name}");
     }
     tree.write("00", b"segment");
     let error = Engine::new()
@@ -854,10 +1034,7 @@ fn batch_resolution_keeps_duplicate_and_unsafe_split_failures_global() {
                 .with_path("game.xc0"),
         )
         .expect_err("unsafe Split qualification must reject the batch");
-    assert_eq!(
-        error.code(),
-        InputResolutionErrorCode::UnsupportedSplitLayout
-    );
+    assert_eq!(error.code(), InputResolutionErrorCode::SplitManifestMissing);
 }
 
 #[test]

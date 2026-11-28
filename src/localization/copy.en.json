@@ -28,6 +28,7 @@
     "destination_collision": "More than one batch item maps to the same destination.",
     "source_unavailable": "The source file is unavailable or is not a regular file.",
     "split_input_unsupported": "Copy-through does not accept Split inputs.",
+  "unsupported_split_layout": "The source does not qualify for the selected Split layout.",
     "split_source_size_unsupported": "The source is empty or requires more than 100 Split segments.",
     "split_state_unavailable": "The host-owned Split trust store could not confirm its durable state.",
     "source_changed": "The source changed after the operation was planned.",
